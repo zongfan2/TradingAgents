@@ -16,6 +16,7 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_MAX_DEBATE_ROUNDS":    "max_debate_rounds",
     "TRADINGAGENTS_MAX_RISK_ROUNDS":      "max_risk_discuss_rounds",
     "TRADINGAGENTS_CHECKPOINT_ENABLED":   "checkpoint_enabled",
+    "TRADINGAGENTS_MACRO_SOURCE":         "macro_source",
     "TRADINGAGENTS_BENCHMARK_TICKER":     "benchmark_ticker",
     "TRADINGAGENTS_TEMPERATURE":          "temperature",
     "TRADINGAGENTS_LLM_MAX_RETRIES":      "llm_max_retries",
@@ -30,6 +31,13 @@ _ENV_OVERRIDES = {
 
 _BOOL_TRUE = ("true", "1", "yes", "on")
 _BOOL_FALSE = ("false", "0", "no", "off")
+
+# Enum-like env keys: values are normalized (strip/lower) and must be in the
+# allowed set. Same fail-loud policy as _coerce — a typo'd arm name must fail
+# at startup, not silently select the other arm (e.g. the macro A/B switch).
+_ENV_CHOICES = {
+    "macro_source": ("feeds", "brief"),
+}
 
 
 def _coerce(value: str, reference):
@@ -62,7 +70,14 @@ def _apply_env_overrides(config: dict) -> dict:
         if raw is None or raw == "":
             continue
         try:
-            config[key] = _coerce(raw, config.get(key))
+            value = _coerce(raw, config.get(key))
+            if key in _ENV_CHOICES:
+                value = value.strip().lower()
+                if value not in _ENV_CHOICES[key]:
+                    raise ValueError(
+                        f"expected one of {'/'.join(_ENV_CHOICES[key])}, got {raw!r}"
+                    )
+            config[key] = value
         except ValueError as exc:
             raise ValueError(f"Invalid value for {env_var}: {exc}") from exc
     return config
@@ -137,7 +152,16 @@ DEFAULT_CONFIG = _apply_env_overrides({
         "news_data": "yfinance",             # Options: alpha_vantage, yfinance
         "macro_data": "fred",                # Options: fred (needs FRED_API_KEY)
         "prediction_markets": "polymarket",  # Options: polymarket (keyless)
+        "macro_brief": "local",              # Options: local (reads macro_brief_dir)
     },
+    # Macro information source for the news analyst: "feeds" = fixed macro
+    # queries + FRED (upstream behavior); "brief" = the pre-compiled daily
+    # deep-search brief (specs/macro-brief-data-contract.md). A/B switch.
+    "macro_source": "feeds",
+    # Where the offline collector drops daily macro briefs.
+    "macro_brief_dir": os.getenv(
+        "TRADINGAGENTS_MACRO_BRIEF_DIR", os.path.join(_TRADINGAGENTS_HOME, "macro_briefs")
+    ),
     # Tool-level configuration (takes precedence over category-level)
     "tool_vendors": {
         # Example: "get_stock_data": "alpha_vantage",  # Override category default

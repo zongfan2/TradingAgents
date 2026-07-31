@@ -4,10 +4,41 @@ from tradingagents.agents.utils.agent_utils import (
     get_global_news,
     get_instrument_context_from_state,
     get_language_instruction,
+    get_macro_brief,
     get_macro_indicators,
     get_news,
     get_prediction_markets,
+    search_news,
 )
+from tradingagents.dataflows.config import get_config
+
+
+def _select_macro_tools(macro_source):
+    """Macro-arm tools plus the matching prompt fragment (A/B switch).
+
+    "brief" consumes the pre-compiled daily deep-search brief; "feeds" is the
+    upstream fixed-feed behavior. Values are normalized (strip/lower); anything
+    else raises — a typo'd arm must not silently run the wrong A/B arm.
+    See specs/macro-brief-pipeline.md.
+    """
+    macro_source = (macro_source or "feeds").strip().lower()
+    if macro_source not in ("feeds", "brief"):
+        raise ValueError(
+            f"Unknown macro_source {macro_source!r}; expected 'feeds' or 'brief'"
+        )
+    if macro_source == "brief":
+        return [get_macro_brief], (
+            "get_macro_brief(curr_date) for the pre-compiled daily macro research "
+            "brief covering monetary policy, growth and earnings, geopolitics, "
+            "global liquidity, commodities, and China/Asia — ground ALL macro "
+            "commentary in this brief and cite its as-of date, "
+        )
+    return [get_global_news, get_macro_indicators], (
+        "get_global_news(curr_date, look_back_days, limit) for broader macroeconomic news, "
+        "get_macro_indicators(indicator, curr_date, look_back_days) to ground macro "
+        "commentary in actual data from FRED (e.g. 'cpi', 'core_pce', 'unemployment', "
+        "'fed_funds_rate', '10y_treasury', 'yield_curve'), "
+    )
 
 
 def create_news_analyst(llm):
@@ -17,15 +48,18 @@ def create_news_analyst(llm):
         asset_label = "company" if asset_type == "stock" else "asset"
         instrument_context = get_instrument_context_from_state(state)
 
+        macro_tools, macro_tools_desc = _select_macro_tools(
+            get_config().get("macro_source", "feeds")
+        )
         tools = [
             get_news,
-            get_global_news,
-            get_macro_indicators,
+            *macro_tools,
+            search_news,
             get_prediction_markets,
         ]
 
         system_message = (
-            f"You are a news researcher tasked with analyzing recent news and trends over the past week. Please write a comprehensive report of the current state of the world that is relevant for trading and macroeconomics. Use the available tools: get_news(ticker, start_date, end_date) for {asset_label}-specific news by ticker symbol, get_global_news(curr_date, look_back_days, limit) for broader macroeconomic news, get_macro_indicators(indicator, curr_date, look_back_days) to ground macro commentary in actual data from FRED (e.g. 'cpi', 'core_pce', 'unemployment', 'fed_funds_rate', '10y_treasury', 'yield_curve'), and get_prediction_markets(topic, limit) for live market-implied probabilities of forward-looking events (e.g. 'Fed rate cut', 'recession 2026', geopolitical or sector events). Provide specific, actionable insights with supporting evidence to help traders make informed decisions."
+            f"You are a news researcher tasked with analyzing recent news and trends over the past week. Please write a comprehensive report of the current state of the world that is relevant for trading and macroeconomics. Use the available tools: get_news(ticker, start_date, end_date) for {asset_label}-specific news by ticker symbol, {macro_tools_desc}and get_prediction_markets(topic, limit) for live market-implied probabilities of forward-looking events (e.g. 'Fed rate cut', 'recession 2026', geopolitical or sector events). Beyond those, use search_news(query, curr_date) to investigate angles you judge relevant on your own initiative — competitors, suppliers, customers, regulation, sector dynamics — and follow up on leads from headlines with refined queries. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."
             + """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
             + get_language_instruction()
         )

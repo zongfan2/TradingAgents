@@ -34,3 +34,23 @@ def get_macro_indicators(
         str: A formatted markdown report of the macro series
     """
     return route_to_vendor("get_macro_indicators", indicator, curr_date, look_back_days)
+
+
+@tool
+def get_macro_brief(
+    curr_date: Annotated[str, "Current date in yyyy-mm-dd format"],
+) -> str:
+    """
+    Retrieve the pre-compiled daily macro research brief: a cited, deep-search
+    digest covering monetary policy, growth and earnings, geopolitics, global
+    liquidity, commodities, and China/Asia, plus a surprises watchlist. The
+    brief states its own as-of date; treat that date as the information cutoff.
+    Uses the configured macro_brief vendor.
+
+    Args:
+        curr_date (str): Current date in yyyy-mm-dd format
+
+    Returns:
+        str: The full macro brief in markdown, prefixed with its as-of header
+    """
+    return route_to_vendor("get_macro_brief", curr_date)

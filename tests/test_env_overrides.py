@@ -120,6 +120,23 @@ def test_invalid_bool_raises(monkeypatch, bad):
     importlib.reload(default_config_module)
 
 
+@pytest.mark.parametrize("variant", ["brief", "Brief", " BRIEF "])
+def test_macro_source_env_normalizes(monkeypatch, variant):
+    """The enum-like macro_source override is case/whitespace-normalized."""
+    dc = _reload_with_env(monkeypatch, TRADINGAGENTS_MACRO_SOURCE=variant)
+    assert dc.DEFAULT_CONFIG["macro_source"] == "brief"
+
+
+@pytest.mark.parametrize("bad", ["briefs", "feed", "deep-search", "true"])
+def test_invalid_macro_source_raises(monkeypatch, bad):
+    """A typo'd A/B arm must fail at startup, not silently select the other arm."""
+    monkeypatch.setenv("TRADINGAGENTS_MACRO_SOURCE", bad)
+    with pytest.raises(ValueError, match="TRADINGAGENTS_MACRO_SOURCE"):
+        importlib.reload(default_config_module)
+    monkeypatch.delenv("TRADINGAGENTS_MACRO_SOURCE", raising=False)
+    importlib.reload(default_config_module)
+
+
 def test_unknown_env_var_is_ignored(monkeypatch):
     """Env vars outside _ENV_OVERRIDES must not bleed into DEFAULT_CONFIG."""
     dc = _reload_with_env(
