@@ -137,6 +137,57 @@ def test_invalid_macro_source_raises(monkeypatch, bad):
     importlib.reload(default_config_module)
 
 
+@pytest.mark.parametrize("variant", ["brief", "Brief", " BRIEF "])
+def test_ticker_source_env_normalizes(monkeypatch, variant):
+    """The enum-like ticker_source override is case/whitespace-normalized."""
+    dc = _reload_with_env(monkeypatch, TRADINGAGENTS_TICKER_SOURCE=variant)
+    assert dc.DEFAULT_CONFIG["ticker_source"] == "brief"
+
+
+@pytest.mark.parametrize("bad", ["briefs", "feed", "deep-search", "true"])
+def test_invalid_ticker_source_raises(monkeypatch, bad):
+    """A typo'd A/B arm must fail at startup, not silently select the other arm."""
+    monkeypatch.setenv("TRADINGAGENTS_TICKER_SOURCE", bad)
+    with pytest.raises(ValueError, match="TRADINGAGENTS_TICKER_SOURCE"):
+        importlib.reload(default_config_module)
+    monkeypatch.delenv("TRADINGAGENTS_TICKER_SOURCE", raising=False)
+    importlib.reload(default_config_module)
+
+
+def test_ticker_source_defaults_to_feeds(monkeypatch):
+    """Prime directive: without env overrides both arms sit on upstream behavior."""
+    dc = _reload_with_env(monkeypatch)
+    assert dc.DEFAULT_CONFIG["ticker_source"] == "feeds"
+    assert dc.DEFAULT_CONFIG["macro_source"] == "feeds"
+    assert dc.DEFAULT_CONFIG["polymarket_enabled"] is True
+
+
+@pytest.mark.parametrize(
+    "raw,expected", [("false", False), ("0", False), ("true", True), ("on", True)]
+)
+def test_polymarket_enabled_env_coerces_bool(monkeypatch, raw, expected):
+    dc = _reload_with_env(monkeypatch, TRADINGAGENTS_POLYMARKET_ENABLED=raw)
+    assert dc.DEFAULT_CONFIG["polymarket_enabled"] is expected
+
+
+def test_invalid_polymarket_enabled_raises(monkeypatch):
+    monkeypatch.setenv("TRADINGAGENTS_POLYMARKET_ENABLED", "maybe")
+    with pytest.raises(ValueError, match="TRADINGAGENTS_POLYMARKET_ENABLED"):
+        importlib.reload(default_config_module)
+    monkeypatch.delenv("TRADINGAGENTS_POLYMARKET_ENABLED", raising=False)
+    importlib.reload(default_config_module)
+
+
+def test_ticker_brief_dir_env_override(monkeypatch):
+    """ticker_brief_dir follows the macro_brief_dir direct-getenv pattern."""
+    monkeypatch.setenv("TRADINGAGENTS_TICKER_BRIEF_DIR", "/tmp/tb-override")
+    dc = importlib.reload(default_config_module)
+    assert dc.DEFAULT_CONFIG["ticker_brief_dir"] == "/tmp/tb-override"
+    monkeypatch.delenv("TRADINGAGENTS_TICKER_BRIEF_DIR", raising=False)
+    dc = importlib.reload(default_config_module)
+    assert dc.DEFAULT_CONFIG["ticker_brief_dir"].endswith("ticker_briefs")
+
+
 def test_unknown_env_var_is_ignored(monkeypatch):
     """Env vars outside _ENV_OVERRIDES must not bleed into DEFAULT_CONFIG."""
     dc = _reload_with_env(

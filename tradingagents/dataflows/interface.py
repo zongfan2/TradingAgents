@@ -20,6 +20,7 @@ from .errors import (
 from .fred import get_macro_data as get_fred_macro_data
 from .macro_brief import get_macro_brief_local
 from .polymarket import get_prediction_markets as get_polymarket_prediction_markets
+from .ticker_brief import get_ticker_brief_local
 from .y_finance import (
     get_balance_sheet as get_yfinance_balance_sheet,
     get_cashflow as get_yfinance_cashflow,
@@ -82,6 +83,12 @@ TOOLS_CATEGORIES = {
         "tools": [
             "get_macro_brief",
         ]
+    },
+    "ticker_brief": {
+        "description": "Pre-compiled daily deep-search ticker brief (offline collector)",
+        "tools": [
+            "get_ticker_brief",
+        ]
     }
 }
 
@@ -97,7 +104,7 @@ VENDOR_LIST = [
 # sentinel instead of aborting the run (a bad LLM-supplied indicator, a missing
 # key, or a network blip should not crash an analysis over flavour data). Core
 # categories (prices, fundamentals, news) still raise so a broken primary is loud.
-OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets", "macro_brief"}
+OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets", "macro_brief", "ticker_brief"}
 
 # Mapping of methods to their vendor-specific implementations
 VENDOR_METHODS = {
@@ -157,6 +164,10 @@ VENDOR_METHODS = {
     # macro_brief
     "get_macro_brief": {
         "local": get_macro_brief_local,
+    },
+    # ticker_brief
+    "get_ticker_brief": {
+        "local": get_ticker_brief_local,
     },
 }
 

@@ -25,6 +25,7 @@ from tradingagents.agents.utils.agent_utils import (
     get_news,
     get_prediction_markets,
     get_stock_data,
+    get_ticker_brief,
     get_verified_market_snapshot,
     resolve_instrument_identity,
     search_news,
@@ -210,15 +211,18 @@ class TradingAgentsGraph:
             ),
             "news": ToolNode(
                 [
-                    # News and insider information. Superset of both macro-source
-                    # arms: the arm only controls what is bound to the LLM, while
-                    # every tool stays executable here (see specs/macro-brief-pipeline.md).
+                    # News and insider information. Superset of every
+                    # macro_source/ticker_source arm: the switches only control
+                    # what is bound to the LLM, while every tool stays
+                    # executable here (see specs/macro-brief-pipeline.md and
+                    # specs/pipeline-consumption-v2.md).
                     get_news,
                     get_global_news,
                     search_news,
                     get_insider_transactions,
                     get_macro_indicators,
                     get_macro_brief,
+                    get_ticker_brief,
                     get_prediction_markets,
                 ]
             ),

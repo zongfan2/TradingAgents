@@ -141,3 +141,23 @@ def normalize_symbol(raw: str) -> str:
 def is_yahoo_safe(symbol: str) -> bool:
     """True when ``symbol`` only contains characters Yahoo symbols use."""
     return bool(symbol) and _YAHOO_SAFE.fullmatch(symbol) is not None
+
+
+# Exchange suffixes whose instruments trade in the ``cn`` session (A-shares and
+# Hong Kong). Deliberately duplicated from the offline pipeline tooling
+# (pipeline/common.py): the package stays self-contained and never imports from
+# pipeline/ (dependency direction — see AGENTS.md).
+_CN_SESSION_SUFFIXES = (".SS", ".SZ", ".HK")
+
+
+def session_for_ticker(ticker: str | None) -> str:
+    """Trading session a symbol belongs to: ``cn`` for ``.SS``/``.SZ``/``.HK``
+    suffixes, ``us`` for everything else (including a missing/empty ticker).
+
+    Mirrors the ticker-brief contract's session-uniqueness invariant
+    (specs/ticker-brief-data-contract.md); used to pick the session-scoped
+    macro brief for the instrument under analysis. Purely syntactic.
+    """
+    if not isinstance(ticker, str) or not ticker.strip():
+        return "us"
+    return "cn" if ticker.strip().upper().endswith(_CN_SESSION_SUFFIXES) else "us"

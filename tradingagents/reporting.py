@@ -9,6 +9,8 @@ run produces the same on-disk report tree a CLI run does.
 from datetime import datetime
 from pathlib import Path
 
+from tradingagents.dataflows.brief_evals import report_header_verdicts
+
 
 def write_report_tree(final_state: dict, ticker: str, save_path) -> Path:
     """Save a completed run's reports to ``save_path``; return the complete-report path."""
@@ -97,5 +99,11 @@ def write_report_tree(final_state: dict, ticker: str, save_path) -> Path:
 
     # Write consolidated report
     header = f"# Trading Analysis Report: {ticker}\n\nGenerated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+    # Eval verdict surfacing (specs/pipeline-consumption-v2.md §5): when a news
+    # arm consumed a pre-compiled brief, the header states that brief's eval
+    # verdict; feeds arms contribute nothing, keeping default output unchanged.
+    eval_lines = report_header_verdicts(ticker, final_state.get("trade_date"))
+    if eval_lines:
+        header += "\n".join(eval_lines) + "\n\n"
     (save_path / "complete_report.md").write_text(header + "\n\n".join(sections), encoding="utf-8")
     return save_path / "complete_report.md"

@@ -17,6 +17,8 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_MAX_RISK_ROUNDS":      "max_risk_discuss_rounds",
     "TRADINGAGENTS_CHECKPOINT_ENABLED":   "checkpoint_enabled",
     "TRADINGAGENTS_MACRO_SOURCE":         "macro_source",
+    "TRADINGAGENTS_TICKER_SOURCE":        "ticker_source",
+    "TRADINGAGENTS_POLYMARKET_ENABLED":   "polymarket_enabled",
     "TRADINGAGENTS_BENCHMARK_TICKER":     "benchmark_ticker",
     "TRADINGAGENTS_TEMPERATURE":          "temperature",
     "TRADINGAGENTS_LLM_MAX_RETRIES":      "llm_max_retries",
@@ -37,6 +39,7 @@ _BOOL_FALSE = ("false", "0", "no", "off")
 # at startup, not silently select the other arm (e.g. the macro A/B switch).
 _ENV_CHOICES = {
     "macro_source": ("feeds", "brief"),
+    "ticker_source": ("feeds", "brief"),
 }
 
 
@@ -153,15 +156,30 @@ DEFAULT_CONFIG = _apply_env_overrides({
         "macro_data": "fred",                # Options: fred (needs FRED_API_KEY)
         "prediction_markets": "polymarket",  # Options: polymarket (keyless)
         "macro_brief": "local",              # Options: local (reads macro_brief_dir)
+        "ticker_brief": "local",             # Options: local (reads ticker_brief_dir)
     },
     # Macro information source for the news analyst: "feeds" = fixed macro
     # queries + FRED (upstream behavior); "brief" = the pre-compiled daily
     # deep-search brief (specs/macro-brief-data-contract.md). A/B switch.
     "macro_source": "feeds",
+    # Ticker information source for the news analyst: "feeds" = ticker news
+    # API + autonomous search (upstream behavior); "brief" = the pre-compiled
+    # per-ticker deep-search brief (specs/ticker-brief-data-contract.md).
+    # The A/B protocol moves this together with macro_source as a bundle;
+    # independent switching exists for debugging (specs/pipeline-consumption-v2.md).
+    "ticker_source": "feeds",
     # Where the offline collector drops daily macro briefs.
     "macro_brief_dir": os.getenv(
         "TRADINGAGENTS_MACRO_BRIEF_DIR", os.path.join(_TRADINGAGENTS_HOME, "macro_briefs")
     ),
+    # Where the offline collector drops per-ticker briefs (one subdir per symbol).
+    "ticker_brief_dir": os.getenv(
+        "TRADINGAGENTS_TICKER_BRIEF_DIR", os.path.join(_TRADINGAGENTS_HOME, "ticker_briefs")
+    ),
+    # Whether the news analyst binds get_prediction_markets (Polymarket,
+    # keyless). Independent of the feeds/brief switches: it stays available in
+    # every arm unless disabled here.
+    "polymarket_enabled": True,
     # Tool-level configuration (takes precedence over category-level)
     "tool_vendors": {
         # Example: "get_stock_data": "alpha_vantage",  # Override category default

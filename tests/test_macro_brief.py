@@ -23,6 +23,14 @@ def _write(brief_dir, date_str, body="## Monetary Policy & Rates\ncontent"):
     )
 
 
+def _write_session(brief_dir, date_str, session, body=None):
+    body = body or f"## Monetary Policy & Rates\n{session} content"
+    (brief_dir / f"{date_str}.{session}.md").write_text(
+        f"---\nas_of_date: {date_str}\nsession: {session}\n---\n\n{body}",
+        encoding="utf-8",
+    )
+
+
 @pytest.mark.unit
 def test_picks_newest_on_or_before_date(brief_dir):
     _write(brief_dir, "2026-07-25")
@@ -112,7 +120,9 @@ def test_macro_source_arm_selection():
 
     brief_tools, brief_desc = _select_macro_tools("brief")
     assert {t.name for t in brief_tools} == {"get_macro_brief"}
-    assert "get_macro_brief(curr_date)" in brief_desc
+    # v2: the tool signature gained an optional ticker (session derivation),
+    # and the advertised signature must track it (prompt/signature drift guard).
+    assert "get_macro_brief(curr_date, ticker)" in brief_desc
 
 
 @pytest.mark.unit
@@ -140,7 +150,8 @@ def test_news_toolnode_executes_both_arms():
     news_tools = set(nodes["news"].tools_by_name)
     assert {
         "get_news", "get_global_news", "search_news", "get_insider_transactions",
-        "get_macro_indicators", "get_macro_brief", "get_prediction_markets",
+        "get_macro_indicators", "get_macro_brief", "get_ticker_brief",
+        "get_prediction_markets",
     } <= news_tools
 
 
@@ -151,3 +162,164 @@ def test_default_config_wires_the_arm():
     assert DEFAULT_CONFIG["macro_source"] == "feeds"
     assert DEFAULT_CONFIG["data_vendors"]["macro_brief"] == "local"
     assert DEFAULT_CONFIG["macro_brief_dir"]
+
+
+# ---------------------------------------------------------------------------
+# v2 session-aware selection (specs/macro-brief-data-contract.md v2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_session_match_preferred_on_date_tie(brief_dir):
+    _write_session(brief_dir, "2026-08-03", "cn")
+    _write_session(brief_dir, "2026-08-03", "us")
+    result = mb.get_macro_brief_local("2026-08-03", session="cn")
+    assert "(cn session)" in result
+    assert "cn content" in result
+    assert "NOTE" not in result
+    result = mb.get_macro_brief_local("2026-08-03", session="us")
+    assert "(us session)" in result
+    assert "us content" in result
+    assert "NOTE" not in result
+
+
+@pytest.mark.unit
+def test_date_beats_session_match(brief_dir):
+    # Ranking is date-first: a newer other-session brief beats an older
+    # session-matching one, and the fallback is noted in the header.
+    _write_session(brief_dir, "2026-08-02", "cn")
+    _write_session(brief_dir, "2026-08-03", "us")
+    result = mb.get_macro_brief_local("2026-08-03", session="cn")
+    assert "as of 2026-08-03 (us session)" in result
+    assert "NOTE" in result and "us-session" in result
+
+
+@pytest.mark.unit
+def test_session_file_beats_legacy_on_date_tie(brief_dir):
+    _write(brief_dir, "2026-08-03", body="legacy content")
+    _write_session(brief_dir, "2026-08-03", "us")
+    result = mb.get_macro_brief_local("2026-08-03", session="us")
+    assert "(us session)" in result
+    assert "us content" in result
+    assert "NOTE" not in result
+
+
+@pytest.mark.unit
+def test_legacy_fallback_adds_note(brief_dir):
+    _write(brief_dir, "2026-08-03", body="legacy content")
+    result = mb.get_macro_brief_local("2026-08-03", session="us")
+    assert "legacy content" in result
+    assert "NOTE" in result and "legacy" in result
+    # Legacy files have no session to surface in the base header.
+    assert "session)" not in result
+
+
+@pytest.mark.unit
+def test_cross_session_fallback_adds_note(brief_dir):
+    _write_session(brief_dir, "2026-08-03", "us")
+    result = mb.get_macro_brief_local("2026-08-03", session="cn")
+    assert "us content" in result
+    assert "NOTE" in result and "us-session" in result
+
+
+@pytest.mark.unit
+def test_session_none_keeps_v1_view(brief_dir):
+    # No requested session: date-first, legacy fully acceptable, no NOTE.
+    _write_session(brief_dir, "2026-08-01", "cn")
+    _write(brief_dir, "2026-08-02", body="legacy content")
+    result = mb.get_macro_brief_local("2026-08-03")
+    assert "as of 2026-08-02" in result
+    assert "legacy content" in result
+    assert "NOTE" not in result
+
+
+@pytest.mark.unit
+def test_session_none_prefers_session_files_on_tie(brief_dir):
+    # Deterministic tiebreak for the v1 view: session-scoped beats legacy.
+    _write(brief_dir, "2026-08-03", body="legacy content")
+    _write_session(brief_dir, "2026-08-03", "cn")
+    result = mb.get_macro_brief_local("2026-08-03")
+    assert "cn content" in result
+    assert "NOTE" not in result
+
+
+@pytest.mark.unit
+def test_session_none_cn_us_tie_is_deterministic(brief_dir):
+    # v1 view, same-date cn+us pair: both rank as plain session files, so the
+    # filename tiebreak decides — "….us.md" wins lexicographically. Pinned so
+    # a candidate-tuple layout change cannot silently flip which brief the
+    # no-session view (compare/run.py pre-flight) serves.
+    _write_session(brief_dir, "2026-08-03", "cn")
+    _write_session(brief_dir, "2026-08-03", "us")
+    result = mb.get_macro_brief_local("2026-08-03")
+    assert "us content" in result
+    assert "NOTE" not in result
+
+
+@pytest.mark.unit
+def test_session_briefs_respect_future_exclusion_and_staleness(brief_dir):
+    _write_session(brief_dir, "2026-07-25", "us")
+    _write_session(brief_dir, "2026-08-04", "us")  # future: excluded
+    result = mb.get_macro_brief_local("2026-08-03", session="us")
+    assert "as of 2026-07-25" in result
+    assert "WARNING" in result and "9 days older" in result
+
+
+@pytest.mark.unit
+def test_unknown_session_raises(brief_dir):
+    _write_session(brief_dir, "2026-08-03", "us")
+    with pytest.raises(ValueError, match="session"):
+        mb.get_macro_brief_local("2026-08-03", session="tokyo")
+
+
+@pytest.mark.unit
+def test_routing_passes_session_through(brief_dir):
+    _write_session(brief_dir, "2026-08-03", "cn")
+    _write_session(brief_dir, "2026-08-03", "us")
+    result = interface.route_to_vendor("get_macro_brief", "2026-08-03", "cn")
+    assert "(cn session)" in result and "cn content" in result
+
+
+# ---------------------------------------------------------------------------
+# Path resolver (eval-verdict revision binding, specs/pipeline-consumption-v2.md §5)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_resolve_path_matches_served_brief(brief_dir):
+    # The resolver shares the reader's selection core: a cn request still
+    # resolves to the newer us file the reader would serve (date-first rule),
+    # so eval lookups bind to the exact served revision.
+    _write_session(brief_dir, "2026-08-02", "cn")
+    _write_session(brief_dir, "2026-08-03", "us")
+    path = mb.resolve_macro_brief_path("2026-08-03", session="cn")
+    assert path == str(brief_dir / "2026-08-03.us.md")
+    served = mb.get_macro_brief_local("2026-08-03", session="cn")
+    assert (brief_dir / "2026-08-03.us.md").read_text(encoding="utf-8") in served
+
+
+@pytest.mark.unit
+def test_resolve_path_session_match_and_legacy(brief_dir):
+    _write(brief_dir, "2026-08-02")
+    _write_session(brief_dir, "2026-08-03", "cn")
+    _write_session(brief_dir, "2026-08-03", "us")
+    assert mb.resolve_macro_brief_path("2026-08-03", session="cn") == str(
+        brief_dir / "2026-08-03.cn.md"
+    )
+    # No session: v1 view, date first (legacy loses the tie to session files).
+    assert mb.resolve_macro_brief_path("2026-08-03") == str(
+        brief_dir / "2026-08-03.us.md"
+    )
+
+
+@pytest.mark.unit
+def test_resolve_path_raises_when_no_brief(brief_dir):
+    with pytest.raises(VendorNotConfiguredError):
+        mb.resolve_macro_brief_path("2026-08-03", session="us")
+
+
+@pytest.mark.unit
+def test_resolve_path_rejects_unknown_session(brief_dir):
+    _write_session(brief_dir, "2026-08-03", "us")
+    with pytest.raises(ValueError, match="session"):
+        mb.resolve_macro_brief_path("2026-08-03", session="tokyo")

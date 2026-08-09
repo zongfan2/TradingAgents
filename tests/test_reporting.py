@@ -1,10 +1,13 @@
 """Report parity: the shared writer produces the report tree for the CLI and the
 programmatic API alike (#1037)."""
 
+import hashlib
+import json
 from types import SimpleNamespace
 
 import pytest
 
+from tradingagents.dataflows.config import set_config
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.reporting import write_report_tree
 
@@ -48,3 +51,39 @@ def test_save_reports_defaults_under_results_dir(tmp_path):
     assert out.exists()
     assert out.parent.parent.name == "reports"  # results_dir/reports/AAPL_<stamp>/...
     assert out.parent.name.startswith("AAPL_")
+
+
+@pytest.mark.unit
+def test_report_header_surfaces_brief_eval_verdicts(tmp_path):
+    # specs/pipeline-consumption-v2.md §5: with a brief arm active, the
+    # consolidated report header states the served brief's eval verdict,
+    # rendered by this existing saving path.
+    macro_dir = tmp_path / "macro"
+    macro_dir.mkdir()
+    body = "macro body"
+    (macro_dir / "2026-08-03.us.md").write_text(body, encoding="utf-8")
+    (macro_dir / "2026-08-03.us.eval.json").write_text(
+        json.dumps({
+            "brief_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+            "verdict": "pass",
+        }),
+        encoding="utf-8",
+    )
+    set_config({"macro_source": "brief", "macro_brief_dir": str(macro_dir)})
+
+    state = _state() | {"trade_date": "2026-08-03"}
+    out = write_report_tree(state, "AAPL", tmp_path / "reports")
+    complete = out.read_text()
+    assert "Macro brief eval: pass (2026-08-03.us.md)" in complete
+    # The ticker arm stays feeds: no ticker eval line.
+    assert "Ticker brief eval" not in complete
+    # The verdict lines live in the header, before the first section.
+    assert complete.index("Macro brief eval") < complete.index("## I.")
+
+
+@pytest.mark.unit
+def test_report_header_unchanged_on_default_arms(tmp_path):
+    # feeds/feeds (the default) consumed no brief: no eval lines appear.
+    state = _state() | {"trade_date": "2026-08-03"}
+    out = write_report_tree(state, "AAPL", tmp_path)
+    assert "brief eval" not in out.read_text()
