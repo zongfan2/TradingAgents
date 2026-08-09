@@ -4,6 +4,8 @@ the end — no preamble, no commentary, no code fences around the whole document
 
 # Research protocol
 
+{{SESSION_BLOCK}}
+
 Work factor by factor. For each of the seven sections below, run at least two
 distinct web searches with different angles before writing. Emphasize the
 trailing 48 hours; add weekly context only where it changes the interpretation.
@@ -46,6 +48,7 @@ Caixin) over aggregators and commentary blogs.
 
 ---
 as_of_date: {{DATE}}
+session: {{SESSION}}
 generated_at: <ISO 8601 UTC time of generation, e.g. 2026-07-28T09:30:00Z>
 generator: {{GENERATOR}}
 sources_count: <number of distinct URLs you cited>
