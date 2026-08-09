@@ -38,6 +38,16 @@ dev = [
     "ruff>=0.15",
     "pytest>=8.0",
     "pytest-subtests>=0.13",
+    # tests/test_webui.py imports webui.server, so dev needs the webui stack too.
+    "tradingagents[webui]",
+]
+# Local web UI (webui/server.py): FastAPI app served by uvicorn; httpx backs
+# fastapi.testclient. Optional so the core install stays lean:
+# pip install "tradingagents[webui]".
+webui = [
+    "fastapi>=0.141",
+    "uvicorn>=0.52",
+    "httpx>=0.28",
 ]
 # Amazon Bedrock support (AWS SigV4 auth + boto3). Optional so the core install
 # stays lean: pip install "tradingagents[bedrock]".
