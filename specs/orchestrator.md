@@ -95,10 +95,16 @@ webui reads both.
 }
 ```
 
-- `status` ∈ `ok` | `warn` | `failed` | `timeout` | `skipped`. An evaluator
-  that completes and writes a `fail` **verdict** is `warn` here (the component
-  worked; the content failed) — component `failed` means the process crashed
-  or was refused, and gating then treats the verdict as `missing`.
+- `status` ∈ `ok` | `warn` | `failed` | `timeout` | `skipped`, plus the
+  transient `running` for the currently in-flight component only (the
+  write-as-you-go status file records a component as `running` with
+  `finished_at: null` while its subprocess runs, so a kill mid-slot leaves a
+  readable file naming it). A slot whose `finished_at` is set never contains
+  `running` — consumers seeing it should render "in progress", not an error.
+  An evaluator that completes and writes a `fail` **verdict** is `warn` here
+  (the component worked; the content failed) — component `failed` means the
+  process crashed or was refused, and gating then treats the verdict as
+  `missing`.
 - `history` holds the last 20 completed slot objects (same shape as `slot` +
   `components`).
 - Atomic rewrite after every component. The webui renders red/green per

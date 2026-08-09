@@ -9,8 +9,9 @@ renderer; two write actions listed below). Extends the existing local
 ### 1. Status banner (home)
 
 Renders both `pipeline_status.<session>.json` files: per-component red/green
-(`ok` green, `warn` amber, `failed`/`timeout` red, `skipped` grey), last slot
-date/time per session, and a staleness rule — a session with no slot started
+(`ok` green, `warn` amber, `failed`/`timeout` red, `skipped` grey, and the
+transient `running` — the in-flight component of a mid-slot read — blue),
+last slot date/time per session, and a staleness rule — a session with no slot started
 by `slot_time` + 1h on its local weekday renders red. Shows the latest
 end-of-slot summary line.
 
