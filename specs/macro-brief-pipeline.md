@@ -1,6 +1,12 @@
 # Spec: Macro Brief — Pipeline Side
 
-**Builder**: Claude Code · **Status**: Implemented · Contract: [macro-brief-data-contract.md](macro-brief-data-contract.md)
+**Builder**: Claude Code · **Status**: Implemented (v1) · Contract: [macro-brief-data-contract.md](macro-brief-data-contract.md)
+
+> **v2 note (2026-08-03)**: this spec describes the implemented v1 behavior
+> against single daily briefs. The contract is now v2 (session-scoped files);
+> the deltas — session-aware reading, `get_ticker_brief`, `ticker_source`, the
+> offline brief arm — are specified in
+> [pipeline-consumption-v2.md](pipeline-consumption-v2.md).
 
 ## Goal
 
