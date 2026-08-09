@@ -3,8 +3,9 @@
 Fully offline: the subprocess boundary (component CLIs, osascript) is faked.
 Covers ordering, 1∥3 parallelism, the evaluator join barrier before step 6,
 the failure-continuation matrix, timeouts, lockfile exclusivity + stale
-breaking, --only/--from, watchdog once-only, mid-slot kill survivability, and
-concurrent cn+us slots.
+breaking, --only/--from, watchdog once-only, mid-slot kill survivability,
+concurrent cn+us slots, and the steps 3–4 wiring (pool builder + ticker
+collector argvs against the real CLIs, warn mappings, aggregate timeouts).
 """
 
 import json
@@ -18,8 +19,13 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from pipeline import orchestrator
-from pipeline.config import PipelineConfig, SessionSchedule, load_config
+from pipeline import orchestrator, pool_builder, ticker_collector
+from pipeline.config import (
+    DEFAULT_COMPONENT_TIMEOUTS,
+    PipelineConfig,
+    SessionSchedule,
+    load_config,
+)
 
 SLOT_DATE = date(2026, 1, 5)  # a Monday
 NOW = datetime(2026, 1, 5, 13, 40, tzinfo=timezone.utc)
@@ -85,6 +91,8 @@ class FakeRunner:
             return {
                 "pipeline.macro_collector": "macro_collector",
                 "pipeline.evaluator": "macro_evaluator",
+                "pipeline.pool_builder": "pool_builder",
+                "pipeline.ticker_collector": "ticker_collectors",
             }.get(module, module)
         return argv[0]
 
@@ -173,8 +181,7 @@ def test_default_registry_wires_collector_and_evaluator_and_marks_placeholders(t
     assert evaluator_argv[3].endswith("macro_briefs/2026-01-05.cn.md")
 
     # Settle (22v.10) and the not-yet-landed components are placeholders.
-    for name in ("settle", "pool_builder", "ticker_collectors", "ticker_evaluators",
-                 "analysis_runner", "execution_adapter"):
+    for name in ("settle", "ticker_evaluators", "analysis_runner", "execution_adapter"):
         assert registry[name].build_argv is None
     assert "22v.10" in registry["settle"].placeholder_reason
     assert registry["execution_adapter"].us_only
@@ -197,8 +204,10 @@ def test_default_registry_slot_records_placeholders_as_skipped(tmp_path):
     assert components["macro_evaluator"]["status"] == "ok"
     assert components["execution_adapter"]["status"] == "skipped"
     assert components["execution_adapter"]["error"] == "us slot only"
-    # Only the two real components spawned subprocesses.
-    assert sorted(name for name, _, _ in runner.calls) == ["macro_collector", "macro_evaluator"]
+    # Only the four real components spawned subprocesses.
+    assert sorted(name for name, _, _ in runner.calls) == [
+        "macro_collector", "macro_evaluator", "pool_builder", "ticker_collectors",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -329,7 +338,7 @@ def test_steps_1_and_3_run_in_parallel(tmp_path):
     def pool(argv):
         pool_started.set()
         assert collector_started.wait(timeout=10), "collector never started while pool_builder ran"
-        return orchestrator.RunResult(0)
+        return orchestrator.RunResult(0, stdout="written: pools/us/2026-01-05.json\n")
 
     runner = FakeRunner({"macro_collector": collector, "pool_builder": pool})
     assert run_slot(config, "us", runner) == 0
@@ -954,3 +963,295 @@ def test_cli_rejects_unknown_component(tmp_path, monkeypatch, capsys):
     )
     assert exit_code == 2
     assert "unknown component" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Steps 3–4 wiring — pool builder + ticker collector (default registry)
+# ---------------------------------------------------------------------------
+
+
+def ticker_summary(failed=(), written=2, requested=3, skipped=0, session="us"):
+    """A ticker-collector R6 stdout JSON summary line."""
+    return json.dumps(
+        {
+            "date": SLOT_DATE.isoformat(),
+            "session": session,
+            "requested": requested,
+            "written": written,
+            "skipped": skipped,
+            "failed": [{"ticker": t, "reason": r} for t, r in failed],
+        }
+    )
+
+
+def run_default_slot(config, session, runner, *, notifier=None):
+    """Run a slot on the REAL default registry (not the fake one)."""
+    orch = orchestrator.Orchestrator(
+        config,
+        session,
+        slot_date=SLOT_DATE,
+        runner=runner,
+        notifier=notifier or recording_notifier()[0],
+        clock=clock,
+    )
+    return orch.run_slot()
+
+
+@pytest.mark.unit
+def test_default_registry_step_3_and_4_argvs_match_the_real_clis(tmp_path):
+    config = make_config(tmp_path)
+    registry = {c.name: c for c in orchestrator.build_default_registry(config)}
+    ctx = orchestrator.SlotContext("cn", SLOT_DATE, config)
+
+    pool_argv = registry["pool_builder"].build_argv(ctx)
+    assert pool_argv[0] == str(config.python_executable)
+    assert pool_argv[1:] == [
+        "-m", "pipeline.pool_builder", "--session", "cn", "--date", "2026-01-05",
+    ]
+    # The argv parses against the REAL pool-builder CLI, with default
+    # backend/force (the orchestrator never overrides them).
+    args = pool_builder.build_parser().parse_args(pool_argv[3:])
+    assert (args.session, args.date) == ("cn", SLOT_DATE)
+    assert args.backend == "claude"
+    assert args.force is False
+
+    ticker_argv = registry["ticker_collectors"].build_argv(ctx)
+    assert ticker_argv[0] == str(config.python_executable)
+    assert ticker_argv[1:] == [
+        "-m", "pipeline.ticker_collector", "--session", "cn", "--date", "2026-01-05",
+    ]
+    args = ticker_collector.build_parser().parse_args(ticker_argv[3:])
+    assert (args.session, args.date) == ("cn", SLOT_DATE)
+    assert args.tickers is None
+    assert args.backend == "claude"
+    assert args.force is False
+
+    # Steps 5–7 remain placeholders.
+    for name in ("ticker_evaluators", "analysis_runner", "execution_adapter"):
+        assert registry[name].build_argv is None
+
+
+@pytest.mark.unit
+def test_ticker_collector_runs_after_pool_builder(tmp_path):
+    config = make_config(tmp_path)
+    write_eval(config, "us", SLOT_DATE)
+    runner = FakeRunner(
+        {
+            "pool_builder": orchestrator.RunResult(
+                0, stdout=f"written: pools/us/{SLOT_DATE.isoformat()}.json\n"
+            ),
+            "ticker_collectors": orchestrator.RunResult(0, stdout=ticker_summary() + "\n"),
+        }
+    )
+    assert run_default_slot(config, "us", runner) == 0
+    # 4 strictly after 3 (same main thread, table order).
+    assert runner.order_index("pool_builder", "end") < runner.order_index(
+        "ticker_collectors", "start"
+    )
+    components = read_status(config, "us")["components"]
+    assert components["pool_builder"]["status"] == "ok"
+    assert components["pool_builder"]["error"] is None
+    assert components["ticker_collectors"]["status"] == "ok"
+    assert components["ticker_collectors"]["error"] is None
+
+
+@pytest.mark.unit
+def test_pool_builder_carried_forward_exit_zero_is_warn(tmp_path):
+    """Failure-table row: the builder self-handles nomination failure — exit 0
+    with a carried-forward pool + stderr warning maps to warn, not failed."""
+    config = make_config(tmp_path)
+    write_eval(config, "us", SLOT_DATE)
+    stderr = (
+        "pool-builder: warning: backend 'claude' exited 1: no network — carrying "
+        "opportunity/watch forward from the prior pool (streaks untouched)\n"
+        "INFO pipeline.pool_builder: wrote pools/us/2026-01-05.json (carried_forward: ...)\n"
+    )
+    runner = FakeRunner(
+        {
+            "pool_builder": orchestrator.RunResult(
+                0, stdout="carried_forward: pools/us/2026-01-05.json\n", stderr=stderr
+            ),
+            "ticker_collectors": orchestrator.RunResult(0, stdout=ticker_summary() + "\n"),
+        }
+    )
+    notifier, sent = recording_notifier()
+    # warn is not a slot failure — exit 0, and the slot continued into step 4.
+    assert run_default_slot(config, "us", runner, notifier=notifier) == 0
+    components = read_status(config, "us")["components"]
+    record = components["pool_builder"]
+    assert record["status"] == "warn"
+    assert record["error"].startswith("pool-builder: warning:")
+    assert "carrying opportunity/watch forward" in record["error"]
+    assert components["ticker_collectors"]["status"] == "ok"
+    # No failure notification for a warn — only the end-of-slot summary.
+    assert not any("pool_builder" in " ".join(argv) for argv in sent)
+    assert any("1 warn" in " ".join(argv) for argv in sent)
+
+
+@pytest.mark.unit
+def test_pool_builder_hard_crash_is_failed_and_slot_continues(tmp_path):
+    """Failure-table row: a hard crash (non-zero exit) is failed; the slot
+    continues — downstream reads the most recent prior pool file."""
+    config = make_config(tmp_path)
+    write_eval(config, "us", SLOT_DATE)
+    runner = FakeRunner(
+        {
+            "pool_builder": orchestrator.RunResult(
+                1, stderr="pool-builder: unreadable core file core.us.yaml: bad yaml\n"
+            ),
+            "ticker_collectors": orchestrator.RunResult(0, stdout=ticker_summary() + "\n"),
+        }
+    )
+    notifier, sent = recording_notifier()
+    assert run_default_slot(config, "us", runner, notifier=notifier) == 1
+    components = read_status(config, "us")["components"]
+    assert components["pool_builder"]["status"] == "failed"
+    assert components["pool_builder"]["error"].startswith("pool-builder: unreadable core file")
+    assert components["ticker_collectors"]["status"] == "ok"
+    assert any("pool_builder failed" in " ".join(argv) for argv in sent)
+
+
+@pytest.mark.unit
+def test_pool_builder_outcome_mapper_is_defensive_about_stdout_drift():
+    """Symmetry with the ticker mapper: stdout drift on a zero exit can hide a
+    degraded (carried-forward) pool, so it maps to warn — never silently ok."""
+    R = orchestrator.RunResult
+    # Normal written pool -> ok, even alongside a benign builder warning
+    # (missing core file) that is NOT the carried-forward marker.
+    assert orchestrator._pool_builder_outcome(
+        R(
+            0,
+            stdout="written: pools/us/2026-01-05.json\n",
+            stderr="pool-builder: warning: core.us.yaml not found — core layer is empty\n",
+        )
+    ) == ("ok", None)
+    # An exit 0 whose final line matches neither outcome format is a
+    # reporting gap -> warn.
+    status, error = orchestrator._pool_builder_outcome(R(0, stdout="all done\n"))
+    assert status == "warn"
+    assert "no 'written:'/'carried_forward:' outcome line" in error
+    status, error = orchestrator._pool_builder_outcome(R(0, stdout=""))
+    assert status == "warn"
+    # The stderr carried-forward marker wins even when stdout drifted (a
+    # stray print after the outcome line must not hide the degraded pool).
+    status, error = orchestrator._pool_builder_outcome(
+        R(
+            0,
+            stdout="written: pools/us/2026-01-05.json\nsome stray trailing print\n",
+            stderr=(
+                "pool-builder: warning: backend 'claude' timed out after 360s — "
+                "carrying opportunity/watch forward from the prior pool "
+                "(streaks untouched)\n"
+            ),
+        )
+    )
+    assert status == "warn"
+    assert "carrying opportunity/watch forward" in error
+
+
+@pytest.mark.unit
+def test_ticker_collector_partial_failure_summary_maps_to_warn(tmp_path):
+    """Collector R6: partial success is exit 0 with the failed list in the
+    final-line JSON summary — warn, with the summary surfaced in error."""
+    config = make_config(tmp_path)
+    write_eval(config, "us", SLOT_DATE)
+    summary = ticker_summary(
+        failed=[("NVDA", "validation failed after retry: sources_count 3 < 5")],
+        written=2,
+        requested=3,
+    )
+    runner = FakeRunner(
+        {
+            # Preceding stdout noise: only the FINAL line is the summary.
+            "ticker_collectors": orchestrator.RunResult(
+                0, stdout="collector chatter\n" + summary + "\n"
+            ),
+        }
+    )
+    assert run_default_slot(config, "us", runner) == 0  # warn is not a slot failure
+    record = read_status(config, "us")["components"]["ticker_collectors"]
+    assert record["status"] == "warn"
+    assert "2/3 written" in record["error"]
+    assert "NVDA: validation failed after retry" in record["error"]
+
+
+@pytest.mark.unit
+def test_ticker_collector_missing_summary_is_warn_not_crash(tmp_path):
+    config = make_config(tmp_path)
+    for stdout in ("", "not json at all\n"):
+        write_eval(config, "us", SLOT_DATE)
+        runner = FakeRunner(
+            {"ticker_collectors": orchestrator.RunResult(0, stdout=stdout)}
+        )
+        assert run_default_slot(config, "us", runner) == 0
+        record = read_status(config, "us")["components"]["ticker_collectors"]
+        assert record["status"] == "warn"
+        assert "no parseable JSON summary" in record["error"]
+
+
+@pytest.mark.unit
+def test_ticker_collector_nonzero_exits_are_failed_with_stderr_reason(tmp_path):
+    config = make_config(tmp_path)
+    write_eval(config, "us", SLOT_DATE)
+    # Exit 1: every ticker failed, none written (summary still printed).
+    runner = FakeRunner(
+        {
+            "ticker_collectors": orchestrator.RunResult(
+                1,
+                stdout=ticker_summary(failed=[("NVDA", "backend down")], written=0,
+                                      requested=1) + "\n",
+                stderr="ticker-collector: all 1 requested ticker(s) failed; none written\n",
+            ),
+        }
+    )
+    assert run_default_slot(config, "us", runner) == 1
+    record = read_status(config, "us")["components"]["ticker_collectors"]
+    assert record["status"] == "failed"
+    assert record["error"] == "ticker-collector: all 1 requested ticker(s) failed; none written"
+
+    # Exit 3: R1's distinct no-tickers exit — failed too, with its reason.
+    runner = FakeRunner(
+        {
+            "ticker_collectors": orchestrator.RunResult(
+                3, stderr="ticker-collector: no tickers to collect for session 'us'\n"
+            ),
+        }
+    )
+    assert run_default_slot(config, "us", runner) == 1
+    record = read_status(config, "us")["components"]["ticker_collectors"]
+    assert record["status"] == "failed"
+    assert record["error"].startswith("ticker-collector: no tickers")
+
+
+@pytest.mark.unit
+def test_steps_3_and_4_get_configured_timeouts(tmp_path):
+    # R1 classes: ticker fan-out 45 min aggregate; the pool builder's default
+    # sits inside the collectors' class (config-owned, overridable).
+    assert DEFAULT_COMPONENT_TIMEOUTS["ticker_collectors"] == 45 * 60
+    assert DEFAULT_COMPONENT_TIMEOUTS["pool_builder"] <= DEFAULT_COMPONENT_TIMEOUTS[
+        "macro_collector"
+    ]
+
+    config = make_config(tmp_path / "defaults")
+    write_eval(config, "us", SLOT_DATE)
+    runner = FakeRunner(
+        {"ticker_collectors": orchestrator.RunResult(0, stdout=ticker_summary() + "\n")}
+    )
+    assert run_default_slot(config, "us", runner) == 0
+    assert [t for name, _, t in runner.calls if name == "pool_builder"] == [
+        float(DEFAULT_COMPONENT_TIMEOUTS["pool_builder"])
+    ]
+    assert [t for name, _, t in runner.calls if name == "ticker_collectors"] == [2700.0]
+
+    # Config overrides win — the timeouts come from config, not code.
+    config = make_config(
+        tmp_path / "overridden",
+        component_timeouts={"pool_builder": 111, "ticker_collectors": 222},
+    )
+    write_eval(config, "us", SLOT_DATE)
+    runner = FakeRunner(
+        {"ticker_collectors": orchestrator.RunResult(0, stdout=ticker_summary() + "\n")}
+    )
+    assert run_default_slot(config, "us", runner) == 0
+    assert [t for name, _, t in runner.calls if name == "pool_builder"] == [111.0]
+    assert [t for name, _, t in runner.calls if name == "ticker_collectors"] == [222.0]

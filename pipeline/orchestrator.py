@@ -3,9 +3,9 @@
 Spec: specs/orchestrator.md. One launchd-fired invocation drives a whole
 session slot: settle → macro collect/eval → pool build → ticker collect/eval →
 analysis → execution → notify. Steps whose components have not landed yet
-(settle 0, pool builder 3, ticker fan-outs 4–5, analysis 6, adapter 7) are
-registered placeholders recorded as ``skipped`` — the driver, ordering,
-barrier, status, lock, and notification machinery are fully live.
+(settle 0, ticker evaluators 5, analysis 6, adapter 7) are registered
+placeholders recorded as ``skipped`` — the driver, ordering, barrier, status,
+lock, and notification machinery are fully live.
 
 Design points implemented here:
 
@@ -15,7 +15,11 @@ Design points implemented here:
   joined — with its outcome recorded in the status file — before step 6.
 - Component crash/timeout ⇒ status ``failed``/``timeout``, slot continues. An
   evaluator that completes with a ``fail`` *verdict* is ``warn`` (the
-  component worked; the content failed).
+  component worked; the content failed). The same worked-but-degraded rule
+  maps a pool builder that exits 0 with a carried-forward pool (its R4
+  nomination-failure degrade, announced by its stderr warning) and a ticker
+  collector whose exit-0 JSON summary line reports failed tickers (its R6
+  partial success) to ``warn``, with the reason surfaced in ``error``.
 - The subprocess boundary (component CLIs, ``osascript``) is injectable so
   tests run fully offline.
 """
@@ -213,13 +217,35 @@ def build_default_registry(config: PipelineConfig) -> tuple[Component, ...]:
             str(macro_brief_path(ctx.config, ctx.session, ctx.slot_date)),
         ]
 
+    def pool_builder_argv(ctx: SlotContext) -> list[str]:
+        return [
+            python,
+            "-m",
+            "pipeline.pool_builder",
+            "--session",
+            ctx.session,
+            "--date",
+            ctx.slot_date.isoformat(),
+        ]
+
+    def ticker_collector_argv(ctx: SlotContext) -> list[str]:
+        return [
+            python,
+            "-m",
+            "pipeline.ticker_collector",
+            "--session",
+            ctx.session,
+            "--date",
+            ctx.slot_date.isoformat(),
+        ]
+
     return (
         # Settle (22v.10) is explicitly out of scope — registered no-op placeholder.
         Component(0, "settle", None, placeholder_reason="settle step (22v.10) not in scope yet"),
         Component(1, "macro_collector", collector_argv),
         Component(2, "macro_evaluator", evaluator_argv),
-        Component(3, "pool_builder", None),
-        Component(4, "ticker_collectors", None),
+        Component(3, "pool_builder", pool_builder_argv),
+        Component(4, "ticker_collectors", ticker_collector_argv),
         Component(5, "ticker_evaluators", None),
         Component(6, "analysis_runner", None),
         Component(7, "execution_adapter", None, us_only=True),
@@ -601,6 +627,10 @@ class Orchestrator:
                 error = _one_line_reason(result) or f"exit {result.returncode}"
             elif name == "macro_evaluator":
                 status, error = self._evaluator_outcome()
+            elif name == "pool_builder":
+                status, error = _pool_builder_outcome(result)
+            elif name == "ticker_collectors":
+                status, error = _ticker_collector_outcome(result)
             else:
                 status = "ok"
         finished = self.clock()
@@ -704,6 +734,79 @@ def _one_line_reason(result: RunResult, limit: int = 300) -> str:
         if line.strip():
             return line.strip()[:limit]
     return ""
+
+
+def _last_nonempty_line(text: str) -> str:
+    for line in reversed(text.splitlines()):
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def _pool_builder_outcome(result: RunResult) -> tuple[str, str | None]:
+    """Map a pool-builder exit 0 to component status (pool-builder R4).
+
+    A nomination failure degrades *inside* the builder: it writes a
+    carried-forward pool, warns on stderr, and exits 0 — surfaced here as
+    ``warn`` per the failure table ("builder self-handles nomination
+    failure"): the component worked, the content degraded. Its CLI announces
+    the outcome as the final stdout line (``written: <path>`` |
+    ``carried_forward: <path>``); the error text prefers the builder's own
+    stderr warning (the one-line nomination-failure reason). Hard crashes
+    exit non-zero and never reach this mapper — they map to ``failed`` and
+    the slot continues (downstream reads the most recent prior pool file).
+
+    Defensive symmetry with :func:`_ticker_collector_outcome`: the mapper
+    cross-checks the builder's carried-forward stderr marker (so stdout drift
+    can never hide a degraded pool as ``ok``), and an exit 0 whose final
+    stdout line matches neither outcome format is a *reporting* gap —
+    ``warn``, never a silent ``ok``.
+    """
+    outcome_line = _last_nonempty_line(result.stdout)
+    carried_warning = ""
+    for line in result.stderr.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("pool-builder: warning:") and (
+            "carrying opportunity/watch forward" in stripped
+        ):
+            carried_warning = stripped  # keep the last (most specific) warning
+    if outcome_line.startswith("carried_forward:") or carried_warning:
+        return "warn", (carried_warning or outcome_line)[:300]
+    if outcome_line.startswith("written:"):
+        return "ok", None
+    return "warn", "exited 0 but stdout has no 'written:'/'carried_forward:' outcome line"
+
+
+def _ticker_collector_outcome(result: RunResult) -> tuple[str, str | None]:
+    """Map a ticker-collector exit 0 to component status via its R6 summary.
+
+    The collector's stdout ends with one JSON summary line; partial success
+    (exit 0 with a non-empty ``failed`` list) is ``warn`` with the summary
+    surfaced in ``error``. Defensive by design: a missing or unparseable
+    summary is a *reporting* gap on a successful exit — ``warn``, never a
+    crash. Non-zero exits (all-failed 1, no-tickers 3) never reach this
+    mapper — they map to ``failed`` with the stderr one-liner.
+    """
+    line = _last_nonempty_line(result.stdout)
+    try:
+        summary = json.loads(line) if line else None
+    except json.JSONDecodeError:
+        summary = None
+    if not isinstance(summary, dict):
+        return "warn", "exited 0 but stdout has no parseable JSON summary line"
+    failed = summary.get("failed")
+    if not isinstance(failed, list) or not failed:
+        return "ok", None
+    details = "; ".join(
+        f"{item.get('ticker', '?')}: {item.get('reason') or '?'}"
+        for item in failed
+        if isinstance(item, dict)
+    )
+    text = (
+        f"{len(failed)} ticker(s) failed "
+        f"({summary.get('written')}/{summary.get('requested')} written): {details}"
+    )
+    return "warn", text[:300]
 
 
 # ---------------------------------------------------------------------------
