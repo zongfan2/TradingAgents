@@ -22,6 +22,7 @@ import pytest
 
 from pipeline import (
     analysis_runner,
+    evaluator as evaluator_module,
     execution_adapter,
     orchestrator,
     pool_builder,
@@ -96,6 +97,8 @@ class FakeRunner:
             return argv[1]
         if "-m" in argv:  # default-registry argvs: python -m pipeline.<module> ...
             module = argv[argv.index("-m") + 1]
+            if module == "pipeline.evaluator" and "--batch-tickers" in argv:
+                return "ticker_evaluators"  # step 5 shares the module with step 2
             return {
                 "pipeline.settle": "settle",
                 "pipeline.macro_collector": "macro_collector",
@@ -126,6 +129,9 @@ class FakeRunner:
                 if name == "execution_adapter":
                     # Step 7 is real: same summary-line default again.
                     return orchestrator.RunResult(0, stdout=execution_summary() + "\n")
+                if name == "ticker_evaluators":
+                    # Step 5 is real: same summary-line default again.
+                    return orchestrator.RunResult(0, stdout=batch_eval_summary() + "\n")
                 return orchestrator.RunResult(0)
             if isinstance(behavior, BaseException):
                 raise behavior
@@ -227,8 +233,12 @@ def test_default_registry_wires_collector_and_evaluator_and_marks_placeholders(t
     ]
     assert registry["execution_adapter"].us_only
 
-    # The one not-yet-landed component stays a placeholder.
-    assert registry["ticker_evaluators"].build_argv is None
+    # Step 5 is real now (evaluator batch mode): argv matches the batch CLI.
+    batch_argv = registry["ticker_evaluators"].build_argv(ctx)
+    assert batch_argv[1:] == [
+        "-m", "pipeline.evaluator", "--batch-tickers", "--session", "cn",
+        "--date", "2026-01-05",
+    ]
 
 
 @pytest.mark.unit
@@ -249,13 +259,13 @@ def test_default_registry_slot_records_placeholders_as_skipped(tmp_path):
     assert components["macro_collector"]["status"] == "ok"
     assert components["macro_evaluator"]["status"] == "ok"
     assert components["analysis_runner"]["status"] == "ok"
-    assert components["ticker_evaluators"]["status"] == "skipped"
+    assert components["ticker_evaluators"]["status"] == "ok"
     assert components["execution_adapter"]["status"] == "skipped"
     assert components["execution_adapter"]["error"] == "us slot only"
-    # Only the six real components spawned subprocesses.
+    # All seven cn-slot components spawned subprocesses (adapter is us-only).
     assert sorted(name for name, _, _ in runner.calls) == [
         "analysis_runner", "macro_collector", "macro_evaluator",
-        "pool_builder", "settle", "ticker_collectors",
+        "pool_builder", "settle", "ticker_collectors", "ticker_evaluators",
     ]
 
 
@@ -1085,9 +1095,11 @@ def test_component_lines_logged_one_per_component(tmp_path):
 
 
 @pytest.mark.unit
-def test_cli_run_only_placeholder_offline(tmp_path, monkeypatch):
-    # Step 0 is a real subprocess now, so the offline CLI smoke runs the one
-    # remaining placeholder (ticker_evaluators) — same CLI path, no spawn.
+def test_cli_run_only_ticker_evaluators_offline(tmp_path, monkeypatch):
+    # Every step is real now. --only ticker_evaluators is still an offline-safe
+    # CLI smoke: with no pool file and no core yaml under the tmp state dir the
+    # batch evaluates nothing, prints its summary, and exits 0 — a genuine
+    # subprocess spawn with zero backend calls.
     monkeypatch.setenv("TRADINGAGENTS_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("TRADINGAGENTS_NOTIFICATIONS_ENABLED", "0")
     exit_code = orchestrator.main(
@@ -1098,7 +1110,7 @@ def test_cli_run_only_placeholder_offline(tmp_path, monkeypatch):
         (tmp_path / "state" / "pipeline_status.cn.json").read_text(encoding="utf-8")
     )
     assert status["slot"]["date"] == "2026-01-05"
-    assert status["components"]["ticker_evaluators"]["status"] == "skipped"
+    assert status["components"]["ticker_evaluators"]["status"] == "ok"
 
 
 @pytest.mark.unit
@@ -1145,6 +1157,26 @@ def analysis_summary(planned=3, completed=3, errors=0, invalid_plans=0, session=
             "skipped": [],
             "dropped": [],
             "run_ids": [],
+        }
+    )
+
+
+def batch_eval_summary(requested=0, ok=0, refused=0, backend_failed=0, errors=0,
+                       absent=0, below_threshold=0, verdicts=None, session="us"):
+    """A batch-ticker-evaluation stdout JSON summary line (step 5)."""
+    return json.dumps(
+        {
+            "entrypoint": "batch_tickers",
+            "date": SLOT_DATE.isoformat(),
+            "session": session,
+            "requested": requested,
+            "absent": absent,
+            "below_threshold": below_threshold,
+            "ok": ok,
+            "refused": refused,
+            "backend_failed": backend_failed,
+            "errors": errors,
+            "verdicts": verdicts or {},
         }
     )
 
@@ -1244,9 +1276,16 @@ def test_default_registry_step_3_and_4_argvs_match_the_real_clis(tmp_path):
     assert args.force is False
     assert args.preset is None
 
-    # Step 5 remains a placeholder; step 7 is real (see the step-7 wiring
-    # section below for its argv/CLI parse checks).
-    assert registry["ticker_evaluators"].build_argv is None
+    # Step 5 argv parses against the REAL evaluator batch CLI, defaults
+    # intact (no --backend/--force override from the orchestrator).
+    batch_argv = registry["ticker_evaluators"].build_argv(ctx)
+    assert batch_argv[0] == str(config.python_executable)
+    args = evaluator_module.build_parser().parse_args(batch_argv[3:])
+    assert args.batch_tickers is True
+    assert (args.session, args.date) == ("cn", "2026-01-05")
+    assert args.brief is None
+    assert args.backend is None
+    assert args.force is False
     assert registry["execution_adapter"].build_argv is not None
 
 
@@ -1840,3 +1879,37 @@ def test_end_of_slot_summary_carries_order_counts_from_step_7(tmp_path):
     summary_msg = next(m for m in (" ".join(argv) for argv in sent) if "slot us" in m)
     assert "orders 1 live/2 dry-run" in summary_msg
     assert "orders n/a" not in summary_msg
+
+
+# ---------------------------------------------------------------------------
+# Step 5 — batch ticker-evaluation outcome mapper
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_ticker_evaluators_outcome_clean_is_ok():
+    result = orchestrator.RunResult(0, stdout=batch_eval_summary(requested=3, ok=3) + "\n")
+    assert orchestrator._ticker_evaluators_outcome(result) == ("ok", None)
+
+
+@pytest.mark.unit
+def test_ticker_evaluators_outcome_degraded_states_warn():
+    result = orchestrator.RunResult(
+        0,
+        stdout=batch_eval_summary(
+            requested=4, ok=2, refused=1, backend_failed=1, verdicts={"pass": 1, "fail": 1}
+        ) + "\n",
+    )
+    status, error = orchestrator._ticker_evaluators_outcome(result)
+    assert status == "warn"
+    assert "1 fail verdict(s)" in error
+    assert "1 structural refusal(s)" in error
+    assert "1 backend failure(s)" in error
+    assert "2/4 evaluated" in error
+
+
+@pytest.mark.unit
+def test_ticker_evaluators_outcome_missing_summary_warns():
+    status, error = orchestrator._ticker_evaluators_outcome(orchestrator.RunResult(0, stdout=""))
+    assert status == "warn"
+    assert "no parseable JSON summary" in error

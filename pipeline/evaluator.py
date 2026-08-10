@@ -37,7 +37,7 @@ import re
 import subprocess
 import sys
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from pydantic import Field, ValidationError
@@ -588,13 +588,166 @@ def evaluate_brief(
     return EXIT_OK
 
 
+#: Concurrent backend evaluations in a batch — same cap class as ticker
+#: collection (orchestrator R1: the evaluator fan-out shares the collection
+#: concurrency cap).
+TICKER_EVAL_CONCURRENCY = 3
+#: Mirrors ``pipeline.analysis_runner.TRIGGER_THRESHOLD_ENV`` (hoist candidate
+#: for pipeline/config.py) — the batch gates opportunity briefs on the same
+#: threshold the runner triggers on (evaluator spec "Scope" quota policy).
+TRIGGER_THRESHOLD_ENV = "TRADINGAGENTS_TRIGGER_THRESHOLD"
+DEFAULT_TRIGGER_THRESHOLD = 7.0
+
+
+def _batch_catalyst_score(text: str) -> float | None:
+    """Frontmatter catalyst_score, or None when the brief is structurally
+    broken (the batch still evaluates it so the refusal surfaces the collector
+    bug — refusal happens before any backend spend)."""
+    try:
+        meta, _ = parse_ticker_brief(text, structural_only=True)
+    except ContractError:
+        return None
+    return float(meta.catalyst_score)
+
+
+def batch_tickers(
+    session: str,
+    *,
+    date_str: str | None = None,
+    force: bool = False,
+    backend: str | None = None,
+    runner: Runner | None = None,
+) -> int:
+    """Orchestrator step 5: evaluate the day's ticker briefs per the quota
+    policy — every collected core brief, plus every opportunity brief whose
+    ``catalyst_score`` ≥ the analysis trigger threshold (those are about to
+    influence — and possibly execute — a run). Per-brief isolation: one
+    failure never aborts the rest; the final stdout line is a JSON summary
+    for the orchestrator's outcome mapper.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from pipeline.common import session_date
+    from pipeline.contracts.pool import read_pool
+    from pipeline.ticker_collector import CollectorError, read_core_yaml
+
+    config = load_config()
+    day = date.fromisoformat(date_str) if date_str else session_date(session)
+    threshold = float(os.environ.get(TRIGGER_THRESHOLD_ENV) or DEFAULT_TRIGGER_THRESHOLD)
+
+    core: list[str] = []
+    opportunity: list[str] = []
+    result = read_pool(config.pool_dir, session, day)
+    if result.staleness == "absent" or result.pool is None:
+        try:
+            core = read_core_yaml(Path(config.pool_dir), session)
+        except CollectorError as exc:
+            print(f"evaluator: {exc}", file=sys.stderr)
+            return EXIT_ERROR
+        print(
+            "evaluator: warning: no usable pool file — core coverage from "
+            f"core.{session}.yaml only",
+            file=sys.stderr,
+        )
+    else:
+        core = [entry.ticker for entry in result.pool.core]
+        opportunity = [
+            entry.ticker for entry in result.pool.opportunity if entry.ticker not in set(core)
+        ]
+
+    jobs: list[Path] = []
+    absent = 0
+    below_threshold = 0
+    brief_root = Path(config.ticker_brief_dir)
+    for ticker in core:
+        path = brief_root / ticker / f"{day.isoformat()}.md"
+        if path.is_file():
+            jobs.append(path)
+        else:
+            absent += 1
+    for ticker in opportunity:
+        path = brief_root / ticker / f"{day.isoformat()}.md"
+        if not path.is_file():
+            absent += 1
+            continue
+        score = _batch_catalyst_score(path.read_text(encoding="utf-8"))
+        if score is not None and score < threshold:
+            below_threshold += 1
+            continue
+        jobs.append(path)
+
+    counts = {"ok": 0, "refused": 0, "backend_failed": 0, "errors": 0}
+    verdicts: dict[str, int] = {}
+
+    def _evaluate(path: Path) -> None:
+        rc = evaluate_brief(path, force=force, backend=backend, runner=runner)
+        if rc == EXIT_OK:
+            counts["ok"] += 1
+            try:
+                verdict = str(
+                    json.loads(eval_path_for(path).read_text(encoding="utf-8")).get(
+                        "verdict", "unknown"
+                    )
+                )
+            except (OSError, ValueError):
+                verdict = "unknown"
+            verdicts[verdict] = verdicts.get(verdict, 0) + 1
+        elif rc == EXIT_REFUSED:
+            counts["refused"] += 1
+        elif rc == EXIT_BACKEND_FAILURE:
+            counts["backend_failed"] += 1
+        else:
+            counts["errors"] += 1
+
+    if jobs:
+        with ThreadPoolExecutor(max_workers=min(TICKER_EVAL_CONCURRENCY, len(jobs))) as pool:
+            for future in [pool.submit(_evaluate, path) for path in jobs]:
+                try:
+                    future.result()
+                except Exception as exc:  # noqa: BLE001 — per-brief isolation
+                    counts["errors"] += 1
+                    print(f"evaluator: batch job crashed: {exc}", file=sys.stderr)
+
+    print(
+        json.dumps(
+            {
+                "entrypoint": "batch_tickers",
+                "date": day.isoformat(),
+                "session": session,
+                "requested": len(jobs),
+                "absent": absent,
+                "below_threshold": below_threshold,
+                **counts,
+                "verdicts": verdicts,
+            }
+        )
+    )
+    attempted = len(jobs)
+    wipeout = attempted > 0 and counts["ok"] == 0 and (
+        counts["backend_failed"] + counts["errors"] == attempted
+    )
+    return EXIT_ERROR if wipeout else EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m pipeline.evaluator",
         description="Score a macro or ticker brief for accuracy (claude -p, or GPT-5.6 "
         "Terra via codex exec) and write its *.eval.json per the brief's data contract.",
     )
-    parser.add_argument("brief", help="path to the brief file (kind detected from frontmatter)")
+    parser.add_argument(
+        "brief",
+        nargs="?",
+        help="path to the brief file (kind detected from frontmatter); omit with --batch-tickers",
+    )
+    parser.add_argument(
+        "--batch-tickers",
+        action="store_true",
+        help="orchestrator step 5: evaluate the day's ticker briefs (core ∪ "
+        "would-trigger opportunity) for --session/--date",
+    )
+    parser.add_argument("--session", choices=("cn", "us"), help="session for --batch-tickers")
+    parser.add_argument("--date", help="YYYY-MM-DD for --batch-tickers (default: session today)")
     parser.add_argument(
         "--backend",
         choices=tuple(EVALUATOR_IDENTITIES),
@@ -615,7 +768,22 @@ def main(
     runner: Runner | None = None,
     s3_copy: S3Copy | None = None,
 ) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.batch_tickers:
+        if args.brief is not None:
+            parser.error("--batch-tickers takes no brief path")
+        if not args.session:
+            parser.error("--batch-tickers requires --session")
+        return batch_tickers(
+            args.session,
+            date_str=args.date,
+            force=args.force,
+            backend=args.backend,
+            runner=runner,
+        )
+    if args.brief is None:
+        parser.error("a brief path is required (or use --batch-tickers)")
     return evaluate_brief(
         Path(args.brief),
         force=args.force,

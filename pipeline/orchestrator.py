@@ -268,6 +268,18 @@ def build_default_registry(config: PipelineConfig) -> tuple[Component, ...]:
             ctx.slot_date.isoformat(),
         ]
 
+    def ticker_evaluators_argv(ctx: SlotContext) -> list[str]:
+        return [
+            python,
+            "-m",
+            "pipeline.evaluator",
+            "--batch-tickers",
+            "--session",
+            ctx.session,
+            "--date",
+            ctx.slot_date.isoformat(),
+        ]
+
     def analysis_runner_argv(ctx: SlotContext) -> list[str]:
         return [
             python,
@@ -300,7 +312,10 @@ def build_default_registry(config: PipelineConfig) -> tuple[Component, ...]:
         Component(2, "macro_evaluator", evaluator_argv),
         Component(3, "pool_builder", pool_builder_argv),
         Component(4, "ticker_collectors", ticker_collector_argv),
-        Component(5, "ticker_evaluators", None),
+        # Step 5 evaluates the day's ticker briefs (core ∪ would-trigger
+        # opportunity, evaluator spec "Scope") so step 6's gating sees real
+        # verdicts instead of blanket ``missing``.
+        Component(5, "ticker_evaluators", ticker_evaluators_argv),
         # Step 6 runs strictly after the macro-evaluator join barrier (the
         # _POST_BARRIER_STEPS split below) — a late verdict can never be
         # bypassed by timing (specs/orchestrator.md slot sequence).
@@ -699,6 +714,8 @@ class Orchestrator:
                 status, error = _pool_builder_outcome(result)
             elif name == "ticker_collectors":
                 status, error = _ticker_collector_outcome(result)
+            elif name == "ticker_evaluators":
+                status, error = _ticker_evaluators_outcome(result)
             elif name == "analysis_runner":
                 status, error = _analysis_runner_outcome(result)
                 self._analysis_counts = _analysis_summary_counts(result)
@@ -927,6 +944,51 @@ def _ticker_collector_outcome(result: RunResult) -> tuple[str, str | None]:
     text = (
         f"{len(failed)} ticker(s) failed "
         f"({summary.get('written')}/{summary.get('requested')} written): {details}"
+    )
+    return "warn", text[:300]
+
+
+def _ticker_evaluators_outcome(result: RunResult) -> tuple[str, str | None]:
+    """Map a batch-ticker-evaluation exit 0 via its JSON summary line.
+
+    ``fail`` verdicts, structural refusals, backend failures, and errors are
+    degraded-but-working states — the slot continues, gating treats the
+    affected briefs per the state table — so they map to ``warn`` with
+    counts. Same defensive posture as :func:`_ticker_collector_outcome`:
+    a successful exit without a parseable summary is a reporting gap
+    (``warn``), never a crash. Non-zero exits (batch wipeout) never reach
+    this mapper.
+    """
+    line = _last_nonempty_line(result.stdout)
+    try:
+        summary = json.loads(line) if line else None
+    except json.JSONDecodeError:
+        summary = None
+    if not isinstance(summary, dict):
+        return "warn", "exited 0 but stdout has no parseable JSON summary line"
+
+    def count(key: str) -> int:
+        value = summary.get(key)
+        return value if isinstance(value, int) else 0
+
+    verdicts = summary.get("verdicts")
+    fails = verdicts.get("fail", 0) if isinstance(verdicts, dict) else 0
+    fails = fails if isinstance(fails, int) else 0
+    problems: list[str] = []
+    if fails:
+        problems.append(f"{fails} fail verdict(s)")
+    for key, label in (
+        ("refused", "structural refusal(s)"),
+        ("backend_failed", "backend failure(s)"),
+        ("errors", "error(s)"),
+    ):
+        if count(key):
+            problems.append(f"{count(key)} {label}")
+    if not problems:
+        return "ok", None
+    text = (
+        f"{'; '.join(problems)} "
+        f"({count('ok')}/{count('requested')} evaluated)"
     )
     return "warn", text[:300]
 

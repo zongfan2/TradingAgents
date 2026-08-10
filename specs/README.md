@@ -5,6 +5,7 @@ Codex) picking up a task reads the **data contract first**, then its component
 spec. Contracts are the only shared interfaces — components never depend on
 each other's internals. The overall v2 design and decision log live in
 [2026-08-03-pipeline-v2-design.md](2026-08-03-pipeline-v2-design.md).
+Day-to-day operations (install, manual slots, dry-run ramp, A/B campaign, troubleshooting): see [../RUNBOOK.md](../RUNBOOK.md).
 
 ## Contracts
 

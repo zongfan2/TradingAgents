@@ -31,6 +31,7 @@ from pipeline.evaluator import (
     EXIT_OK,
     EXIT_REFUSED,
     BackendError,
+    batch_tickers,
     build_eval_prompt,
     claude_runner,
     codex_runner,
@@ -769,3 +770,149 @@ def test_build_eval_prompt_mentions_subject_and_date():
     ticker_prompt = build_eval_prompt("ticker", ticker_meta, "BODY")
     assert "NVDA" in ticker_prompt
     assert "what moved NVDA in the 48h before 2026-08-03" in ticker_prompt
+
+
+# ---------------------------------------------------------------------------
+# Batch ticker evaluation (orchestrator step 5) — quota policy + isolation
+# ---------------------------------------------------------------------------
+
+
+def _write_pool(pool_dir, session, day, core=(), opportunity=()):
+    payload = {
+        "as_of_date": day,
+        "session": session,
+        "generated_at": f"{day}T12:31:00Z",
+        "generator": "codex-deep-search",
+        "core": [{"ticker": t} for t in core],
+        "opportunity": [
+            {
+                "ticker": t,
+                "score": 8.0,
+                "catalyst_type": "earnings",
+                "rationale": "seed",
+                "citations": ["https://example.com/a"],
+                "technical": {"gate": "pass"},
+                "entered_on": day,
+                "low_score_streak": 0,
+                "gate_fail_streak": 0,
+            }
+            for t in opportunity
+        ],
+        "watch": [],
+        "removed": [],
+    }
+    path = pool_dir / session / f"{day}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+@pytest.fixture()
+def batch_dirs(tmp_path, monkeypatch):
+    pool_dir = tmp_path / "pools"
+    brief_dir = tmp_path / "ticker_briefs"
+    pool_dir.mkdir()
+    brief_dir.mkdir()
+    monkeypatch.setenv("TRADINGAGENTS_POOL_DIR", str(pool_dir))
+    monkeypatch.setenv("TRADINGAGENTS_TICKER_BRIEF_DIR", str(brief_dir))
+    monkeypatch.setenv("TRADINGAGENTS_MACRO_BRIEF_DIR", str(tmp_path / "macro_briefs"))
+    monkeypatch.delenv("TRADINGAGENTS_TRIGGER_THRESHOLD", raising=False)
+    monkeypatch.delenv("MACRO_BRIEF_S3_URI", raising=False)
+    return pool_dir, brief_dir
+
+
+@pytest.mark.unit
+def test_batch_quota_policy_selection_and_summary(batch_dirs, capsys):
+    pool_dir, brief_dir = batch_dirs
+    day = "2026-08-03"
+    # Core: NVDA has a brief (evaluated), MSFT has none (absent).
+    # Opportunity: AMD >= threshold (evaluated), INTC below threshold
+    # (skipped, no backend spend), TSLA has no brief (absent).
+    _write_pool(pool_dir, "us", day, core=("NVDA", "MSFT"), opportunity=("AMD", "INTC", "TSLA"))
+    write_brief(brief_dir / "NVDA", f"{day}.md", ticker_text(catalyst_score=2.0))
+    write_brief(brief_dir / "AMD", f"{day}.md", ticker_text(ticker="AMD", catalyst_score=7.5))
+    write_brief(brief_dir / "INTC", f"{day}.md", ticker_text(ticker="INTC", catalyst_score=3.0))
+    runner = FakeRunner(judgment(), judgment())
+
+    rc = batch_tickers("us", date_str=day, runner=runner)
+
+    assert rc == EXIT_OK
+    assert runner.calls == 2  # core NVDA (score irrelevant for core) + AMD
+    summary = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert summary["entrypoint"] == "batch_tickers"
+    assert summary["requested"] == 2
+    assert summary["absent"] == 2
+    assert summary["below_threshold"] == 1
+    assert summary["ok"] == 2
+    assert summary["verdicts"] == {"pass": 2}
+    # Both eval jsons landed next to their briefs.
+    assert (brief_dir / "NVDA" / f"{day}.eval.json").is_file()
+    assert (brief_dir / "AMD" / f"{day}.eval.json").is_file()
+
+
+@pytest.mark.unit
+def test_batch_broken_brief_is_refused_and_isolated(batch_dirs, capsys):
+    pool_dir, brief_dir = batch_dirs
+    day = "2026-08-03"
+    _write_pool(pool_dir, "us", day, core=("BAD", "NVDA"))
+    write_brief(brief_dir / "BAD", f"{day}.md", ticker_text(ticker="BAD").replace("## Risks", "## Hazards"))
+    write_brief(brief_dir / "NVDA", f"{day}.md", ticker_text())
+    runner = FakeRunner(judgment())
+
+    rc = batch_tickers("us", date_str=day, runner=runner)
+
+    assert rc == EXIT_OK  # refusal is a collector bug, not a batch wipeout
+    summary = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert summary["refused"] == 1
+    assert summary["ok"] == 1
+    assert runner.calls == 1  # the refusal never reached the backend
+
+
+@pytest.mark.unit
+def test_batch_wipeout_exits_error(batch_dirs, capsys):
+    pool_dir, brief_dir = batch_dirs
+    day = "2026-08-03"
+    _write_pool(pool_dir, "us", day, core=("NVDA",))
+    write_brief(brief_dir / "NVDA", f"{day}.md", ticker_text())
+    runner = FakeRunner(BackendError("boom"), BackendError("boom"))
+
+    rc = batch_tickers("us", date_str=day, runner=runner)
+
+    assert rc == EXIT_ERROR
+    summary = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert summary["backend_failed"] == 1
+    assert summary["ok"] == 0
+
+
+@pytest.mark.unit
+def test_batch_absent_pool_falls_back_to_core_yaml(batch_dirs, capsys):
+    pool_dir, brief_dir = batch_dirs
+    day = "2026-08-03"
+    (pool_dir / "core.us.yaml").write_text("- ticker: NVDA\n", encoding="utf-8")
+    write_brief(brief_dir / "NVDA", f"{day}.md", ticker_text())
+    runner = FakeRunner(judgment())
+
+    rc = batch_tickers("us", date_str=day, runner=runner)
+
+    assert rc == EXIT_OK
+    captured = capsys.readouterr()
+    assert "core coverage from core.us.yaml only" in captured.err
+    summary = json.loads(captured.out.strip().splitlines()[-1])
+    assert summary["requested"] == 1
+    assert summary["ok"] == 1
+
+
+@pytest.mark.unit
+def test_batch_cli_dispatch_and_validation(batch_dirs, capsys):
+    # --batch-tickers requires --session and forbids a brief path (argparse
+    # usage errors exit 2); a valid invocation with an empty universe exits 0.
+    with pytest.raises(SystemExit) as exc:
+        main(["--batch-tickers"])
+    assert exc.value.code == 2
+    with pytest.raises(SystemExit) as exc:
+        main(["--batch-tickers", "--session", "us", "some-brief.md"])
+    assert exc.value.code == 2
+    capsys.readouterr()
+    assert main(["--batch-tickers", "--session", "us", "--date", "2026-08-03"]) == EXIT_OK
+    summary = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert summary["requested"] == 0

@@ -14,6 +14,7 @@ source of truth for cross-agent work: see [`specs/README.md`](specs/README.md).*
 | `cli/` | Upstream interactive CLI |
 | `compare/` | Our comparison harness: per-backend env presets + `run.py` |
 | `specs/` | Cross-agent specs; each spec names its builder and status |
+| `RUNBOOK.md` | Operational runbook for pipeline v2: schedule install, manual slots, dry-run ramp, A/B campaign, troubleshooting |
 | `pipeline/` | Offline pipeline v2: contract models/validators (`pipeline/contracts/`), shared utils, collectors/evaluator/orchestrator — specs are the source of truth |
 | `prompts/` | Prompt templates used by the offline collectors (deep-search briefs) |
 | `tests/` | Pytest suite (`unit` / `integration` / `smoke` markers) |
