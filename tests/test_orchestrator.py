@@ -19,7 +19,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from pipeline import orchestrator, pool_builder, ticker_collector
+from pipeline import analysis_runner, orchestrator, pool_builder, ticker_collector
 from pipeline.config import (
     DEFAULT_COMPONENT_TIMEOUTS,
     PipelineConfig,
@@ -93,6 +93,7 @@ class FakeRunner:
                 "pipeline.evaluator": "macro_evaluator",
                 "pipeline.pool_builder": "pool_builder",
                 "pipeline.ticker_collector": "ticker_collectors",
+                "pipeline.analysis_runner": "analysis_runner",
             }.get(module, module)
         return argv[0]
 
@@ -104,6 +105,11 @@ class FakeRunner:
         try:
             behavior = self.behaviors.get(name)
             if behavior is None:
+                if name == "analysis_runner":
+                    # Step 6 is real now: its outcome mapper parses the stdout
+                    # summary line, so the default fake emits a clean one —
+                    # mirroring the other components' "exit 0 is ok" default.
+                    return orchestrator.RunResult(0, stdout=analysis_summary() + "\n")
                 return orchestrator.RunResult(0)
             if isinstance(behavior, BaseException):
                 raise behavior
@@ -180,8 +186,14 @@ def test_default_registry_wires_collector_and_evaluator_and_marks_placeholders(t
     assert evaluator_argv[1:3] == ["-m", "pipeline.evaluator"]
     assert evaluator_argv[3].endswith("macro_briefs/2026-01-05.cn.md")
 
+    # Step 6 is real now (specs/analysis-runner.md): argv matches the runner CLI.
+    analysis_argv = registry["analysis_runner"].build_argv(ctx)
+    assert analysis_argv[1:] == [
+        "-m", "pipeline.analysis_runner", "--session", "cn", "--date", "2026-01-05",
+    ]
+
     # Settle (22v.10) and the not-yet-landed components are placeholders.
-    for name in ("settle", "ticker_evaluators", "analysis_runner", "execution_adapter"):
+    for name in ("settle", "ticker_evaluators", "execution_adapter"):
         assert registry[name].build_argv is None
     assert "22v.10" in registry["settle"].placeholder_reason
     assert registry["execution_adapter"].us_only
@@ -190,7 +202,9 @@ def test_default_registry_wires_collector_and_evaluator_and_marks_placeholders(t
 @pytest.mark.unit
 def test_default_registry_slot_records_placeholders_as_skipped(tmp_path):
     config = make_config(tmp_path)
-    runner = FakeRunner()
+    runner = FakeRunner(
+        {"analysis_runner": orchestrator.RunResult(0, stdout=analysis_summary(session="cn") + "\n")}
+    )
     write_eval(config, "cn", SLOT_DATE)
     orch = orchestrator.Orchestrator(
         config, "cn", slot_date=SLOT_DATE, runner=runner,
@@ -202,11 +216,13 @@ def test_default_registry_slot_records_placeholders_as_skipped(tmp_path):
     assert components["settle"]["status"] == "skipped"
     assert components["macro_collector"]["status"] == "ok"
     assert components["macro_evaluator"]["status"] == "ok"
+    assert components["analysis_runner"]["status"] == "ok"
     assert components["execution_adapter"]["status"] == "skipped"
     assert components["execution_adapter"]["error"] == "us slot only"
-    # Only the four real components spawned subprocesses.
+    # Only the five real components spawned subprocesses.
     assert sorted(name for name, _, _ in runner.calls) == [
-        "macro_collector", "macro_evaluator", "pool_builder", "ticker_collectors",
+        "analysis_runner", "macro_collector", "macro_evaluator",
+        "pool_builder", "ticker_collectors",
     ]
 
 
@@ -800,7 +816,27 @@ def test_end_of_slot_summary_always_sent(tmp_path):
     write_eval(config, "cn", SLOT_DATE)
     notifier, sent = recording_notifier()
     assert run_slot(config, "cn", FakeRunner(), notifier=notifier) == 0
-    assert any("slot cn 2026-01-05" in " ".join(argv) for argv in sent)
+    summary_msg = next(m for m in (" ".join(argv) for argv in sent) if "slot cn 2026-01-05" in m)
+    # Spec (Notifications): the always-sent summary reports plans produced /
+    # pairs run — plumbed from the runner's parsed slot-summary line; orders
+    # stay n/a until the execution adapter lands.
+    assert "plans 3/3" in summary_msg
+    assert "pairs 0 run" in summary_msg
+    assert "orders n/a" in summary_msg
+
+
+@pytest.mark.unit
+def test_end_of_slot_summary_omits_plan_counts_without_a_runner_summary(tmp_path):
+    """A hard-failed step 6 produced no summary line — the notification keeps
+    the component counts and names the failure instead of inventing zeros."""
+    config = make_config(tmp_path)
+    write_eval(config, "us", SLOT_DATE)
+    runner = FakeRunner({"analysis_runner": orchestrator.RunResult(1, stderr="boom\n")})
+    notifier, sent = recording_notifier()
+    assert run_slot(config, "us", runner, notifier=notifier) == 1
+    summary_msg = next(m for m in (" ".join(argv) for argv in sent) if "slot us" in m)
+    assert "plans " not in summary_msg
+    assert "failures: analysis_runner" in summary_msg
 
 
 # ---------------------------------------------------------------------------
@@ -984,6 +1020,24 @@ def ticker_summary(failed=(), written=2, requested=3, skipped=0, session="us"):
     )
 
 
+def analysis_summary(planned=3, completed=3, errors=0, invalid_plans=0, session="us"):
+    """An analysis-runner slot-summary stdout JSON line (runner R4)."""
+    return json.dumps(
+        {
+            "date": SLOT_DATE.isoformat(),
+            "session": session,
+            "planned": planned,
+            "completed": completed,
+            "errors": errors,
+            "invalid_plans": invalid_plans,
+            "pairs": 0,
+            "skipped": [],
+            "dropped": [],
+            "run_ids": [],
+        }
+    )
+
+
 def run_default_slot(config, session, runner, *, notifier=None):
     """Run a slot on the REAL default registry (not the fake one)."""
     orch = orchestrator.Orchestrator(
@@ -1026,8 +1080,21 @@ def test_default_registry_step_3_and_4_argvs_match_the_real_clis(tmp_path):
     assert args.backend == "claude"
     assert args.force is False
 
-    # Steps 5–7 remain placeholders.
-    for name in ("ticker_evaluators", "analysis_runner", "execution_adapter"):
+    # Step 6 argv parses against the REAL analysis-runner CLI, defaults intact
+    # (no --ticker/--force/--preset override from the orchestrator).
+    analysis_argv = registry["analysis_runner"].build_argv(ctx)
+    assert analysis_argv[0] == str(config.python_executable)
+    assert analysis_argv[1:] == [
+        "-m", "pipeline.analysis_runner", "--session", "cn", "--date", "2026-01-05",
+    ]
+    args = analysis_runner.build_parser().parse_args(analysis_argv[3:])
+    assert (args.session, args.date) == ("cn", SLOT_DATE)
+    assert args.ticker is None
+    assert args.force is False
+    assert args.preset is None
+
+    # Steps 5 and 7 remain placeholders.
+    for name in ("ticker_evaluators", "execution_adapter"):
         assert registry[name].build_argv is None
 
 
@@ -1255,3 +1322,94 @@ def test_steps_3_and_4_get_configured_timeouts(tmp_path):
     assert run_default_slot(config, "us", runner) == 0
     assert [t for name, _, t in runner.calls if name == "pool_builder"] == [111.0]
     assert [t for name, _, t in runner.calls if name == "ticker_collectors"] == [222.0]
+
+
+# ---------------------------------------------------------------------------
+# Step 6 wiring — analysis runner (specs/analysis-runner.md; additive tests)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_analysis_runner_outcome_mapper():
+    R = orchestrator.RunResult
+    # Clean summary — ok.
+    assert orchestrator._analysis_runner_outcome(
+        R(0, stdout=analysis_summary() + "\n")
+    ) == ("ok", None)
+    # ERROR rows and invalid plans are degraded-but-working: warn with counts.
+    status, error = orchestrator._analysis_runner_outcome(
+        R(0, stdout=analysis_summary(planned=6, completed=4, errors=2, invalid_plans=1) + "\n")
+    )
+    assert status == "warn"
+    assert "2 ERROR row(s)" in error
+    assert "1 invalid plan(s)" in error
+    assert "4/6 runs completed" in error
+    # Reporting gap on exit 0 — warn, never silently ok.
+    for stdout in ("", "not json\n", '["list"]\n'):
+        status, error = orchestrator._analysis_runner_outcome(R(0, stdout=stdout))
+        assert status == "warn"
+        assert "no parseable JSON summary line" in error
+    # The counts helper feeding the end-of-slot notification parses the same
+    # line (None on a reporting gap — the notification then omits the segment).
+    counts = orchestrator._analysis_summary_counts(
+        R(0, stdout=analysis_summary(planned=6, completed=4, errors=2, invalid_plans=1) + "\n")
+    )
+    assert counts == {"planned": 6, "completed": 4, "errors": 2, "invalid_plans": 1, "pairs": 0}
+    assert orchestrator._analysis_summary_counts(R(0, stdout="not json\n")) is None
+
+
+@pytest.mark.unit
+def test_analysis_runner_warn_and_failed_mapping_in_slot(tmp_path):
+    # Degraded summary (ERROR rows) — component warn, slot exit 0.
+    config = make_config(tmp_path / "warns")
+    write_eval(config, "us", SLOT_DATE)
+    runner = FakeRunner(
+        {
+            "ticker_collectors": orchestrator.RunResult(0, stdout=ticker_summary() + "\n"),
+            "analysis_runner": orchestrator.RunResult(
+                0, stdout=analysis_summary(planned=3, completed=2, errors=1) + "\n"
+            ),
+        }
+    )
+    notifier, sent = recording_notifier()
+    assert run_default_slot(config, "us", runner, notifier=notifier) == 0
+    record = read_status(config, "us")["components"]["analysis_runner"]
+    assert record["status"] == "warn"
+    assert "1 ERROR row(s)" in record["error"]
+    # warn is not a failure notification; the end-of-slot summary still goes out
+    # and carries the runner's parsed counts.
+    assert not any("analysis_runner" in " ".join(argv) for argv in sent)
+    summary_msg = next(m for m in (" ".join(argv) for argv in sent) if "slot us" in m)
+    assert "plans 2/3" in summary_msg
+    assert "run errors 1" in summary_msg
+
+    # Hard exit — failed, slot exit 1, but the slot still continued.
+    config = make_config(tmp_path / "fails")
+    write_eval(config, "us", SLOT_DATE)
+    runner = FakeRunner(
+        {
+            "ticker_collectors": orchestrator.RunResult(0, stdout=ticker_summary() + "\n"),
+            "analysis_runner": orchestrator.RunResult(
+                1, stderr="analysis-runner: pool unreadable\n"
+            ),
+        }
+    )
+    notifier, sent = recording_notifier()
+    assert run_default_slot(config, "us", runner, notifier=notifier) == 1
+    record = read_status(config, "us")["components"]["analysis_runner"]
+    assert record["status"] == "failed"
+    assert record["error"] == "analysis-runner: pool unreadable"
+    assert any("analysis_runner failed" in " ".join(argv) for argv in sent)
+
+
+@pytest.mark.unit
+def test_analysis_runner_gets_configured_timeout(tmp_path):
+    # R1: analysis runner 120 min default, config-owned and overridable.
+    assert DEFAULT_COMPONENT_TIMEOUTS["analysis_runner"] == 120 * 60
+    config = make_config(tmp_path, component_timeouts={"analysis_runner": 333})
+    write_eval(config, "us", SLOT_DATE)
+    runner = FakeRunner(
+        {"ticker_collectors": orchestrator.RunResult(0, stdout=ticker_summary() + "\n")}
+    )
+    assert run_default_slot(config, "us", runner) == 0
+    assert [t for name, _, t in runner.calls if name == "analysis_runner"] == [333.0]

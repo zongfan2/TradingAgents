@@ -41,7 +41,9 @@ collector / analysis runner / webui (readers).
       "technical": {
         "gate": "pass",
         "boll_daily": {"close": 291.2, "mid": 285.1, "upper": 301.4, "lower": 268.8},
-        "boll_weekly": {"close": 291.2, "mid": 262.0, "upper": 315.5, "lower": 208.4}
+        "boll_weekly": {"close": 291.2, "mid": 262.0, "upper": 315.5, "lower": 208.4},
+        "avg_dollar_volume_20d": 41200000.0,
+        "volume_ratio_5d_20d": 1.35
       }
     }
   ],

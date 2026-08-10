@@ -32,11 +32,25 @@ price structure must confirm it.
    weekly, compute Bollinger bands (20, 2σ) on both frames, then apply the
    configured rule set. Default rules (config `pool_gate_rules`, user-tunable —
    these encode strategy, not correctness):
-   - `pass`: weekly close ≥ weekly lower band (trend not broken) AND daily
-     close ≤ daily upper band × 1.02 (not chasing an overheated break).
-   - `watch`: exactly one of the two holds.
-   - `fail`: neither holds, or price history < 60 trading days.
-   Record the band snapshot in the pool entry regardless of outcome.
+   - **Liquidity floor (hard veto, checked first)**: 20-day average daily
+     dollar volume (mean of close × volume, listing currency) ≥
+     `min_avg_dollar_volume` — per-session defaults `us: 20_000_000` (USD),
+     `cn: 100_000_000` (listing currency: HKD for .HK, CNY for .SS/.SZ; one
+     shared cn threshold, tunable). Below the floor ⇒ `fail` regardless of
+     everything else: an illiquid name breaks the TradePlan's price
+     assumptions at execution time.
+   - Bollinger structure: weekly close ≥ weekly lower band (trend not
+     broken) AND daily close ≤ daily upper band × 1.02 (not chasing an
+     overheated break) ⇒ structure ok; exactly one holds ⇒ `watch`; neither
+     holds ⇒ `fail`.
+   - **Volume confirmation (soft demotion)**: 5-day average volume ≥ 20-day
+     average volume × `volume_confirm_ratio` (default 1.2). A structurally
+     passing candidate without the volume confirmation is demoted to `watch`
+     — a catalyst narrative with no volume response is either unseen by the
+     market or already priced in; volume alone never hard-fails.
+   - `fail` also when price history < 60 trading days.
+   Record the full snapshot (bands, avg dollar volume, volume ratio) in the
+   pool entry regardless of outcome.
 4. **Hysteresis + caps** — apply the contract's lifecycle rules and caps
    (including the absent-from-nomination decay rule and the
    gate-fail-high-score ⇒ watch routing); update `low_score_streak` /

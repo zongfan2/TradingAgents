@@ -3,9 +3,10 @@
 Spec: specs/orchestrator.md. One launchd-fired invocation drives a whole
 session slot: settle → macro collect/eval → pool build → ticker collect/eval →
 analysis → execution → notify. Steps whose components have not landed yet
-(settle 0, ticker evaluators 5, analysis 6, adapter 7) are registered
-placeholders recorded as ``skipped`` — the driver, ordering, barrier, status,
-lock, and notification machinery are fully live.
+(settle 0, ticker evaluators 5, adapter 7) are registered placeholders
+recorded as ``skipped`` — the driver, ordering, barrier, status, lock, and
+notification machinery are fully live, and step 6 runs the real analysis
+runner behind the macro-evaluator join barrier.
 
 Design points implemented here:
 
@@ -239,6 +240,17 @@ def build_default_registry(config: PipelineConfig) -> tuple[Component, ...]:
             ctx.slot_date.isoformat(),
         ]
 
+    def analysis_runner_argv(ctx: SlotContext) -> list[str]:
+        return [
+            python,
+            "-m",
+            "pipeline.analysis_runner",
+            "--session",
+            ctx.session,
+            "--date",
+            ctx.slot_date.isoformat(),
+        ]
+
     return (
         # Settle (22v.10) is explicitly out of scope — registered no-op placeholder.
         Component(0, "settle", None, placeholder_reason="settle step (22v.10) not in scope yet"),
@@ -247,7 +259,10 @@ def build_default_registry(config: PipelineConfig) -> tuple[Component, ...]:
         Component(3, "pool_builder", pool_builder_argv),
         Component(4, "ticker_collectors", ticker_collector_argv),
         Component(5, "ticker_evaluators", None),
-        Component(6, "analysis_runner", None),
+        # Step 6 runs strictly after the macro-evaluator join barrier (the
+        # _POST_BARRIER_STEPS split below) — a late verdict can never be
+        # bypassed by timing (specs/orchestrator.md slot sequence).
+        Component(6, "analysis_runner", analysis_runner_argv),
         Component(7, "execution_adapter", None, us_only=True),
     )
 
@@ -508,6 +523,10 @@ class Orchestrator:
         self.notifier = notifier or Notifier(enabled=config.notifications_enabled)
         self.status = StatusFile(status_file_path(config, session))
         self.ctx = SlotContext(session, self.slot_date, config)
+        #: Step 6's parsed slot-summary counts, carried into the end-of-slot
+        #: notification (spec: "plans produced, orders submitted/dry-run,
+        #: pairs run, failures"). ``None`` until the runner reports a summary.
+        self._analysis_counts: dict[str, int] | None = None
 
     # -- selection (R3) -----------------------------------------------------
 
@@ -631,6 +650,9 @@ class Orchestrator:
                 status, error = _pool_builder_outcome(result)
             elif name == "ticker_collectors":
                 status, error = _ticker_collector_outcome(result)
+            elif name == "analysis_runner":
+                status, error = _analysis_runner_outcome(result)
+                self._analysis_counts = _analysis_summary_counts(result)
             else:
                 status = "ok"
         finished = self.clock()
@@ -716,6 +738,17 @@ class Orchestrator:
             name for name, rec in components.items() if rec["status"] in ("failed", "timeout")
         )
         message = f"slot {self.session} {self.slot_date.isoformat()}: {summary or 'no components'}"
+        if self._analysis_counts is not None:
+            # Spec (Notifications): the end-of-slot summary reports plans
+            # produced / pairs run / failures. Orders stay n/a until the
+            # execution adapter lands (step 7 placeholder).
+            counts = self._analysis_counts
+            message += (
+                f"; plans {counts['completed']}/{counts['planned']}, "
+                f"pairs {counts['pairs']} run, "
+                f"invalid plans {counts['invalid_plans']}, "
+                f"run errors {counts['errors']}, orders n/a"
+            )
         if problems:
             message += "; failures: " + ", ".join(problems)
         # End-of-slot summary is always sent (dedup key still guards retries).
@@ -807,6 +840,62 @@ def _ticker_collector_outcome(result: RunResult) -> tuple[str, str | None]:
         f"({summary.get('written')}/{summary.get('requested')} written): {details}"
     )
     return "warn", text[:300]
+
+
+def _analysis_summary_counts(result: RunResult) -> dict[str, int] | None:
+    """Runner slot-summary counts for the end-of-slot notification.
+
+    ``None`` when the final stdout line is not a JSON summary (the outcome
+    mapper already surfaces that as ``warn``); missing/non-int fields read as
+    0 so a partial summary still yields a message.
+    """
+    line = _last_nonempty_line(result.stdout)
+    try:
+        summary = json.loads(line) if line else None
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(summary, dict):
+        return None
+
+    def count(key: str) -> int:
+        value = summary.get(key)
+        return value if isinstance(value, int) else 0
+
+    return {key: count(key) for key in ("planned", "completed", "errors", "invalid_plans", "pairs")}
+
+
+def _analysis_runner_outcome(result: RunResult) -> tuple[str, str | None]:
+    """Map an analysis-runner exit 0 to component status via its summary line.
+
+    The runner's stdout ends with one JSON slot-summary line (runner R4). Any
+    ``decision: "ERROR"`` rows or invalid plans are a degraded-but-working
+    slot — ``warn`` with the counts surfaced in ``error`` (per-run isolation
+    is the runner's R3; the component itself worked). Same defensive posture
+    as the other mappers: an exit 0 without a parseable summary is a
+    *reporting* gap — ``warn``, never a silent ``ok``. Hard exits never reach
+    this mapper — they map to ``failed`` with the stderr one-liner.
+    """
+    line = _last_nonempty_line(result.stdout)
+    try:
+        summary = json.loads(line) if line else None
+    except json.JSONDecodeError:
+        summary = None
+    if not isinstance(summary, dict):
+        return "warn", "exited 0 but stdout has no parseable JSON summary line"
+
+    def count(key: str) -> int:
+        value = summary.get(key)
+        return value if isinstance(value, int) else 0
+
+    errors = count("errors")
+    invalid = count("invalid_plans")
+    if errors or invalid:
+        return (
+            "warn",
+            f"{errors} ERROR row(s), {invalid} invalid plan(s) "
+            f"({count('completed')}/{count('planned')} runs completed)",
+        )
+    return "ok", None
 
 
 # ---------------------------------------------------------------------------
