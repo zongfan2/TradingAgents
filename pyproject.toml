@@ -44,6 +44,13 @@ dev = [
 bedrock = [
     "langchain-aws>=1.5.0",
 ]
+# Alpaca paper-trading SDK for the execution adapter (adapter spec R2;
+# lazy-imported by pipeline/execution_adapter.py only). Optional so the
+# offline pipeline and tests — which fake the broker boundary — never need
+# it: pip install "tradingagents[execution]".
+execution = [
+    "alpaca-py>=0.33.0",
+]
 
 [project.scripts]
 tradingagents = "cli.main:app"

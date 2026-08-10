@@ -19,7 +19,13 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from pipeline import analysis_runner, orchestrator, pool_builder, ticker_collector
+from pipeline import (
+    analysis_runner,
+    execution_adapter,
+    orchestrator,
+    pool_builder,
+    ticker_collector,
+)
 from pipeline.config import (
     DEFAULT_COMPONENT_TIMEOUTS,
     PipelineConfig,
@@ -94,6 +100,7 @@ class FakeRunner:
                 "pipeline.pool_builder": "pool_builder",
                 "pipeline.ticker_collector": "ticker_collectors",
                 "pipeline.analysis_runner": "analysis_runner",
+                "pipeline.execution_adapter": "execution_adapter",
             }.get(module, module)
         return argv[0]
 
@@ -110,6 +117,9 @@ class FakeRunner:
                     # summary line, so the default fake emits a clean one —
                     # mirroring the other components' "exit 0 is ok" default.
                     return orchestrator.RunResult(0, stdout=analysis_summary() + "\n")
+                if name == "execution_adapter":
+                    # Step 7 is real now: same summary-line default as step 6.
+                    return orchestrator.RunResult(0, stdout=execution_summary() + "\n")
                 return orchestrator.RunResult(0)
             if isinstance(behavior, BaseException):
                 raise behavior
@@ -192,11 +202,21 @@ def test_default_registry_wires_collector_and_evaluator_and_marks_placeholders(t
         "-m", "pipeline.analysis_runner", "--session", "cn", "--date", "2026-01-05",
     ]
 
+    # Step 7 is real now (specs/execution-adapter.md): argv matches the
+    # adapter CLI, us-only stays enforced by the registry flag.
+    adapter_argv = registry["execution_adapter"].build_argv(
+        orchestrator.SlotContext("us", SLOT_DATE, config)
+    )
+    assert adapter_argv[1:] == [
+        "-m", "pipeline.execution_adapter", "submit", "--session", "us",
+        "--date", "2026-01-05",
+    ]
+    assert registry["execution_adapter"].us_only
+
     # Settle (22v.10) and the not-yet-landed components are placeholders.
-    for name in ("settle", "ticker_evaluators", "execution_adapter"):
+    for name in ("settle", "ticker_evaluators"):
         assert registry[name].build_argv is None
     assert "22v.10" in registry["settle"].placeholder_reason
-    assert registry["execution_adapter"].us_only
 
 
 @pytest.mark.unit
@@ -730,6 +750,13 @@ def test_concurrent_cn_and_us_slots_leave_both_files_intact(tmp_path):
 
     def slow(argv):
         time.sleep(0.01)
+        # Steps 6/7 are real: their outcome mappers parse a stdout summary
+        # line, so the slow fake emits the same clean defaults as FakeRunner.
+        name = FakeRunner._component_name(argv)
+        if name == "analysis_runner":
+            return orchestrator.RunResult(0, stdout=analysis_summary() + "\n")
+        if name == "execution_adapter":
+            return orchestrator.RunResult(0, stdout=execution_summary() + "\n")
         return orchestrator.RunResult(0)
 
     results = {}
@@ -1038,6 +1065,28 @@ def analysis_summary(planned=3, completed=3, errors=0, invalid_plans=0, session=
     )
 
 
+def execution_summary(
+    submitted=0, dry_run=2, skipped=1, canceled=0, errors=0, rejected=0, session="us"
+):
+    """An execution-adapter submit stdout JSON summary line (adapter R4)."""
+    return json.dumps(
+        {
+            "entrypoint": "submit",
+            "date": SLOT_DATE.isoformat(),
+            "session": session,
+            "live": False,
+            "halted": False,
+            "submitted": submitted,
+            "dry_run": dry_run,
+            "skipped": skipped,
+            "canceled": canceled,
+            "recovered": 0,
+            "errors": errors,
+            "rejected": rejected,
+        }
+    )
+
+
 def run_default_slot(config, session, runner, *, notifier=None):
     """Run a slot on the REAL default registry (not the fake one)."""
     orch = orchestrator.Orchestrator(
@@ -1093,9 +1142,10 @@ def test_default_registry_step_3_and_4_argvs_match_the_real_clis(tmp_path):
     assert args.force is False
     assert args.preset is None
 
-    # Steps 5 and 7 remain placeholders.
-    for name in ("ticker_evaluators", "execution_adapter"):
-        assert registry[name].build_argv is None
+    # Step 5 remains a placeholder; step 7 is real (see the step-7 wiring
+    # section below for its argv/CLI parse checks).
+    assert registry["ticker_evaluators"].build_argv is None
+    assert registry["execution_adapter"].build_argv is not None
 
 
 @pytest.mark.unit
@@ -1413,3 +1463,159 @@ def test_analysis_runner_gets_configured_timeout(tmp_path):
     )
     assert run_default_slot(config, "us", runner) == 0
     assert [t for name, _, t in runner.calls if name == "analysis_runner"] == [333.0]
+
+
+# ---------------------------------------------------------------------------
+# Step 7 wiring — execution adapter (specs/execution-adapter.md; additive)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_default_registry_step_7_argv_matches_the_real_adapter_cli(tmp_path):
+    config = make_config(tmp_path)
+    registry = {c.name: c for c in orchestrator.build_default_registry(config)}
+    ctx = orchestrator.SlotContext("us", SLOT_DATE, config)
+
+    adapter_argv = registry["execution_adapter"].build_argv(ctx)
+    assert adapter_argv[0] == str(config.python_executable)
+    assert adapter_argv[1:] == [
+        "-m", "pipeline.execution_adapter", "submit", "--session", "us",
+        "--date", "2026-01-05",
+    ]
+    # The argv parses against the REAL adapter CLI with defaults intact —
+    # the orchestrator never passes --run-id/--execute/--dry-run (auto
+    # execution stays governed by config + the halt file, adapter S2/S3).
+    args = execution_adapter.build_parser().parse_args(adapter_argv[3:])
+    assert args.command == "submit"
+    assert (args.session, args.date) == ("us", SLOT_DATE)
+    assert args.run_id is None
+    assert args.execute is False
+    assert args.dry_run is False
+
+
+@pytest.mark.unit
+def test_execution_adapter_outcome_mapper():
+    R = orchestrator.RunResult
+    # Clean summary — ok.
+    assert orchestrator._execution_adapter_outcome(
+        R(0, stdout=execution_summary() + "\n")
+    ) == ("ok", None)
+    # Any broker error or rejected order is degraded-but-working: warn with
+    # the submission/skip counts surfaced.
+    status, error = orchestrator._execution_adapter_outcome(
+        R(0, stdout=execution_summary(submitted=3, skipped=2, errors=1, rejected=1) + "\n")
+    )
+    assert status == "warn"
+    assert "1 broker error(s)" in error
+    assert "1 rejected" in error
+    assert "3 submitted" in error
+    assert "2 skipped" in error
+    # SELL leg cancels are normal operations — never a warn on their own.
+    assert orchestrator._execution_adapter_outcome(
+        R(0, stdout=execution_summary(canceled=3) + "\n")
+    ) == ("ok", None)
+    # Reporting gap on exit 0 — warn, never silently ok.
+    for stdout in ("", "not json\n", '["list"]\n'):
+        status, error = orchestrator._execution_adapter_outcome(R(0, stdout=stdout))
+        assert status == "warn"
+        assert "no parseable JSON summary line" in error
+    # The counts helper feeding the end-of-slot notification parses the same
+    # line (None on a reporting gap).
+    counts = orchestrator._execution_summary_counts(
+        R(0, stdout=execution_summary(submitted=2, dry_run=1, rejected=1) + "\n")
+    )
+    assert counts == {
+        "submitted": 2, "dry_run": 1, "skipped": 1, "canceled": 0, "errors": 0, "rejected": 1,
+    }
+    assert orchestrator._execution_summary_counts(R(0, stdout="not json\n")) is None
+
+
+@pytest.mark.unit
+def test_execution_adapter_warn_and_failed_mapping_in_slot(tmp_path):
+    # Rejected order in the summary — component warn, slot exit 0.
+    config = make_config(tmp_path / "warns")
+    write_eval(config, "us", SLOT_DATE)
+    runner = FakeRunner(
+        {
+            "ticker_collectors": orchestrator.RunResult(0, stdout=ticker_summary() + "\n"),
+            "execution_adapter": orchestrator.RunResult(
+                0, stdout=execution_summary(submitted=1, rejected=1) + "\n"
+            ),
+        }
+    )
+    notifier, sent = recording_notifier()
+    assert run_default_slot(config, "us", runner, notifier=notifier) == 0
+    record = read_status(config, "us")["components"]["execution_adapter"]
+    assert record["status"] == "warn"
+    assert "1 rejected" in record["error"]
+    # warn is not a failure notification.
+    assert not any("execution_adapter" in " ".join(argv) for argv in sent)
+
+    # Hard exit (e.g. the S1 paper-account refusal) — failed, slot exit 1.
+    config = make_config(tmp_path / "fails")
+    write_eval(config, "us", SLOT_DATE)
+    runner = FakeRunner(
+        {
+            "ticker_collectors": orchestrator.RunResult(0, stdout=ticker_summary() + "\n"),
+            "execution_adapter": orchestrator.RunResult(
+                1,
+                stderr="execution-adapter: refusing to run — connected Alpaca "
+                "account is not a PAPER (PA…) account (S1 paper-only invariant)\n",
+            ),
+        }
+    )
+    notifier, sent = recording_notifier()
+    assert run_default_slot(config, "us", runner, notifier=notifier) == 1
+    record = read_status(config, "us")["components"]["execution_adapter"]
+    assert record["status"] == "failed"
+    assert "S1 paper-only invariant" in record["error"]
+    assert any("execution_adapter failed" in " ".join(argv) for argv in sent)
+
+
+@pytest.mark.unit
+def test_execution_adapter_us_only_and_timeout_wiring(tmp_path):
+    # R1 default timeout class for the adapter/settle step.
+    assert DEFAULT_COMPONENT_TIMEOUTS["execution_adapter"] == 900
+
+    # cn slot: never spawned, recorded as skipped (us slot only).
+    config = make_config(tmp_path / "cn")
+    write_eval(config, "cn", SLOT_DATE)
+    runner = FakeRunner()
+    assert run_default_slot(config, "cn", runner) == 0
+    record = read_status(config, "cn")["components"]["execution_adapter"]
+    assert record["status"] == "skipped"
+    assert record["error"] == "us slot only"
+    assert not any(name == "execution_adapter" for name, _, _ in runner.calls)
+
+    # us slot: spawned with the configured timeout and the submit argv.
+    config = make_config(tmp_path / "us", component_timeouts={"execution_adapter": 77})
+    write_eval(config, "us", SLOT_DATE)
+    runner = FakeRunner(
+        {"ticker_collectors": orchestrator.RunResult(0, stdout=ticker_summary() + "\n")}
+    )
+    assert run_default_slot(config, "us", runner) == 0
+    calls = [(argv, t) for name, argv, t in runner.calls if name == "execution_adapter"]
+    assert len(calls) == 1
+    argv, timeout = calls[0]
+    assert timeout == 77.0
+    assert argv[1:4] == ["-m", "pipeline.execution_adapter", "submit"]
+    assert read_status(config, "us")["components"]["execution_adapter"]["status"] == "ok"
+
+
+@pytest.mark.unit
+def test_end_of_slot_summary_carries_order_counts_from_step_7(tmp_path):
+    config = make_config(tmp_path)
+    write_eval(config, "us", SLOT_DATE)
+    runner = FakeRunner(
+        {
+            "ticker_collectors": orchestrator.RunResult(0, stdout=ticker_summary() + "\n"),
+            "execution_adapter": orchestrator.RunResult(
+                0, stdout=execution_summary(submitted=1, dry_run=2) + "\n"
+            ),
+        }
+    )
+    notifier, sent = recording_notifier()
+    assert run_default_slot(config, "us", runner, notifier=notifier) == 0
+    summary_msg = next(m for m in (" ".join(argv) for argv in sent) if "slot us" in m)
+    assert "orders 1 live/2 dry-run" in summary_msg
+    assert "orders n/a" not in summary_msg

@@ -264,6 +264,71 @@ def test_pool_generated_at_must_be_timezone_aware():
 
 
 # ---------------------------------------------------------------------------
+# Technical block v1.1 liquidity fields (optional, additive)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_technical_liquidity_fields_round_trip():
+    entry = opportunity_entry()
+    entry["technical"]["avg_dollar_volume_20d"] = 41_200_000.0
+    entry["technical"]["volume_ratio_5d_20d"] = 1.35
+    parsed = pool.PoolFile.model_validate(pool_dict(opportunity=[entry]))
+    technical = parsed.opportunity[0].technical
+    assert technical.avg_dollar_volume_20d == 41_200_000.0
+    assert technical.volume_ratio_5d_20d == 1.35
+    # Serialized form re-validates with the values intact (writer round-trip).
+    dumped = parsed.model_dump(mode="json")
+    assert dumped["opportunity"][0]["technical"]["avg_dollar_volume_20d"] == 41_200_000.0
+    reparsed = pool.PoolFile.model_validate(dumped)
+    assert reparsed.opportunity[0].technical.volume_ratio_5d_20d == 1.35
+
+
+@pytest.mark.unit
+def test_technical_liquidity_fields_are_optional():
+    # Pre-v1.1 pool files (no liquidity fields anywhere) keep validating.
+    parsed = pool.PoolFile.model_validate(pool_dict())
+    technical = parsed.opportunity[0].technical
+    assert technical.avg_dollar_volume_20d is None
+    assert technical.volume_ratio_5d_20d is None
+    # A watch-entry minimal block ({"gate": ...}) is untouched too.
+    assert parsed.watch[0].technical.avg_dollar_volume_20d is None
+
+
+@pytest.mark.unit
+def test_lenient_parse_knows_the_liquidity_fields(caplog):
+    # parse_lenient path unaffected: the v1.1 fields are contract fields, not
+    # unknown keys — no reader warning, values preserved.
+    entry = opportunity_entry()
+    entry["technical"]["avg_dollar_volume_20d"] = 1_000.0
+    entry["technical"]["volume_ratio_5d_20d"] = 0.0
+    with caplog.at_level("WARNING", logger="pipeline.contracts"):
+        parsed = pool.PoolFile.parse_lenient(pool_dict(opportunity=[entry]))
+    assert "avg_dollar_volume_20d" not in caplog.text
+    assert "volume_ratio_5d_20d" not in caplog.text
+    assert parsed.opportunity[0].technical.avg_dollar_volume_20d == 1_000.0
+    assert parsed.opportunity[0].technical.volume_ratio_5d_20d == 0.0
+
+
+@pytest.mark.unit
+def test_technical_liquidity_field_constraints():
+    # avg dollar volume must be strictly positive when present.
+    entry = opportunity_entry()
+    entry["technical"]["avg_dollar_volume_20d"] = 0.0
+    with pytest.raises(ValidationError, match="avg_dollar_volume_20d"):
+        pool.PoolFile.model_validate(pool_dict(opportunity=[entry]))
+    # The volume ratio may be 0.0 (a dead-quiet week) but never negative.
+    entry = opportunity_entry()
+    entry["technical"]["volume_ratio_5d_20d"] = -0.1
+    with pytest.raises(ValidationError, match="volume_ratio_5d_20d"):
+        pool.PoolFile.model_validate(pool_dict(opportunity=[entry]))
+    entry = opportunity_entry()
+    entry["technical"]["volume_ratio_5d_20d"] = 0.0
+    parsed = pool.PoolFile.model_validate(pool_dict(opportunity=[entry]))
+    assert parsed.opportunity[0].technical.volume_ratio_5d_20d == 0.0
+
+
+# ---------------------------------------------------------------------------
 # Reading-rule edge cases
 # ---------------------------------------------------------------------------
 

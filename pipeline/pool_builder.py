@@ -15,7 +15,9 @@ Spec: ``specs/pool-builder.md`` (stages 1–5, R1–R5); data shape:
 3. **Technical gate** — deterministic (R2, no LLM): daily OHLCV via an
    injectable fetcher, calendar-week resample (last close), Bollinger
    (20, 2σ, population σ — the TA-lib convention) on both frames, verdict per
-   the configured :class:`GateRules`.
+   the configured :class:`GateRules` (v1.1: per-session 20d dollar-volume
+   liquidity floor as a hard veto checked before structure, plus a 5d/20d
+   volume-confirmation ratio that demotes a structural pass to watch).
 4. **Hysteresis + caps** — the pool contract's lifecycle rules: enter fast
    (gate pass + score ≥ entry), exit slow (3-pool low-score streak / 2-pool
    gate-fail streak ⇒ ``removed``), absent-from-nomination decay,
@@ -45,10 +47,11 @@ import argparse
 import json
 import logging
 import math
+import os
 import re
 import subprocess
 import sys
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -158,12 +161,35 @@ class NominationError(RuntimeError):
     degrade path (carried-forward pool), never a process failure."""
 
 
+#: Gate v1.1 per-session liquidity floor defaults (spec stage 3): 20-day
+#: average daily dollar volume in the listing currency — USD for ``us``, one
+#: shared ``cn`` threshold (HKD for .HK, CNY for .SS/.SZ).
+DEFAULT_MIN_AVG_DOLLAR_VOLUME: dict[str, float] = {
+    "us": 20_000_000.0,
+    "cn": 100_000_000.0,
+}
+#: Env overrides, per-session (``TRADINGAGENTS_SLOT_TIME_{CN,US}`` precedent).
+MIN_AVG_DOLLAR_VOLUME_ENVS = {
+    session: f"TRADINGAGENTS_MIN_AVG_DOLLAR_VOLUME_{session.upper()}"
+    for session in DEFAULT_MIN_AVG_DOLLAR_VOLUME
+}
+VOLUME_CONFIRM_RATIO_ENV = "TRADINGAGENTS_VOLUME_CONFIRM_RATIO"
+
+#: The liquidity metric windows are part of the metric's *definition* — the
+#: contract pins them in the field names (``avg_dollar_volume_20d``,
+#: ``volume_ratio_5d_20d``) — so they are constants, not :class:`GateRules`
+#: strategy knobs.
+DOLLAR_VOLUME_WINDOW = 20
+VOLUME_CONFIRM_FAST_WINDOW = 5
+
+
 @dataclass(frozen=True)
 class GateRules:
     """Stage-3 knobs — the spec's defaults for the ``pool_gate_rules`` config
     key (structured config is file-only per the design doc; the shared
-    :mod:`pipeline.config` has no field for it yet, so the defaults live here
-    and are injectable via :func:`build_pool`)."""
+    :mod:`pipeline.config` has no field for it yet, so the defaults live here,
+    are env-resolved via :func:`load_gate_rules`, and are injectable via
+    :func:`build_pool`)."""
 
     boll_window: int = 20
     boll_sigma: float = 2.0
@@ -177,6 +203,39 @@ class GateRules:
     #: to ~100 (or shortening the weekly window) is a spec decision, flagged
     #: rather than changed here.
     min_daily_bars: int = 60
+    #: v1.1 hard veto: per-session 20d average-dollar-volume floor. A session
+    #: absent from the mapping has no floor (and unit callers that pass no
+    #: session skip the check entirely — the floor needs a market context).
+    min_avg_dollar_volume: Mapping[str, float] = field(
+        default_factory=lambda: dict(DEFAULT_MIN_AVG_DOLLAR_VOLUME)
+    )
+    #: v1.1 soft demotion: a structural pass whose 5d/20d volume ratio is
+    #: below this is demoted to ``watch`` (never lower; never touches
+    #: watch/fail verdicts).
+    volume_confirm_ratio: float = 1.2
+
+
+def load_gate_rules(env: Mapping[str, str] | None = None) -> GateRules:
+    """Gate rules from spec defaults + ``TRADINGAGENTS_*`` env (loud on junk
+    values — the analysis runner's env-resolved settings pattern; a
+    :mod:`pipeline.config` hoist candidate, frozen this change set)."""
+    if env is None:
+        env = os.environ
+    defaults = GateRules()
+
+    def raw(key: str) -> str:
+        return (env.get(key) or "").strip()
+
+    floors = dict(defaults.min_avg_dollar_volume)
+    for session, key in MIN_AVG_DOLLAR_VOLUME_ENVS.items():
+        value = raw(key)
+        if value:
+            floors[session] = float(value)
+    ratio = raw(VOLUME_CONFIRM_RATIO_ENV)
+    return GateRules(
+        min_avg_dollar_volume=floors,
+        volume_confirm_ratio=float(ratio) if ratio else defaults.volume_confirm_ratio,
+    )
 
 
 @dataclass(frozen=True)
@@ -588,45 +647,131 @@ def weekly_closes(bars: Sequence[Sequence]) -> list[float]:
     return closes
 
 
+def _trailing_mean(values: Sequence[float], window: int) -> float | None:
+    if len(values) < window:
+        return None
+    return sum(values[-window:]) / window
+
+
+def liquidity_metrics(bars: Sequence[Sequence]) -> tuple[float | None, float | None]:
+    """Gate v1.1 liquidity numbers on date-ordered daily bars, as
+    ``(avg_dollar_volume_20d, volume_ratio_5d_20d)``:
+
+    - 20-day mean of close × volume (listing currency);
+    - 5-day / 20-day mean-volume ratio.
+
+    ``None`` marks an uncomputable metric: history shorter than the window,
+    a zero 20d average volume (ratio only), or a non-finite close/volume
+    anywhere in a trailing window — yfinance does emit NaN volume bars on
+    thin tapes, and NaN must never leak into the snapshot (the contract
+    rejects it, and ``NaN < floor`` is False, which would silently bypass
+    the liquidity veto). Never a fabricated number.
+    """
+    ordered = sorted(bars, key=_bar_date)
+    closes = [float(bar[4]) for bar in ordered]
+    volumes = [float(bar[5]) for bar in ordered]
+    dollar = _trailing_mean(
+        [close * volume for close, volume in zip(closes, volumes, strict=True)],
+        DOLLAR_VOLUME_WINDOW,
+    )
+    if dollar is not None and not math.isfinite(dollar):
+        dollar = None
+    fast = _trailing_mean(volumes, VOLUME_CONFIRM_FAST_WINDOW)
+    slow = _trailing_mean(volumes, DOLLAR_VOLUME_WINDOW)
+    ratio = None
+    if (
+        fast is not None
+        and slow is not None
+        and math.isfinite(fast)
+        and math.isfinite(slow)
+        and fast >= 0.0
+        and slow > 0.0
+    ):
+        ratio = fast / slow
+    return dollar, ratio
+
+
 def evaluate_gate(
     n_daily_bars: int,
     daily: BollBands | None,
     weekly: BollBands | None,
     rules: GateRules | None = None,
+    *,
+    session: str | None = None,
+    avg_dollar_volume_20d: float | None = None,
+    volume_ratio_5d_20d: float | None = None,
 ) -> Gate:
-    """The spec's default rule set, as a pure decision on band snapshots:
+    """The spec's v1.1 rule set, as a pure decision on snapshot values, in
+    the spec's fixed order:
 
-    - ``pass``: weekly close ≥ weekly lower band (trend not broken) AND daily
-      close ≤ daily upper band × ``daily_upper_mult`` (not chasing a break).
-    - ``watch``: exactly one of the two holds.
-    - ``fail``: neither holds, or history < ``min_daily_bars`` daily bars.
-
-    A frame whose bands are not computable (history shorter than the Bollinger
-    window) cannot hold its condition.
+    1. History < ``min_daily_bars`` daily bars ⇒ ``fail``.
+    2. **Liquidity floor** (hard veto, terminal): 20d average dollar volume
+       below the session's ``min_avg_dollar_volume`` ⇒ ``fail`` regardless of
+       everything else. Applies only when ``session`` has a configured floor;
+       an uncomputable average (``None``) counts as below the floor.
+    3. Bollinger structure — ``pass``: weekly close ≥ weekly lower band
+       (trend not broken) AND daily close ≤ daily upper band ×
+       ``daily_upper_mult`` (not chasing a break); ``watch``: exactly one
+       holds; ``fail``: neither holds. A frame whose bands are not computable
+       (history shorter than the Bollinger window) cannot hold its condition.
+    4. **Volume confirmation** (soft demotion): a structural ``pass`` whose
+       ``volume_ratio_5d_20d`` is provided and < ``volume_confirm_ratio`` is
+       demoted to ``watch`` — never below watch, and never applied to a
+       ``watch`` or ``fail`` verdict.
     """
     rules = rules or GateRules()
     if n_daily_bars < rules.min_daily_bars:
         return "fail"
+    floor = rules.min_avg_dollar_volume.get(session) if session is not None else None
+    if floor is not None and (avg_dollar_volume_20d is None or avg_dollar_volume_20d < floor):
+        return "fail"
     daily_ok = daily is not None and daily.close <= daily.upper * rules.daily_upper_mult
     weekly_ok = weekly is not None and weekly.close >= weekly.lower
     if daily_ok and weekly_ok:
+        if volume_ratio_5d_20d is not None and volume_ratio_5d_20d < rules.volume_confirm_ratio:
+            return "watch"
         return "pass"
     if daily_ok or weekly_ok:
         return "watch"
     return "fail"
 
 
-def technical_gate(bars: Sequence[Sequence], rules: GateRules | None = None) -> TechnicalBlock:
-    """Full stage-3 verdict for one ticker's daily OHLCV history. The band
-    snapshot is recorded whenever computable, regardless of the verdict."""
+def technical_gate(
+    bars: Sequence[Sequence],
+    rules: GateRules | None = None,
+    session: str | None = None,
+) -> TechnicalBlock:
+    """Full stage-3 verdict for one ticker's daily OHLCV history (gate v1.1).
+
+    The band + liquidity snapshot is recorded whenever computable, regardless
+    of the verdict (fail paths included). The per-session liquidity floor
+    needs a market context, so it applies only when ``session`` is given (the
+    builder always passes it); the volume-confirmation demotion is
+    session-independent and always applies.
+    """
     rules = rules or GateRules()
     ordered = sorted(bars, key=_bar_date)
     daily = bollinger([float(bar[4]) for bar in ordered], rules.boll_window, rules.boll_sigma)
     weekly = bollinger(weekly_closes(ordered), rules.boll_window, rules.boll_sigma)
+    dollar_volume, volume_ratio = liquidity_metrics(ordered)
     return TechnicalBlock(
-        gate=evaluate_gate(len(ordered), daily, weekly, rules),
+        gate=evaluate_gate(
+            len(ordered),
+            daily,
+            weekly,
+            rules,
+            session=session,
+            avg_dollar_volume_20d=dollar_volume,
+            volume_ratio_5d_20d=volume_ratio,
+        ),
         boll_daily=daily,
         boll_weekly=weekly,
+        # The contract records only positive dollar volume (gt=0): an all-zero
+        # tape stays None in the snapshot while the veto above still fails it.
+        avg_dollar_volume_20d=(
+            dollar_volume if dollar_volume is not None and dollar_volume > 0 else None
+        ),
+        volume_ratio_5d_20d=volume_ratio,
     )
 
 
@@ -663,12 +808,15 @@ def _gate_snapshots(
     tickers: Iterable[str],
     fetch: FetchOhlcv,
     rules: GateRules,
+    session: str | None = None,
 ) -> dict[str, TechnicalBlock | None]:
-    """Gate every ticker in the day's evaluation universe. A fetch failure is
-    ``None`` (degrade, don't die): candidates route as gate ``fail`` with no
-    band snapshot, existing members record the same snapshot but **freeze**
-    their ``gate_fail_streak`` (an infra error is not a structural verdict),
-    and core annotation is simply skipped."""
+    """Gate every ticker in the day's evaluation universe. A fetch failure —
+    or a gate computation error on one ticker's pathological bars — is
+    ``None`` (R4 degrade, don't die: one bad tape never takes down the whole
+    slot's pool): candidates route as gate ``fail`` with no band or liquidity
+    snapshot (numbers are never fabricated), existing members record the same
+    snapshot but **freeze** their ``gate_fail_streak`` (an infra error is not
+    a structural verdict), and core annotation is simply skipped."""
     snapshots: dict[str, TechnicalBlock | None] = {}
     for ticker in sorted(set(tickers)):
         try:
@@ -677,7 +825,16 @@ def _gate_snapshots(
             logger.warning("OHLCV fetch failed for %s — gate 'fail', no bands: %s", ticker, exc)
             snapshots[ticker] = None
             continue
-        snapshots[ticker] = technical_gate(bars, rules)
+        try:
+            snapshots[ticker] = technical_gate(bars, rules, session)
+        except Exception as exc:
+            logger.warning(
+                "technical gate failed for %s — treated like a fetch failure "
+                "(gate 'fail', no bands): %s",
+                ticker,
+                exc,
+            )
+            snapshots[ticker] = None
     return snapshots
 
 
@@ -934,7 +1091,8 @@ def build_pool(
         as_of = session_date(session)  # today in the *session* timezone
     elif isinstance(as_of, str):
         as_of = date.fromisoformat(as_of)
-    gate_rules = gate_rules or GateRules()
+    #: Explicit injection wins; otherwise spec defaults with env overrides.
+    gate_rules = gate_rules or load_gate_rules()
     lifecycle_rules = lifecycle_rules or LifecycleRules()
 
     directory = resolve_pool_dir(pool_dir)
@@ -989,7 +1147,9 @@ def build_pool(
         # lifecycle. Core is gated too, but only as a renderable annotation
         # (R1: the gate never drops a core ticker).
         universe = core_tickers | set(nominated) | {e.ticker for e in prior_opportunity}
-        gates = _gate_snapshots(universe, fetch_ohlcv or default_fetch_daily_ohlcv, gate_rules)
+        gates = _gate_snapshots(
+            universe, fetch_ohlcv or default_fetch_daily_ohlcv, gate_rules, session
+        )
         lifecycle = apply_lifecycle(
             as_of, prior, nominated, gates, core_tickers, lifecycle_rules
         )

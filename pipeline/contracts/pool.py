@@ -52,6 +52,14 @@ class TechnicalBlock(ContractModel):
     gate: Gate
     boll_daily: BollBands | None = None
     boll_weekly: BollBands | None = None
+    #: Gate v1.1 liquidity snapshot (optional — pre-v1.1 pool files stay
+    #: valid). ``avg_dollar_volume_20d`` is the 20-day mean of close × volume
+    #: in the listing currency; only positive values are recorded (an
+    #: uncomputable or zero-volume tape stays ``None`` — never fabricated).
+    avg_dollar_volume_20d: float | None = Field(default=None, gt=0.0)
+    #: 5-day / 20-day average-volume ratio (volume confirmation); 0.0 is a
+    #: legal observation (a dead-quiet week), negatives are not.
+    volume_ratio_5d_20d: float | None = Field(default=None, ge=0.0)
 
 
 class CoreEntry(ContractModel):

@@ -24,6 +24,8 @@ from pipeline.pool_builder import (
     bollinger,
     build_pool,
     evaluate_gate,
+    liquidity_metrics,
+    load_gate_rules,
     main,
     parse_nominations,
     technical_gate,
@@ -50,15 +52,32 @@ NEITHER_CLOSES = [100.0] * 69 + [200.0]
 # 59 bars: below the 60-bar minimum => fail regardless of structure.
 SHORT_CLOSES = [100.0] * 59
 
+# Default fixture volume profile (gate v1.1): liquid and volume-confirmed so
+# the band fixtures above keep exercising the *structure* legs. Base 300k with
+# the last 5 bars at 600k => 20d avg volume 375k (avg dollar volume ~= close
+# x 375k, >= $20M for close >= ~54) and 5d/20d ratio 600k/375k = 1.6 >= 1.2.
+LIQUID_BASE_VOLUME = 300_000.0
+LIQUID_CONFIRM_VOLUME = 600_000.0
+LIQUID_AVG_VOLUME_20D = 375_000.0  # (15*300k + 5*600k) / 20
+LIQUID_VOLUME_RATIO = 1.6  # 600k / 375k
 
-def make_bars(closes, start=date(2026, 3, 2)):
-    """Daily bars on consecutive weekdays starting at ``start`` (a Monday)."""
+
+def make_bars(closes, start=date(2026, 3, 2), volumes=None):
+    """Daily bars on consecutive weekdays starting at ``start`` (a Monday).
+
+    ``volumes`` (parallel to ``closes``) overrides the default liquid +
+    volume-confirmed profile for tests that exercise the v1.1 liquidity legs.
+    """
+    if volumes is None:
+        volumes = [LIQUID_BASE_VOLUME] * len(closes)
+        confirm = min(5, len(closes))
+        volumes[len(closes) - confirm :] = [LIQUID_CONFIRM_VOLUME] * confirm
     bars = []
     day = start
-    for close in closes:
+    for close, volume in zip(closes, volumes, strict=True):
         while day.weekday() >= 5:
             day += timedelta(days=1)
-        bars.append((day, close, close + 1.0, close - 1.0, close, 1_000.0))
+        bars.append((day, close, close + 1.0, close - 1.0, close, volume))
         day += timedelta(days=1)
     return bars
 
@@ -79,7 +98,7 @@ class FakeRunner:
 
 
 class FakeFetcher:
-    """Injected price fetcher: {ticker: closes list | exception}."""
+    """Injected price fetcher: {ticker: closes list | prebuilt bars | exception}."""
 
     def __init__(self, series=None, default=PASS_CLOSES):
         self.series = dict(series or {})
@@ -91,6 +110,8 @@ class FakeFetcher:
         result = self.series.get(ticker, self.default)
         if isinstance(result, BaseException):
             raise result
+        if result and isinstance(result[0], tuple):
+            return result  # prebuilt bars (custom volume profiles)
         return make_bars(result)
 
 
@@ -311,6 +332,467 @@ def test_gate_thresholds_come_from_config():
     strict = GateRules(daily_upper_mult=0.99)
     assert technical_gate(make_bars(PASS_CLOSES)).gate == "pass"
     assert technical_gate(make_bars(PASS_CLOSES), strict).gate == "watch"
+
+
+# ---------------------------------------------------------------------------
+# Gate v1.1: liquidity metrics (hand fixtures)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_liquidity_metrics_hand_computed():
+    dollar, ratio = liquidity_metrics(make_bars([100.0] * 20))
+    assert dollar == pytest.approx(100.0 * LIQUID_AVG_VOLUME_20D)
+    assert ratio == pytest.approx(LIQUID_VOLUME_RATIO)
+    # Input order does not matter (R2 determinism, same as the resample).
+    assert liquidity_metrics(list(reversed(make_bars([100.0] * 20)))) == (dollar, ratio)
+    # Fewer than 20 bars: both metrics uncomputable — None, never fabricated.
+    assert liquidity_metrics(make_bars([100.0] * 19)) == (None, None)
+    assert liquidity_metrics([]) == (None, None)
+
+
+@pytest.mark.unit
+def test_liquidity_metrics_zero_volume_tape():
+    dollar, ratio = liquidity_metrics(make_bars([100.0] * 25, volumes=[0.0] * 25))
+    assert dollar == 0.0  # a real observation for the veto...
+    assert ratio is None  # ...but 0/0 is not a ratio
+
+
+@pytest.mark.unit
+def test_liquidity_metrics_use_trailing_windows_only():
+    # 20d window ignores older bars; the 5d window sits inside the 20d one.
+    closes = [1_000.0] * 30 + [100.0] * 20
+    volumes = [9e9] * 30 + [300_000.0] * 15 + [600_000.0] * 5
+    dollar, ratio = liquidity_metrics(make_bars(closes, volumes=volumes))
+    assert dollar == pytest.approx(100.0 * 375_000.0)
+    assert ratio == pytest.approx(1.6)
+
+
+@pytest.mark.unit
+def test_liquidity_metrics_nan_volume_yields_none_never_nan():
+    # A single NaN volume bar inside the trailing window (yfinance emits
+    # these on thin tapes): both metrics are uncomputable ⇒ None. NaN must
+    # never leak out — the contract rejects it, and NaN < floor is False,
+    # which would silently bypass the liquidity veto.
+    volumes = [300_000.0] * 25
+    volumes[-3] = float("nan")
+    assert liquidity_metrics(make_bars([100.0] * 25, volumes=volumes)) == (None, None)
+    # A NaN volume OUTSIDE the trailing 20d window is invisible.
+    old_gap = [float("nan")] * 5 + [300_000.0] * 20
+    dollar, ratio = liquidity_metrics(make_bars([100.0] * 25, volumes=old_gap))
+    assert dollar == pytest.approx(100.0 * 300_000.0)
+    assert ratio == pytest.approx(1.0)
+
+
+@pytest.mark.unit
+def test_nan_volume_bar_fails_gate_without_crashing():
+    # Reproduces the R4 violation: a ≥60-bar tape with one NaN volume used
+    # to raise ValidationError out of technical_gate (NaN volume_ratio ≥ 0
+    # is False). Now the liquidity snapshot is None and the us floor vetoes.
+    volumes = [LIQUID_BASE_VOLUME] * 70
+    volumes[-3] = float("nan")
+    block = technical_gate(make_bars([100.0] * 70, volumes=volumes), session="us")
+    assert block.gate == "fail"  # uncomputable liquidity counts as below floor
+    assert block.avg_dollar_volume_20d is None
+    assert block.volume_ratio_5d_20d is None
+
+
+# ---------------------------------------------------------------------------
+# Gate v1.1: liquidity floor (hard veto, per-session, checked before structure)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("session", "avg", "expected"),
+    [
+        ("us", 19_999_999.0, "fail"),  # below the us floor
+        ("us", 20_000_000.0, "pass"),  # exactly at the floor is not a veto
+        ("us", 20_000_001.0, "pass"),
+        ("cn", 99_999_999.0, "fail"),  # below the cn floor
+        ("cn", 100_000_000.0, "pass"),  # exactly at the cn floor
+        ("us", None, "fail"),  # uncomputable counts as below the floor
+        (None, 1.0, "pass"),  # no session context => no floor (unit callers)
+    ],
+)
+def test_liquidity_floor_boundaries_per_session(session, avg, expected):
+    verdict = evaluate_gate(
+        100,
+        bands(100, 110, 90),
+        bands(100, 120, 80),
+        session=session,
+        avg_dollar_volume_20d=avg,
+    )
+    assert verdict == expected
+
+
+@pytest.mark.unit
+def test_same_dollar_volume_passes_us_but_fails_cn():
+    args = (100, bands(100, 110, 90), bands(100, 120, 80))
+    kwargs = {"avg_dollar_volume_20d": 50_000_000.0}
+    assert evaluate_gate(*args, session="us", **kwargs) == "pass"
+    assert evaluate_gate(*args, session="cn", **kwargs) == "fail"
+
+
+@pytest.mark.unit
+def test_liquidity_veto_is_terminal_and_hard():
+    # Below the floor => fail regardless of everything else: a would-be-watch
+    # structure and a screaming volume ratio never soften the veto.
+    verdict = evaluate_gate(
+        100,
+        bands(200, 110, 90),  # daily overheated: structure alone => watch
+        bands(200, 120, 80),
+        session="us",
+        avg_dollar_volume_20d=1_000.0,
+        volume_ratio_5d_20d=9.9,
+    )
+    assert verdict == "fail"
+
+
+@pytest.mark.unit
+def test_liquidity_floor_comes_from_rules_mapping():
+    args = (100, bands(100, 110, 90), bands(100, 120, 80))
+    # A session absent from the mapping has no floor.
+    no_floor = GateRules(min_avg_dollar_volume={})
+    assert evaluate_gate(*args, no_floor, session="us", avg_dollar_volume_20d=1.0) == "pass"
+    # A custom floor is honored verbatim.
+    custom = GateRules(min_avg_dollar_volume={"us": 2.0})
+    assert evaluate_gate(*args, custom, session="us", avg_dollar_volume_20d=1.0) == "fail"
+    assert evaluate_gate(*args, custom, session="us", avg_dollar_volume_20d=2.0) == "pass"
+
+
+@pytest.mark.unit
+def test_technical_gate_liquidity_veto_records_full_snapshot():
+    # A structurally sound series on an illiquid tape (~$110k/day): hard veto
+    # in the us session, with bands AND liquidity numbers still recorded.
+    bars = make_bars(PASS_CLOSES, volumes=[1_000.0] * len(PASS_CLOSES))
+    block = technical_gate(bars, session="us")
+    assert block.gate == "fail"
+    assert block.boll_daily is not None and block.boll_weekly is not None
+    assert block.avg_dollar_volume_20d == pytest.approx(109.95 * 1_000.0, rel=1e-3)
+    assert block.volume_ratio_5d_20d == pytest.approx(1.0)
+    # Without a session there is no floor: the flat tape is merely
+    # unconfirmed, so the structural pass demotes to watch instead.
+    assert technical_gate(bars).gate == "watch"
+
+
+@pytest.mark.unit
+def test_zero_volume_tape_vetoes_without_fabricating_snapshot():
+    bars = make_bars(PASS_CLOSES, volumes=[0.0] * len(PASS_CLOSES))
+    block = technical_gate(bars, session="us")
+    assert block.gate == "fail"
+    # The contract records only positive dollar volume; 0/0 is not a ratio.
+    assert block.avg_dollar_volume_20d is None
+    assert block.volume_ratio_5d_20d is None
+
+
+# ---------------------------------------------------------------------------
+# Gate v1.1: volume confirmation (soft demotion, pass -> watch only)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_unconfirmed_volume_demotes_pass_to_watch():
+    # Liquid (~$110M/day) but flat volume (ratio 1.0 < 1.2): structural pass
+    # demotes to watch — never to fail.
+    flat = [1_000_000.0] * len(PASS_CLOSES)
+    block = technical_gate(make_bars(PASS_CLOSES, volumes=flat), session="us")
+    assert block.gate == "watch"
+    assert block.volume_ratio_5d_20d == pytest.approx(1.0)
+    assert block.avg_dollar_volume_20d > 20_000_000.0  # liquidity was fine
+
+
+@pytest.mark.unit
+def test_volume_ratio_exactly_at_boundary_is_confirmed():
+    # ratio == volume_confirm_ratio exactly: 15 bars at 700k + 5 at 900k
+    # => 20d avg 750k, 900k/750k = 1.2. Demotion is strictly-below only.
+    volumes = [700_000.0] * (len(PASS_CLOSES) - 5) + [900_000.0] * 5
+    block = technical_gate(make_bars(PASS_CLOSES, volumes=volumes), session="us")
+    assert block.volume_ratio_5d_20d == pytest.approx(1.2)
+    assert block.gate == "pass"
+
+
+@pytest.mark.unit
+def test_volume_demotion_never_touches_watch_or_fail():
+    flat_watch = [1_000_000.0] * len(OVERHEAT_CLOSES)
+    watch_block = technical_gate(make_bars(OVERHEAT_CLOSES, volumes=flat_watch), session="us")
+    assert watch_block.gate == "watch"  # watch stays watch, never lower
+    flat_fail = [1_000_000.0] * len(NEITHER_CLOSES)
+    fail_block = technical_gate(make_bars(NEITHER_CLOSES, volumes=flat_fail), session="us")
+    assert fail_block.gate == "fail"  # fail is never affected
+    # ...and a confirmed ratio never rescues a structural fail either.
+    assert technical_gate(make_bars(NEITHER_CLOSES), session="us").gate == "fail"
+
+
+@pytest.mark.unit
+def test_volume_confirm_ratio_comes_from_rules():
+    flat = make_bars(PASS_CLOSES, volumes=[1_000_000.0] * len(PASS_CLOSES))
+    assert technical_gate(flat, session="us").gate == "watch"  # default 1.2
+    lenient = GateRules(volume_confirm_ratio=1.0)
+    assert technical_gate(flat, lenient, session="us").gate == "pass"
+
+
+# ---------------------------------------------------------------------------
+# Gate v1.1: snapshot recorded on every path where computable
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_snapshot_records_liquidity_fields_on_structural_fail():
+    block = technical_gate(make_bars(NEITHER_CLOSES), session="us")
+    assert block.gate == "fail"
+    assert block.avg_dollar_volume_20d is not None
+    assert block.volume_ratio_5d_20d == pytest.approx(LIQUID_VOLUME_RATIO)
+    # The <60-bar fail still records the computable 20d numbers...
+    short = technical_gate(make_bars(SHORT_CLOSES), session="us")
+    assert short.gate == "fail"
+    assert short.avg_dollar_volume_20d == pytest.approx(100.0 * LIQUID_AVG_VOLUME_20D)
+    assert short.volume_ratio_5d_20d == pytest.approx(LIQUID_VOLUME_RATIO)
+    # ...while a sub-20-bar history records None, never a fabricated number.
+    tiny = technical_gate(make_bars([100.0] * 10), session="us")
+    assert tiny.gate == "fail"
+    assert tiny.avg_dollar_volume_20d is None and tiny.volume_ratio_5d_20d is None
+
+
+# ---------------------------------------------------------------------------
+# Gate v1.1: config/env overrides (load_gate_rules)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_load_gate_rules_spec_defaults():
+    rules = load_gate_rules({})
+    assert rules.min_avg_dollar_volume == {"us": 20_000_000.0, "cn": 100_000_000.0}
+    assert rules.volume_confirm_ratio == 1.2
+
+
+@pytest.mark.unit
+def test_load_gate_rules_env_overrides():
+    rules = load_gate_rules(
+        {
+            "TRADINGAGENTS_MIN_AVG_DOLLAR_VOLUME_US": "5000000",
+            "TRADINGAGENTS_VOLUME_CONFIRM_RATIO": "1.5",
+        }
+    )
+    assert rules.min_avg_dollar_volume == {"us": 5_000_000.0, "cn": 100_000_000.0}
+    assert rules.volume_confirm_ratio == 1.5
+    cn_only = load_gate_rules({"TRADINGAGENTS_MIN_AVG_DOLLAR_VOLUME_CN": "1"})
+    assert cn_only.min_avg_dollar_volume == {"us": 20_000_000.0, "cn": 1.0}
+    assert cn_only.volume_confirm_ratio == 1.2
+    # Blank values fall back to the defaults (unset-equivalent).
+    blank = load_gate_rules({"TRADINGAGENTS_VOLUME_CONFIRM_RATIO": "  "})
+    assert blank.volume_confirm_ratio == 1.2
+
+
+@pytest.mark.unit
+def test_load_gate_rules_loud_on_junk():
+    with pytest.raises(ValueError):
+        load_gate_rules({"TRADINGAGENTS_VOLUME_CONFIRM_RATIO": "lots"})
+    with pytest.raises(ValueError):
+        load_gate_rules({"TRADINGAGENTS_MIN_AVG_DOLLAR_VOLUME_US": "20M"})
+
+
+@pytest.mark.unit
+def test_gate_env_overrides_flow_into_build_pool(pool_dir, monkeypatch):
+    # A structurally sound but illiquid nominee (~$110k/day) fails the
+    # default us floor and routes to watch (fail + score >= entry)...
+    illiquid = make_bars(PASS_CLOSES, volumes=[1_000.0] * len(PASS_CLOSES))
+    fetcher = FakeFetcher({"AVGO": illiquid})
+    build_pool(
+        "us",
+        as_of=RUN_DATE,
+        runner=FakeRunner([nomination_json(nominee("AVGO", 7.5))]),
+        fetch_ohlcv=fetcher,
+    )
+    pool = read_written_pool(pool_dir)
+    assert pool.opportunity == []
+    (watched,) = pool.watch
+    assert watched.ticker == "AVGO" and watched.technical.gate == "fail"
+    assert watched.technical.avg_dollar_volume_20d == pytest.approx(
+        109.95 * 1_000.0, rel=1e-3
+    )
+    # ...and enters once the env lowers the floor and the confirm ratio
+    # (same-day rerun rides the nomination cache — no second deep search).
+    monkeypatch.setenv("TRADINGAGENTS_MIN_AVG_DOLLAR_VOLUME_US", "50000")
+    monkeypatch.setenv("TRADINGAGENTS_VOLUME_CONFIRM_RATIO", "1.0")
+    build_pool("us", as_of=RUN_DATE, runner=FakeRunner([]), fetch_ohlcv=fetcher)
+    (entered,) = read_written_pool(pool_dir).opportunity
+    assert entered.ticker == "AVGO"
+    assert entered.technical.gate == "pass"
+
+
+@pytest.mark.unit
+def test_injected_gate_rules_beat_env(pool_dir, monkeypatch):
+    monkeypatch.setenv("TRADINGAGENTS_MIN_AVG_DOLLAR_VOLUME_US", str(10**15))
+    rules = GateRules(min_avg_dollar_volume={}, volume_confirm_ratio=1.0)
+    build_pool(
+        "us",
+        as_of=RUN_DATE,
+        runner=FakeRunner([nomination_json(nominee())]),
+        fetch_ohlcv=FakeFetcher(),
+        gate_rules=rules,
+    )
+    assert read_written_pool(pool_dir).opportunity[0].ticker == "AVGO"
+
+
+# ---------------------------------------------------------------------------
+# Gate v1.1: hysteresis treats a liquidity fail exactly like a structural fail
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_single_liquidity_fail_advances_streak_without_exit(pool_dir):
+    write_prior_pool(pool_dir, FRIDAY.isoformat(), opportunity=[prior_opportunity("AVGO")])
+    illiquid = make_bars(PASS_CLOSES, volumes=[1_000.0] * len(PASS_CLOSES))
+    build_pool(
+        "us",
+        as_of=RUN_DATE,
+        runner=FakeRunner([nomination_json(nominee("AVGO", 8.0))]),
+        fetch_ohlcv=FakeFetcher({"AVGO": illiquid}),
+    )
+    (avgo,) = read_written_pool(pool_dir).opportunity  # still a member
+    assert avgo.gate_fail_streak == 1
+    assert avgo.technical.gate == "fail"
+    assert avgo.technical.avg_dollar_volume_20d is not None  # snapshot on fail
+
+
+@pytest.mark.unit
+def test_liquidity_fail_completes_the_two_pool_exit(pool_dir):
+    # spec treats fail uniformly: liquidity-driven gate fail advances the
+    # streak exactly like a structural fail and exits with the same reason.
+    write_prior_pool(
+        pool_dir, FRIDAY.isoformat(), opportunity=[prior_opportunity("AVGO", fail=1)]
+    )
+    illiquid = make_bars(PASS_CLOSES, volumes=[1_000.0] * len(PASS_CLOSES))
+    build_pool(
+        "us",
+        as_of=RUN_DATE,
+        runner=FakeRunner([nomination_json(nominee("AVGO", 8.0))]),
+        fetch_ohlcv=FakeFetcher({"AVGO": illiquid}),
+    )
+    pool = read_written_pool(pool_dir)
+    assert pool.opportunity == []
+    (removed,) = pool.removed
+    assert removed.reason == "technical gate fail for 2 pools"
+    assert removed.last_score == 8.0
+
+
+@pytest.mark.unit
+def test_demoted_watch_verdict_resets_member_gate_fail_streak(pool_dir):
+    # Demotion lands on watch, not fail: a member one step from the 2-pool
+    # exit recovers its streak on an unconfirmed-but-liquid day.
+    write_prior_pool(
+        pool_dir, FRIDAY.isoformat(), opportunity=[prior_opportunity("AVGO", fail=1)]
+    )
+    flat = make_bars(PASS_CLOSES, volumes=[1_000_000.0] * len(PASS_CLOSES))
+    build_pool(
+        "us",
+        as_of=RUN_DATE,
+        runner=FakeRunner([nomination_json(nominee("AVGO", 8.0))]),
+        fetch_ohlcv=FakeFetcher({"AVGO": flat}),
+    )
+    (avgo,) = read_written_pool(pool_dir).opportunity
+    assert avgo.technical.gate == "watch"
+    assert avgo.gate_fail_streak == 0
+
+
+@pytest.mark.unit
+def test_unconfirmed_volume_routes_new_nominee_to_watch(pool_dir):
+    flat = make_bars(PASS_CLOSES, volumes=[1_000_000.0] * len(PASS_CLOSES))
+    build_pool(
+        "us",
+        as_of=RUN_DATE,
+        runner=FakeRunner([nomination_json(nominee("AVGO", 7.5))]),
+        fetch_ohlcv=FakeFetcher({"AVGO": flat}),
+    )
+    pool = read_written_pool(pool_dir)
+    assert pool.opportunity == []  # demoted verdict cannot enter
+    (watched,) = pool.watch
+    assert watched.technical.gate == "watch"
+    assert watched.technical.volume_ratio_5d_20d == pytest.approx(1.0)
+
+
+@pytest.mark.unit
+def test_cn_session_build_applies_the_cn_floor(pool_dir):
+    # ~$68M/day with a confirmed ratio: clears the us floor, not the cn one.
+    volumes = [500_000.0] * (len(PASS_CLOSES) - 5) + [1_000_000.0] * 5
+    bars = make_bars(PASS_CLOSES, volumes=volumes)
+    assert technical_gate(bars, session="us").gate == "pass"
+    assert technical_gate(bars, session="cn").gate == "fail"
+    build_pool(
+        "cn",
+        as_of=RUN_DATE,
+        runner=FakeRunner([nomination_json(nominee("0700.HK", 8.0))]),
+        fetch_ohlcv=FakeFetcher({"0700.HK": bars}),
+    )
+    pool = read_written_pool(pool_dir, session="cn")
+    assert pool.opportunity == []
+    (watched,) = pool.watch  # liquidity fail + strong narrative => watch
+    assert watched.ticker == "0700.HK" and watched.technical.gate == "fail"
+
+
+@pytest.mark.unit
+def test_fetch_error_snapshot_has_no_liquidity_numbers(pool_dir):
+    # Streak-freeze semantics stay intact: a None snapshot stays None — the
+    # builder never fabricates liquidity numbers for an unfetched ticker.
+    write_prior_pool(
+        pool_dir, FRIDAY.isoformat(), opportunity=[prior_opportunity("AVGO", fail=1)]
+    )
+    build_pool(
+        "us",
+        as_of=RUN_DATE,
+        runner=FakeRunner([nomination_json(nominee("AVGO", 8.0))]),
+        fetch_ohlcv=FakeFetcher({"AVGO": ConnectionError("vendor down")}),
+    )
+    (avgo,) = read_written_pool(pool_dir).opportunity
+    assert avgo.gate_fail_streak == 1  # frozen — infra error, not a verdict
+    assert avgo.technical.avg_dollar_volume_20d is None
+    assert avgo.technical.volume_ratio_5d_20d is None
+    assert avgo.technical.boll_daily is None
+
+
+@pytest.mark.unit
+def test_nan_volume_ticker_never_kills_the_pool_build(pool_dir):
+    # R4 'degrade, don't die' end to end: one ticker's NaN-volume tape used
+    # to crash build_pool (exit 1, no pool file, the whole slot down). Now
+    # that ticker gates 'fail' on uncomputable liquidity (strong narrative ⇒
+    # watch) while the rest of the slot proceeds normally.
+    volumes = [LIQUID_BASE_VOLUME] * len(PASS_CLOSES)
+    volumes[-3] = float("nan")
+    build_pool(
+        "us",
+        as_of=RUN_DATE,
+        runner=FakeRunner([nomination_json(nominee("AVGO", 8.0), nominee("MRVL", 7.9))]),
+        fetch_ohlcv=FakeFetcher({"AVGO": make_bars(PASS_CLOSES, volumes=volumes)}),
+    )
+    pool = read_written_pool(pool_dir)
+    (mrvl,) = pool.opportunity  # the healthy nominee entered normally
+    assert mrvl.ticker == "MRVL" and mrvl.technical.gate == "pass"
+    (avgo,) = pool.watch
+    assert avgo.ticker == "AVGO" and avgo.technical.gate == "fail"
+    assert avgo.technical.avg_dollar_volume_20d is None
+    assert avgo.technical.volume_ratio_5d_20d is None
+
+
+@pytest.mark.unit
+def test_gate_computation_error_degrades_like_a_fetch_failure(pool_dir):
+    # Defense in depth behind the NaN fix: if gate math raises on one
+    # ticker's pathological bars, the build still completes and the member
+    # freezes its streak exactly like an OHLCV fetch failure.
+    write_prior_pool(
+        pool_dir, FRIDAY.isoformat(), opportunity=[prior_opportunity("AVGO", fail=1)]
+    )
+    junk_bars = [(date(2026, 3, 2), 100.0, 101.0, 99.0, "not-a-close", 1.0)]
+    build_pool(
+        "us",
+        as_of=RUN_DATE,
+        runner=FakeRunner([nomination_json(nominee("AVGO", 8.0))]),
+        fetch_ohlcv=FakeFetcher({"AVGO": junk_bars}),
+    )
+    (avgo,) = read_written_pool(pool_dir).opportunity
+    assert avgo.gate_fail_streak == 1  # frozen — infra error, not a verdict
+    assert avgo.technical.boll_daily is None
+    assert avgo.technical.avg_dollar_volume_20d is None
 
 
 # ---------------------------------------------------------------------------
