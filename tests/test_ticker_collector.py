@@ -556,7 +556,7 @@ def test_default_runner_codex_command_is_a_working_invocation(monkeypatch):
     assert ticker_collector.default_runner("codex", "PROMPT") == "BRIEF TEXT"
     # D19 (codex is the collection default): web search on, git-repo trust
     # check skipped (components inherit an arbitrary cwd), prompt over stdin.
-    assert seen["cmd"] == ["codex", "exec", "--search", "--skip-git-repo-check", "-"]
+    assert seen["cmd"] == ["codex", "exec", "-c", "tools.web_search=true", "--skip-git-repo-check", "-"]
     assert seen["input"] == "PROMPT"
 
 

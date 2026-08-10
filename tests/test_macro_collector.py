@@ -363,7 +363,7 @@ def test_default_runner_codex_command(monkeypatch):
     # D19 (codex is the collection default): a working codex exec invocation —
     # web search on, git-repo trust check skipped (components inherit an
     # arbitrary cwd), prompt over stdin via '-'.
-    assert seen["cmd"] == ["codex", "exec", "--search", "--skip-git-repo-check", "-"]
+    assert seen["cmd"] == ["codex", "exec", "-c", "tools.web_search=true", "--skip-git-repo-check", "-"]
 
 
 @pytest.mark.unit

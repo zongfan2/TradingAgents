@@ -120,7 +120,7 @@ GENERATORS = {
 #: model, and the generator id stays the CLI-level ``codex-deep-search``.
 BACKEND_COMMANDS = {
     "claude": ("claude", "-p", "--allowedTools", "WebSearch,WebFetch"),
-    "codex": ("codex", "exec", "--search", "--skip-git-repo-check", "-"),
+    "codex": ("codex", "exec", "-c", "tools.web_search=true", "--skip-git-repo-check", "-"),
 }
 
 #: Nomination worst case: the initial deep search plus one errors-appended

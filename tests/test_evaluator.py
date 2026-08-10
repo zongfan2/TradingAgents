@@ -418,7 +418,7 @@ def test_codex_runner_command_construction_and_stdin(monkeypatch):
     assert codex_runner("EVAL PROMPT") == "MODEL OUTPUT"
     # Spec R2: gpt-5.6-terra via codex exec with web search, fresh process.
     assert seen["cmd"] == [
-        "codex", "exec", "--model", "gpt-5.6-terra", "--search", "--skip-git-repo-check", "-",
+        "codex", "exec", "--model", "gpt-5.6-terra", "-c", "tools.web_search=true", "--skip-git-repo-check", "-",
     ]
     assert seen["input"] == "EVAL PROMPT"  # prompt over stdin, never argv
     assert seen["timeout"] == 540.0  # budget-derived: (1200 - 120) / 2 attempts

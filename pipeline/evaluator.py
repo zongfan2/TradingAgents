@@ -144,7 +144,8 @@ def codex_runner(prompt: str) -> str:
         "exec",
         "--model",
         EVALUATOR_MODEL,
-        "--search",
+        "-c",
+        "tools.web_search=true",
         "--skip-git-repo-check",
         "-",
     ]
