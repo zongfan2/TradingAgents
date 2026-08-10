@@ -20,15 +20,15 @@ each other's internals. The overall v2 design and decision log live in
 | Spec | Component | Builder | Status |
 |---|---|---|---|
 | [macro-brief-pipeline.md](macro-brief-pipeline.md) | Macro consumption (`get_macro_brief`, `macro_source` switch) | Claude Code | **Implemented (v1)** — v2 deltas in pipeline-consumption-v2 |
-| [pipeline-consumption-v2.md](pipeline-consumption-v2.md) | Session-aware readers, `get_ticker_brief`, `ticker_source`, offline brief arm | Claude Code | Open |
-| [macro-brief-collector.md](macro-brief-collector.md) | Scheduled deep-search macro briefs (dual session) | Claude Code (Codex handoff later) | Open |
-| [macro-brief-evaluator.md](macro-brief-evaluator.md) | GPT-5.6 Terra accuracy scoring of briefs (macro + ticker) | Claude Code (Codex handoff later) | Open |
-| [pool-builder.md](pool-builder.md) | Deep-search nomination + Bollinger gate + hysteresis | Claude Code | Open |
-| [ticker-brief-collector.md](ticker-brief-collector.md) | Pool-driven per-ticker deep-search briefs | Claude Code | Open |
-| [analysis-runner.md](analysis-runner.md) | Trigger rules, A/B pairing, TradePlan + validator, ledger writes | Claude Code | Open |
-| [execution-adapter.md](execution-adapter.md) | Alpaca **paper** bracket orders, fail-closed guards | Claude Code | Open |
-| [orchestrator.md](orchestrator.md) | Per-session scheduling, ordering, settle job, status file, notifications | Claude Code | Open |
-| [webui-pages.md](webui-pages.md) | Status banner, pool/briefs views, A/B aggregates, halt toggle | Claude Code | Open |
+| [pipeline-consumption-v2.md](pipeline-consumption-v2.md) | Session-aware readers, `get_ticker_brief`, `ticker_source`, offline brief arm | Claude Code | **Implemented** |
+| [macro-brief-collector.md](macro-brief-collector.md) | Scheduled deep-search macro briefs (dual session) | Codex | **Implemented** |
+| [macro-brief-evaluator.md](macro-brief-evaluator.md) | Accuracy scoring of briefs (macro + ticker) — `claude-eval` default per D19, GPT-5.6 Terra selectable | Claude Code | **Implemented** |
+| [pool-builder.md](pool-builder.md) | Deep-search nomination + Bollinger gate + hysteresis | Claude Code | **Implemented** |
+| [ticker-brief-collector.md](ticker-brief-collector.md) | Pool-driven per-ticker deep-search briefs | Claude Code | **Implemented** |
+| [analysis-runner.md](analysis-runner.md) | Trigger rules, A/B pairing, TradePlan + validator, ledger writes | Claude Code | **Implemented** |
+| [execution-adapter.md](execution-adapter.md) | Alpaca **paper** bracket orders, fail-closed guards | Claude Code | **Implemented** |
+| [orchestrator.md](orchestrator.md) | Per-session scheduling, ordering, settle job, status file, notifications | Claude Code | **Implemented** |
+| [webui-pages.md](webui-pages.md) | Status banner, pool/briefs views, A/B aggregates, halt toggle | Claude Code | **Implemented** |
 
 ## System overview
 

@@ -85,6 +85,10 @@ def brief_dir(tmp_path, monkeypatch):
     directory = tmp_path / "macro_briefs"
     monkeypatch.setenv(macro_collector.MACRO_BRIEF_DIR_ENV, str(directory))
     monkeypatch.delenv(macro_collector.S3_URI_ENV, raising=False)
+    # These tests' fixtures are claude-flavored; the shipped default backend
+    # is codex per D19, so pin the config env (the resolution itself is
+    # covered by the dedicated default-backend tests below).
+    monkeypatch.setenv("TRADINGAGENTS_COLLECT_BACKEND", "claude")
     return directory
 
 
@@ -356,8 +360,10 @@ def test_default_runner_codex_command(monkeypatch):
 
     monkeypatch.setattr(macro_collector.subprocess, "run", fake_run)
     macro_collector.default_runner("codex", "PROMPT")
-    assert seen["cmd"][:2] == ["codex", "exec"]
-    assert "--search" in seen["cmd"]  # web search enabled
+    # D19 (codex is the collection default): a working codex exec invocation —
+    # web search on, git-repo trust check skipped (components inherit an
+    # arbitrary cwd), prompt over stdin via '-'.
+    assert seen["cmd"] == ["codex", "exec", "--search", "--skip-git-repo-check", "-"]
 
 
 @pytest.mark.unit
@@ -382,12 +388,53 @@ def test_default_runner_missing_cli_raises(monkeypatch):
 
 @pytest.mark.unit
 def test_default_runner_timeout_raises_collector_error(monkeypatch):
+    monkeypatch.delenv("TRADINGAGENTS_TIMEOUT_MACRO_COLLECTOR", raising=False)
+
     def fake_run(cmd, **kwargs):
         raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
 
     monkeypatch.setattr(macro_collector.subprocess, "run", fake_run)
-    with pytest.raises(CollectorError, match="timed out after 1800s"):
+    with pytest.raises(CollectorError, match="timed out after 840s"):
         macro_collector.default_runner("claude", "PROMPT")
+
+
+@pytest.mark.unit
+def test_backend_timeout_fits_inside_the_component_budget(monkeypatch):
+    monkeypatch.delenv("TRADINGAGENTS_TIMEOUT_MACRO_COLLECTOR", raising=False)
+    timeout = macro_collector.backend_timeout_seconds()
+    assert timeout == 840.0  # (1800 - 120) / 2
+    # The R3 worst case (attempt + errors-appended retry) plus the
+    # render/validate/write headroom fits the orchestrator's 1800s
+    # macro_collector budget — a hung first backend can no longer eat the
+    # whole outer budget and get the process group SIGKILLed before the R6
+    # one-line stderr reason (or the retry) happens.
+    assert (
+        macro_collector.BACKEND_ATTEMPTS * timeout + macro_collector.HEADROOM_SECONDS
+        <= 1800.0
+    )
+    # The env override that resizes the outer budget resizes the inner share.
+    monkeypatch.setenv("TRADINGAGENTS_TIMEOUT_MACRO_COLLECTOR", "2520")
+    assert macro_collector.backend_timeout_seconds() == 1200.0  # (2520 - 120) / 2
+    # A pathologically small budget still leaves a usable attempt (floor).
+    monkeypatch.setenv("TRADINGAGENTS_TIMEOUT_MACRO_COLLECTOR", "120")
+    assert (
+        macro_collector.backend_timeout_seconds()
+        == macro_collector.MIN_BACKEND_TIMEOUT_SECONDS
+    )
+
+
+@pytest.mark.unit
+def test_default_runner_uses_the_budget_sized_timeout(monkeypatch):
+    monkeypatch.delenv("TRADINGAGENTS_TIMEOUT_MACRO_COLLECTOR", raising=False)
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["timeout"] = kwargs.get("timeout")
+        return subprocess.CompletedProcess(cmd, 0, stdout="BRIEF", stderr="")
+
+    monkeypatch.setattr(macro_collector.subprocess, "run", fake_run)
+    macro_collector.default_runner("claude", "PROMPT")
+    assert seen["timeout"] == 840.0  # budget-derived, not the outer 1800s
 
 
 # ---------------------------------------------------------------------------
@@ -417,12 +464,44 @@ def test_cli_force_recollects(brief_dir, capsys):
 
 @pytest.mark.unit
 def test_cli_backend_flag_selects_generator(brief_dir):
+    # Explicit --backend beats the fixture's TRADINGAGENTS_COLLECT_BACKEND=claude.
     runner = FakeRunner([make_brief(generator="codex-deep-search")])
     rc = main(["--session", "us", "--date", DATE, "--backend", "codex"], runner=runner)
     assert rc == 0
     backend, prompt = runner.calls[0]
     assert backend == "codex"
     assert "generator: codex-deep-search" in prompt
+
+
+# ---------------------------------------------------------------------------
+# D19 — default backend resolves from config (env-aware), explicit flag wins
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_default_backend_is_codex_when_env_unset(tmp_path, monkeypatch):
+    directory = tmp_path / "briefs-codex-default"
+    monkeypatch.setenv(macro_collector.MACRO_BRIEF_DIR_ENV, str(directory))
+    monkeypatch.delenv(macro_collector.S3_URI_ENV, raising=False)
+    monkeypatch.delenv("TRADINGAGENTS_COLLECT_BACKEND", raising=False)
+    runner = FakeRunner([make_brief(generator="codex-deep-search")])
+    result = collect("us", as_of=AS_OF, runner=runner)
+    assert result.outcome == "written"
+    backend, prompt = runner.calls[0]
+    assert backend == "codex"  # D19 shipped default
+    assert "generator: codex-deep-search" in prompt
+    assert f"{DATE} | us | codex | 9 | written" in collector_log(directory)
+
+
+@pytest.mark.unit
+def test_cli_backend_default_defers_to_env_aware_config(brief_dir):
+    args = macro_collector.build_parser().parse_args(["--session", "us"])
+    assert args.backend is None  # resolution happens in collect(), env-aware
+    # brief_dir pins TRADINGAGENTS_COLLECT_BACKEND=claude — the CLI default
+    # resolves to it.
+    runner = FakeRunner([make_brief()])
+    assert main(["--session", "us", "--date", DATE], runner=runner) == 0
+    assert runner.calls[0][0] == "claude"
 
 
 @pytest.mark.unit

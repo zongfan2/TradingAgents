@@ -38,6 +38,15 @@ def _dummy_api_keys(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_pipeline_backends(monkeypatch):
+    """Strip the D19 backend-role env overrides so every test sees the shipped
+    defaults (collect=codex, eval=claude) unless it sets them explicitly —
+    ambient developer environments must not skew backend-resolution tests."""
+    for env_var in ("TRADINGAGENTS_COLLECT_BACKEND", "TRADINGAGENTS_EVAL_BACKEND"):
+        monkeypatch.delenv(env_var, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_config():
     """Reset the global dataflows config before and after each test.
 

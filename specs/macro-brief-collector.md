@@ -1,6 +1,6 @@
 # Spec: Macro Brief — Collector
 
-**Builder**: Claude Code (Codex handoff later) · **Status**: Open ·
+**Builder**: Codex · **Status**: Open ·
 Contract: [macro-brief-data-contract.md](macro-brief-data-contract.md) (v2)
 
 ## Goal
@@ -33,9 +33,17 @@ The robust version below replaces this one-liner.
   The prompt template gains a session block: the `cn` render emphasizes the
   Asia session setup (overnight US close, Asia calendars); the `us` render
   recaps the Asia session and US pre-market data (releases land 08:30 ET).
-- **R2 — Generate**: invoke the deep-search backend. Primary: `claude -p`
-  with WebSearch/WebFetch allowed. Selectable backend (`--backend claude|codex`)
-  so collector quality itself can be compared later.
+- **R2 — Generate**: invoke the deep-search backend. The primary backend is
+  selectable via config `collect_backend` (env `TRADINGAGENTS_COLLECT_BACKEND`),
+  default `codex` per D19 — `codex exec` with web search enabled
+  (`--skip-git-repo-check`: components inherit an arbitrary cwd). The codex
+  invocation deliberately passes no `--model` (unlike the evaluator's pinned
+  `gpt-5.6-terra`): collection rides the codex CLI's user-configured default
+  model, and the stamped generator id stays the CLI-level `codex-deep-search`
+  per R1. The other
+  backend is `claude -p` with WebSearch/WebFetch allowed; an explicit
+  `--backend claude|codex` overrides the config default per invocation so
+  collector quality itself can be compared later.
 - **R3 — Validate before write** (all checks are hard failures unless marked
   warn): frontmatter parses and fields present; `as_of_date` and `session`
   match the filename; `generator` matches the invoked backend; all 7 sections
@@ -69,7 +77,8 @@ The robust version below replaces this one-liner.
 
 ## Acceptance criteria
 
-1. Fresh machine + logged-in `claude` CLI → one command per session produces a
+1. Fresh machine + logged-in `codex` CLI (the D19 default backend; a logged-in
+   `claude` CLI for `--backend claude`) → one command per session produces a
    contract-valid `YYYY-MM-DD.<session>.md`; a second run for the same session
    and day exits 0 without rewriting.
 2. Killing the process mid-run leaves no partial file.

@@ -32,6 +32,15 @@ DEFAULT_COMPONENT_TIMEOUTS: dict[str, int] = {
 
 DEFAULT_SLOT_TIME = "08:30"
 
+#: Subscription-backed CLI backends the pipeline can drive.
+BACKEND_CHOICES = ("claude", "codex")
+#: D19 (2026-08-10): codex performs all deep-search collection (macro, pool
+#: nomination, ticker briefs) and claude performs evaluation — collection is
+#: the heavier consumer and the Claude subscription's monthly cap was hit
+#: once. Collector/evaluator backend independence is preserved, mirrored.
+DEFAULT_COLLECT_BACKEND = "codex"
+DEFAULT_EVAL_BACKEND = "claude"
+
 _SLOT_TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
 
@@ -82,8 +91,19 @@ class PipelineConfig:
     notifications_enabled: bool = True
     pool_max_staleness_days: int = 3
     python_executable: Path = field(default_factory=lambda: Path(sys.executable))
+    #: D19 backend roles: deep-search collection vs evaluation. Validated
+    #: eagerly against :data:`BACKEND_CHOICES` — a typo'd backend must fail
+    #: loudly at config time, never as a mid-slot CLI error.
+    collect_backend: str = DEFAULT_COLLECT_BACKEND
+    eval_backend: str = DEFAULT_EVAL_BACKEND
 
     def __post_init__(self) -> None:
+        for name in ("collect_backend", "eval_backend"):
+            value = getattr(self, name)
+            if value not in BACKEND_CHOICES:
+                raise ValueError(
+                    f"invalid {name} {value!r} — expected one of {sorted(BACKEND_CHOICES)}"
+                )
         object.__setattr__(self, "state_dir", Path(self.state_dir).expanduser())
         derived = {
             "macro_brief_dir": "macro_briefs",
@@ -129,6 +149,11 @@ def load_config(env: Mapping[str, str] | None = None) -> PipelineConfig:
         raw = env.get(f"TRADINGAGENTS_TIMEOUT_{name.upper()}")
         if raw:
             timeouts[name] = int(raw)  # loud on junk — never silently mis-time a component
+
+    def backend(key: str, default: str) -> str:
+        # Junk values are rejected by PipelineConfig's eager validation.
+        return (env.get(key) or "").strip() or default
+
     return PipelineConfig(
         state_dir=path_or_none("TRADINGAGENTS_STATE_DIR") or _default_state_dir(),
         macro_brief_dir=path_or_none("TRADINGAGENTS_MACRO_BRIEF_DIR"),
@@ -140,4 +165,6 @@ def load_config(env: Mapping[str, str] | None = None) -> PipelineConfig:
         notifications_enabled=_env_bool(env.get("TRADINGAGENTS_NOTIFICATIONS_ENABLED"), True),
         pool_max_staleness_days=int(env.get("TRADINGAGENTS_POOL_MAX_STALENESS_DAYS") or 3),
         python_executable=Path(env.get("TRADINGAGENTS_PIPELINE_PYTHON") or sys.executable),
+        collect_backend=backend("TRADINGAGENTS_COLLECT_BACKEND", DEFAULT_COLLECT_BACKEND),
+        eval_backend=backend("TRADINGAGENTS_EVAL_BACKEND", DEFAULT_EVAL_BACKEND),
     )

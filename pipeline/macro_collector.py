@@ -42,6 +42,7 @@ from pipeline.common import (
     session_date,
     to_utc_iso,
 )
+from pipeline.config import load_config
 from pipeline.contracts.base import ContractError
 from pipeline.contracts.briefs import (
     MacroBriefMeta,
@@ -69,13 +70,45 @@ GENERATORS = {
 }
 
 #: Default backend commands; the rendered prompt is piped on stdin.
+#: ``--skip-git-repo-check``: codex exec refuses to run outside a trusted git
+#: worktree, and orchestrated components inherit an arbitrary cwd (launchd
+#: starts them in the user's home) — without it the codex path dies before
+#: searching (evaluator R2 precedent, D19 makes codex the collection default).
+#: Deliberately no ``--model`` (unlike the evaluator's pinned gpt-5.6-terra):
+#: collection deep searches ride the codex CLI's user-configured default
+#: model, and R1 stamps the CLI-level identity ``codex-deep-search``.
 BACKEND_COMMANDS = {
     "claude": ("claude", "-p", "--allowedTools", "WebSearch,WebFetch"),
-    "codex": ("codex", "exec", "--search", "-"),
+    "codex": ("codex", "exec", "--search", "--skip-git-repo-check", "-"),
 }
 
-BACKEND_TIMEOUT_SECONDS = 1800.0
+#: R3 worst case: the initial deep search plus one errors-appended retry.
+BACKEND_ATTEMPTS = 2
+#: Share of the component budget reserved for everything that is not a
+#: backend call: prompt render, validation, archive + atomic write, S3 sync.
+HEADROOM_SECONDS = 120.0
+#: Never squeeze a deep-search attempt below this, however small the budget.
+MIN_BACKEND_TIMEOUT_SECONDS = 300.0
+
 S3_TIMEOUT_SECONDS = 300.0
+
+
+def backend_timeout_seconds() -> float:
+    """Per-attempt deep-search timeout for :func:`default_runner`.
+
+    Sized so the R3 worst case (``BACKEND_ATTEMPTS`` backend calls) plus the
+    non-backend tail fit inside the orchestrator's ``macro_collector``
+    component budget (config ``component_timeouts``, default 1800s, env
+    ``TRADINGAGENTS_TIMEOUT_MACRO_COLLECTOR``). An inner timeout equal to the
+    outer budget would let the orchestrator SIGKILL the process group at the
+    very moment a hung first backend times out — the run would end as a bare
+    component ``timeout`` with the R6 one-line stderr reason (and the R3
+    retry) lost. Same derivation as ``pool_builder.backend_timeout_seconds``
+    and ``ticker_collector.fanout_backend_timeout``.
+    """
+    budget = float(load_config().component_timeouts.get("macro_collector", 1800))
+    share = (budget - HEADROOM_SECONDS) / BACKEND_ATTEMPTS
+    return max(MIN_BACKEND_TIMEOUT_SECONDS, share)
 
 #: Injectable subprocess boundaries (tests fake these).
 Runner = Callable[[str, str], str]  # (backend, prompt) -> brief text
@@ -120,20 +153,19 @@ def _first_line(text: str) -> str:
 def default_runner(backend: str, prompt: str) -> str:
     """Run the deep-search CLI for ``backend`` with the prompt on stdin."""
     command = list(BACKEND_COMMANDS[backend])
+    timeout = backend_timeout_seconds()
     try:
         proc = subprocess.run(
             command,
             input=prompt,
             capture_output=True,
             text=True,
-            timeout=BACKEND_TIMEOUT_SECONDS,
+            timeout=timeout,
         )
     except FileNotFoundError as exc:
         raise CollectorError(f"backend CLI '{command[0]}' not found on PATH") from exc
     except subprocess.TimeoutExpired as exc:
-        raise CollectorError(
-            f"backend '{backend}' timed out after {int(BACKEND_TIMEOUT_SECONDS)}s"
-        ) from exc
+        raise CollectorError(f"backend '{backend}' timed out after {int(timeout)}s") from exc
     if proc.returncode != 0:
         reason = _first_line(proc.stderr or proc.stdout) or "no output"
         raise CollectorError(f"backend '{backend}' exited {proc.returncode}: {reason}")
@@ -260,7 +292,7 @@ def collect(
     session: str,
     as_of: date | str | None = None,
     *,
-    backend: str = "claude",
+    backend: str | None = None,
     force: bool = False,
     runner: Runner | None = None,
     brief_dir: str | Path | None = None,
@@ -268,12 +300,16 @@ def collect(
 ) -> CollectResult:
     """Collect one session-scoped macro brief; raises on any failure (R6).
 
-    The brief is written only after full validation passes, via
-    :func:`pipeline.common.atomic_write` — killing the process at any point
-    never leaves a partial file (AC2).
+    ``backend`` ``None`` resolves from the shared config's ``collect_backend``
+    (env ``TRADINGAGENTS_COLLECT_BACKEND``, default ``codex`` per D19); an
+    explicit value always wins. The brief is written only after full
+    validation passes, via :func:`pipeline.common.atomic_write` — killing the
+    process at any point never leaves a partial file (AC2).
     """
     if session not in SESSIONS:
         raise CollectorError(f"unknown session '{session}' — expected one of {sorted(SESSIONS)}")
+    if backend is None:
+        backend = load_config().collect_backend
     if backend not in GENERATORS:
         raise CollectorError(f"unknown backend '{backend}' — expected one of {sorted(GENERATORS)}")
     if as_of is None:
@@ -346,8 +382,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--backend",
         choices=tuple(GENERATORS),
-        default="claude",
-        help="deep-search backend (default: claude)",
+        default=None,
+        help="deep-search backend (default: config collect_backend — codex per "
+        "D19, env TRADINGAGENTS_COLLECT_BACKEND)",
     )
     parser.add_argument(
         "--force",

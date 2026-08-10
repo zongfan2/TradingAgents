@@ -1,12 +1,14 @@
 # Spec: Brief Evaluator (macro + ticker)
 
-**Builder**: Claude Code (Codex handoff later) · **Status**: Open · Contracts:
+**Builder**: Claude Code · **Status**: Open · Contracts:
 [macro-brief-data-contract.md](macro-brief-data-contract.md) (v2),
 [ticker-brief-data-contract.md](ticker-brief-data-contract.md)
 
 ## Goal
 
-Score briefs for accuracy using **GPT-5.6 Terra** (via `codex exec`), writing
+Score briefs for accuracy using a web-search-enabled CLI backend — default
+**`claude -p`** (identity `claude-eval`) per D19, with **GPT-5.6 Terra** (via
+`codex exec`) selectable — writing
 the eval json next to each brief per its contract. The eval serves two
 purposes: (a) catch fabrication/staleness before a brief feeds trading
 analysis (see gating below), (b) provide a quality weight when A/B-comparing
@@ -42,9 +44,14 @@ opportunity brief whose `catalyst_score` ≥ the analysis trigger threshold.
 - **R1**: input = brief path; refuse to run on a file that fails its
   contract's hard structural requirements (that's a collector bug — exit
   distinctly).
-- **R2**: model = `gpt-5.6-terra` through `codex exec` with web search enabled;
-  the evaluator must NOT reuse the collector's backend session or context
-  (independence).
+- **R2**: backend selectable — `--backend claude|codex`, default from config
+  `eval_backend` (env `TRADINGAGENTS_EVAL_BACKEND`), `claude` per D19. The
+  `claude` backend runs `claude -p` with WebSearch/WebFetch (evaluator
+  identity `claude-eval`); the `codex` backend runs model `gpt-5.6-terra`
+  through `codex exec` with web search enabled (identity `gpt-5.6-terra`).
+  Independence: the evaluator must NOT reuse the collector's backend session
+  or context, and the eval backend must differ from `collect_backend` — a
+  match is a loud stderr warning (never a failure).
 - **R3**: output the eval json per the brief's contract schema (including
   `session` for macro, `ticker` for ticker briefs, and always
   `brief_sha256`/`brief_generated_at` of the exact revision evaluated),

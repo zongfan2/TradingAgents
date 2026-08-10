@@ -24,6 +24,7 @@ from pipeline.contracts.briefs import (
 )
 from pipeline.contracts.evals import SCORE_DIMENSIONS, MacroEvalReport, TickerEvalReport
 from pipeline.evaluator import (
+    CLAUDE_EVALUATOR,
     EVALUATOR_MODEL,
     EXIT_BACKEND_FAILURE,
     EXIT_ERROR,
@@ -31,6 +32,7 @@ from pipeline.evaluator import (
     EXIT_REFUSED,
     BackendError,
     build_eval_prompt,
+    claude_runner,
     codex_runner,
     detect_kind,
     evaluate_brief,
@@ -166,7 +168,8 @@ def test_macro_eval_written_schema_valid_with_identity_from_brief(macro_dir):
     assert report.as_of_date.isoformat() == "2026-08-03"
     assert report.brief_sha256 == sha256_text(text)
     assert data["brief_generated_at"] == "2026-08-03T12:35:00Z"
-    assert report.evaluator == EVALUATOR_MODEL
+    # D19: the default eval backend is claude — the harness stamps its identity.
+    assert report.evaluator == CLAUDE_EVALUATOR
     assert report.verdict == "pass"
 
 
@@ -316,7 +319,9 @@ def test_model_claimed_verdict_and_identity_fields_are_ignored(macro_dir):
     data = read_eval(brief)
     assert data["verdict"] == "fail"
     assert data["brief_sha256"] == sha256_text(text)
-    assert data["evaluator"] == EVALUATOR_MODEL
+    # Harness-stamped identity (default backend claude per D19) — the model's
+    # self-claimed "gpt-2" is discarded.
+    assert data["evaluator"] == CLAUDE_EVALUATOR
 
 
 # ---------------------------------------------------------------------------
@@ -400,6 +405,7 @@ def test_fenced_json_output_accepted_without_retry(macro_dir):
 
 @pytest.mark.unit
 def test_codex_runner_command_construction_and_stdin(monkeypatch):
+    monkeypatch.delenv("TRADINGAGENTS_TIMEOUT_MACRO_EVALUATOR", raising=False)
     seen = {}
 
     def fake_run(cmd, **kwargs):
@@ -415,7 +421,7 @@ def test_codex_runner_command_construction_and_stdin(monkeypatch):
         "codex", "exec", "--model", "gpt-5.6-terra", "--search", "--skip-git-repo-check", "-",
     ]
     assert seen["input"] == "EVAL PROMPT"  # prompt over stdin, never argv
-    assert seen["timeout"] == 1800
+    assert seen["timeout"] == 540.0  # budget-derived: (1200 - 120) / 2 attempts
 
 
 @pytest.mark.unit
@@ -430,12 +436,38 @@ def test_codex_runner_missing_cli_raises_backend_error(monkeypatch):
 
 @pytest.mark.unit
 def test_codex_runner_timeout_raises_backend_error(monkeypatch):
+    monkeypatch.delenv("TRADINGAGENTS_TIMEOUT_MACRO_EVALUATOR", raising=False)
+
     def fake_run(cmd, **kwargs):
         raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
 
     monkeypatch.setattr(evaluator_module.subprocess, "run", fake_run)
-    with pytest.raises(BackendError, match="timed out after 1800s"):
+    with pytest.raises(BackendError, match="timed out after 540s"):
         codex_runner("PROMPT")
+
+
+@pytest.mark.unit
+def test_backend_timeout_fits_inside_the_component_budget(monkeypatch):
+    monkeypatch.delenv("TRADINGAGENTS_TIMEOUT_MACRO_EVALUATOR", raising=False)
+    timeout = evaluator_module.backend_timeout_seconds()
+    assert timeout == 540.0  # (1200 - 120) / 2
+    # The worst case (run + schema-errors retry) plus the parse/write headroom
+    # fits the orchestrator's 1200s macro_evaluator budget — a hung first
+    # backend can no longer eat the whole outer budget and turn an exit-3
+    # backend failure into a bare component ``timeout``.
+    assert (
+        evaluator_module.BACKEND_ATTEMPTS * timeout + evaluator_module.HEADROOM_SECONDS
+        <= 1200.0
+    )
+    # The env override that resizes the outer budget resizes the inner share.
+    monkeypatch.setenv("TRADINGAGENTS_TIMEOUT_MACRO_EVALUATOR", "1920")
+    assert evaluator_module.backend_timeout_seconds() == 900.0  # (1920 - 120) / 2
+    # A pathologically small budget still leaves a usable attempt (floor).
+    monkeypatch.setenv("TRADINGAGENTS_TIMEOUT_MACRO_EVALUATOR", "120")
+    assert (
+        evaluator_module.backend_timeout_seconds()
+        == evaluator_module.MIN_BACKEND_TIMEOUT_SECONDS
+    )
 
 
 @pytest.mark.unit
@@ -446,6 +478,111 @@ def test_codex_runner_nonzero_exit_raises_backend_error_with_detail(monkeypatch)
     monkeypatch.setattr(evaluator_module.subprocess, "run", fake_run)
     with pytest.raises(BackendError, match=r"exit 3\): quota exceeded"):
         codex_runner("PROMPT")
+
+
+# ---------------------------------------------------------------------------
+# claude_runner + D19 backend selection (default claude, --backend codex,
+# identity per backend, R2 independence warning)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_claude_runner_command_construction_and_stdin(monkeypatch):
+    monkeypatch.delenv("TRADINGAGENTS_TIMEOUT_MACRO_EVALUATOR", raising=False)
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen["input"] = kwargs.get("input")
+        seen["timeout"] = kwargs.get("timeout")
+        return subprocess.CompletedProcess(cmd, 0, stdout="MODEL OUTPUT", stderr="")
+
+    monkeypatch.setattr(evaluator_module.subprocess, "run", fake_run)
+    assert claude_runner("EVAL PROMPT") == "MODEL OUTPUT"
+    # D19 claude backend: fresh `claude -p` with web search tools allowed.
+    assert seen["cmd"] == ["claude", "-p", "--allowedTools", "WebSearch,WebFetch"]
+    assert seen["input"] == "EVAL PROMPT"  # prompt over stdin, never argv
+    assert seen["timeout"] == 540.0  # same budget-derived timeout as the codex backend
+
+
+@pytest.mark.unit
+def test_claude_runner_error_paths_raise_backend_error(monkeypatch):
+    def missing(cmd, **kwargs):
+        raise FileNotFoundError(cmd[0])
+
+    monkeypatch.setattr(evaluator_module.subprocess, "run", missing)
+    with pytest.raises(BackendError, match="claude CLI not found on PATH"):
+        claude_runner("PROMPT")
+
+    monkeypatch.delenv("TRADINGAGENTS_TIMEOUT_MACRO_EVALUATOR", raising=False)
+
+    def timeout(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+
+    monkeypatch.setattr(evaluator_module.subprocess, "run", timeout)
+    with pytest.raises(BackendError, match="timed out after 540s"):
+        claude_runner("PROMPT")
+
+    def nonzero(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="not logged in\nmore")
+
+    monkeypatch.setattr(evaluator_module.subprocess, "run", nonzero)
+    with pytest.raises(BackendError, match=r"exit 1\): not logged in"):
+        claude_runner("PROMPT")
+
+
+@pytest.mark.unit
+def test_default_backend_is_claude_and_flag_selects_codex(macro_dir, monkeypatch):
+    # No injected runner: the production runner selection itself is under
+    # test, with subprocess.run faked so both paths stay offline.
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout=judgment(), stderr="")
+
+    monkeypatch.setattr(evaluator_module.subprocess, "run", fake_run)
+
+    brief = write_brief(macro_dir, "2026-08-03.us.md", macro_text())
+    assert evaluate_brief(brief) == EXIT_OK
+    assert seen["cmd"][0] == "claude"  # D19 default: eval_backend=claude
+    assert read_eval(brief)["evaluator"] == CLAUDE_EVALUATOR
+
+    # Explicit --backend codex wins and stamps the codex identity.
+    assert main([str(brief), "--force", "--backend", "codex"]) == EXIT_OK
+    assert seen["cmd"][0] == "codex"
+    assert read_eval(brief)["evaluator"] == EVALUATOR_MODEL
+
+
+@pytest.mark.unit
+def test_eval_backend_env_override_resolves_the_default(macro_dir, monkeypatch):
+    monkeypatch.setenv("TRADINGAGENTS_EVAL_BACKEND", "codex")
+    brief = write_brief(macro_dir, "2026-08-03.us.md", macro_text())
+    assert evaluate_brief(brief, runner=FakeRunner(judgment())) == EXIT_OK
+    assert read_eval(brief)["evaluator"] == EVALUATOR_MODEL
+
+
+@pytest.mark.unit
+def test_matching_collect_and_eval_backends_warn_loudly_but_never_fail(
+    macro_dir, monkeypatch, capsys
+):
+    # Default eval backend (claude) colliding with collect_backend=claude
+    # degrades R2 independence: loud stderr warning, still a completed eval.
+    monkeypatch.setenv("TRADINGAGENTS_COLLECT_BACKEND", "claude")
+    brief = write_brief(macro_dir, "2026-08-03.us.md", macro_text())
+    assert evaluate_brief(brief, runner=FakeRunner(judgment())) == EXIT_OK
+    err = capsys.readouterr().err
+    assert "matches collect_backend" in err
+    assert "independence" in err
+    assert (macro_dir / "2026-08-03.us.eval.json").exists()
+
+
+@pytest.mark.unit
+def test_distinct_backends_emit_no_independence_warning(macro_dir, capsys):
+    # Out of the box (collect=codex, eval=claude) the warning must NOT fire.
+    brief = write_brief(macro_dir, "2026-08-03.us.md", macro_text())
+    assert evaluate_brief(brief, runner=FakeRunner(judgment())) == EXIT_OK
+    assert "matches collect_backend" not in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------

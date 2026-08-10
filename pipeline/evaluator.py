@@ -1,9 +1,14 @@
 """Brief evaluator (macro + ticker) — specs/macro-brief-evaluator.md.
 
-Scores a collected brief for accuracy with GPT-5.6 Terra via ``codex exec``
-(web search enabled) and writes the ``*.eval.json`` next to the brief per its
-data contract. One evaluator handles both brief kinds, detecting the kind from
-the frontmatter (``ticker`` present ⇒ ticker brief).
+Scores a collected brief for accuracy with a web-search-enabled CLI backend —
+``claude -p`` (identity ``claude-eval``, the D19 default) or GPT-5.6 Terra via
+``codex exec`` — and writes the ``*.eval.json`` next to the brief per its data
+contract. The backend is selectable (``--backend claude|codex``, default from
+config ``eval_backend``, env ``TRADINGAGENTS_EVAL_BACKEND``); a backend that
+matches the config's ``collect_backend`` degrades collector/evaluator
+independence (R2) and warns loudly on stderr without failing. One evaluator
+handles both brief kinds, detecting the kind from the frontmatter (``ticker``
+present ⇒ ticker brief).
 
 Exit codes
 ----------
@@ -11,15 +16,16 @@ Exit codes
   the existing eval's ``brief_sha256`` matches the brief (R3).
 - 1 — unreadable input / unexpected error.
 - 2 — reserved for argparse CLI usage errors (bad flag/missing argument).
-- 3 — backend failure (``codex exec`` failed, or the model's JSON failed
+- 3 — backend failure (the backend CLI failed, or the model's JSON failed
   schema validation twice).
 - 4 — structural refusal (R1): the brief fails its contract's hard structural
   requirements — that is a collector bug, not an evaluation result. (Not 2:
   argparse exits 2 on usage errors, and the refusal code must stay distinct.)
 
 The backend subprocess boundary is injectable (``runner`` callable) so tests
-run fully offline. Each real invocation spawns a fresh ``codex exec`` process:
-the evaluator never reuses the collector's backend session or context (R2).
+run fully offline. Each real invocation spawns a fresh backend process
+(``claude -p`` / ``codex exec``): the evaluator never reuses the collector's
+backend session or context (R2).
 """
 
 from __future__ import annotations
@@ -37,6 +43,7 @@ from pathlib import Path
 from pydantic import Field, ValidationError
 
 from pipeline.common import append_log_line, archive_existing, atomic_write, sha256_text, to_utc_iso
+from pipeline.config import load_config
 from pipeline.contracts.base import ContractError, ContractModel, validation_error_messages
 from pipeline.contracts.briefs import (
     LegacyMacroBriefMeta,
@@ -59,6 +66,12 @@ from pipeline.contracts.evals import (
 )
 
 EVALUATOR_MODEL = "gpt-5.6-terra"
+#: Evaluator identity written into the eval json for the claude backend (the
+#: D19 default). Never model-reported — the harness stamps it (R3).
+CLAUDE_EVALUATOR = "claude-eval"
+
+#: Per-backend evaluator identity for the eval json's ``evaluator`` field.
+EVALUATOR_IDENTITIES = {"claude": CLAUDE_EVALUATOR, "codex": EVALUATOR_MODEL}
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -67,8 +80,33 @@ EXIT_BACKEND_FAILURE = 3
 #: argparse's usage-error exit 2 (a CLI typo must never read as a collector bug).
 EXIT_REFUSED = 4
 
-#: Deep-search evaluations fetch several cited URLs; generous but bounded.
-BACKEND_TIMEOUT_SECONDS = 1800
+#: Worst-case backend calls per evaluation: the initial run plus one
+#: schema-errors-appended retry (the strict-JSON retry path).
+BACKEND_ATTEMPTS = 2
+#: Share of the component budget reserved for parsing, validation, and the
+#: atomic eval-json write around the backend calls.
+HEADROOM_SECONDS = 120.0
+#: Never squeeze an evaluation attempt below this, however small the budget.
+MIN_BACKEND_TIMEOUT_SECONDS = 300.0
+
+
+def backend_timeout_seconds() -> float:
+    """Per-attempt backend timeout for the real runners.
+
+    Sized so the worst case (``BACKEND_ATTEMPTS`` backend calls) plus the
+    non-backend tail fit inside the orchestrator's ``macro_evaluator``
+    component budget (config ``component_timeouts``, default 1200s, env
+    ``TRADINGAGENTS_TIMEOUT_MACRO_EVALUATOR``) — the tighter of the two
+    budgets the evaluator can run under, so standalone ticker evaluations are
+    covered too. A flat inner timeout equal to or above the outer budget
+    would let the orchestrator SIGKILL the process group while the first hung
+    backend was still inside its own timeout, losing the exit-3 classification
+    (and the retry) to a bare component ``timeout`` — the same derivation the
+    collectors use (``pool_builder.backend_timeout_seconds``).
+    """
+    budget = float(load_config().component_timeouts.get("macro_evaluator", 1200))
+    share = (budget - HEADROOM_SECONDS) / BACKEND_ATTEMPTS
+    return max(MIN_BACKEND_TIMEOUT_SECONDS, share)
 
 #: Collector R7's second half: when this is set, the macro eval json is
 #: mirrored next to its brief in S3 after the local write.
@@ -110,22 +148,54 @@ def codex_runner(prompt: str) -> str:
         "--skip-git-repo-check",
         "-",
     ]
+    timeout = backend_timeout_seconds()
     try:
         proc = subprocess.run(
             command,
             input=prompt,
             capture_output=True,
             text=True,
-            timeout=BACKEND_TIMEOUT_SECONDS,
+            timeout=timeout,
         )
     except FileNotFoundError as exc:
         raise BackendError("codex CLI not found on PATH") from exc
     except subprocess.TimeoutExpired as exc:
-        raise BackendError(f"codex exec timed out after {BACKEND_TIMEOUT_SECONDS}s") from exc
+        raise BackendError(f"codex exec timed out after {int(timeout)}s") from exc
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip()[:500]
         raise BackendError(f"codex exec failed (exit {proc.returncode}): {detail}")
     return proc.stdout
+
+
+def claude_runner(prompt: str) -> str:
+    """Evaluator R2 claude backend: fresh ``claude -p`` with WebSearch/WebFetch.
+
+    Same contract as :func:`codex_runner`: a new subprocess per evaluation
+    (independence from the collector's backend session), prompt over stdin,
+    same timeout class, strict-JSON output parsed by the shared judgment path.
+    """
+    command = ["claude", "-p", "--allowedTools", "WebSearch,WebFetch"]
+    timeout = backend_timeout_seconds()
+    try:
+        proc = subprocess.run(
+            command,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except FileNotFoundError as exc:
+        raise BackendError("claude CLI not found on PATH") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise BackendError(f"claude -p timed out after {int(timeout)}s") from exc
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()[:500]
+        raise BackendError(f"claude -p failed (exit {proc.returncode}): {detail}")
+    return proc.stdout
+
+
+#: Production runner per backend; tests inject fakes through ``runner=``.
+BACKEND_RUNNERS: dict[str, Runner] = {"claude": claude_runner, "codex": codex_runner}
 
 
 # ---------------------------------------------------------------------------
@@ -304,14 +374,16 @@ def _build_report(
     judgment: _ModelJudgment,
     brief_sha256: str,
     evaluated_at: datetime,
+    evaluator_id: str,
 ) -> MacroEvalReport | TickerEvalReport:
     """Identity fields come from the brief meta / file content — never from the
-    model; the verdict is recomputed via ``compute_verdict`` (R3/R4)."""
+    model; the verdict is recomputed via ``compute_verdict`` (R3/R4).
+    ``evaluator_id`` is the invoked backend's harness-stamped identity."""
     common = {
         "as_of_date": meta.as_of_date,
         "brief_sha256": brief_sha256,
         "brief_generated_at": meta.generated_at,
-        "evaluator": EVALUATOR_MODEL,
+        "evaluator": evaluator_id,
         "evaluated_at": evaluated_at,
         "scores": judgment.scores,
         "flagged_claims": judgment.flagged_claims,
@@ -420,11 +492,39 @@ def evaluate_brief(
     brief_path: Path,
     *,
     force: bool = False,
+    backend: str | None = None,
     runner: Runner | None = None,
     s3_copy: S3Copy | None = None,
 ) -> int:
-    """Evaluate one brief file; returns the process exit code."""
-    runner = runner or codex_runner
+    """Evaluate one brief file; returns the process exit code.
+
+    ``backend`` ``None`` resolves from the shared config's ``eval_backend``
+    (env ``TRADINGAGENTS_EVAL_BACKEND``, default ``claude`` per D19); an
+    explicit value always wins. The backend picks the production runner and
+    the harness-stamped ``evaluator`` identity; an injected ``runner`` (tests)
+    replaces only the subprocess boundary.
+    """
+    config = load_config()
+    if backend is None:
+        backend = config.eval_backend
+    if backend not in EVALUATOR_IDENTITIES:
+        print(
+            f"unknown eval backend '{backend}' — expected one of "
+            f"{sorted(EVALUATOR_IDENTITIES)}",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+    if backend == config.collect_backend:
+        # Evaluator R2 independence: warn loudly, never fail — the run is
+        # still an evaluation, just a same-family one.
+        print(
+            f"warning: eval backend '{backend}' matches collect_backend — "
+            "collector/evaluator independence (R2) is degraded; keep "
+            "TRADINGAGENTS_EVAL_BACKEND and TRADINGAGENTS_COLLECT_BACKEND apart",
+            file=sys.stderr,
+        )
+    evaluator_id = EVALUATOR_IDENTITIES[backend]
+    runner = runner or BACKEND_RUNNERS[backend]
     try:
         text = brief_path.read_text(encoding="utf-8")
     except OSError as exc:
@@ -459,7 +559,7 @@ def evaluate_brief(
         return EXIT_BACKEND_FAILURE
 
     now = datetime.now(timezone.utc)
-    report = _build_report(kind, meta, judgment, brief_sha256, now)
+    report = _build_report(kind, meta, judgment, brief_sha256, now, evaluator_id)
     payload = report.model_dump(mode="json")
     if payload.get("session") is None:
         payload.pop("session", None)  # legacy v1 briefs carry no session anywhere
@@ -490,10 +590,17 @@ def evaluate_brief(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m pipeline.evaluator",
-        description="Score a macro or ticker brief for accuracy (GPT-5.6 Terra via codex exec) "
-        "and write its *.eval.json per the brief's data contract.",
+        description="Score a macro or ticker brief for accuracy (claude -p, or GPT-5.6 "
+        "Terra via codex exec) and write its *.eval.json per the brief's data contract.",
     )
     parser.add_argument("brief", help="path to the brief file (kind detected from frontmatter)")
+    parser.add_argument(
+        "--backend",
+        choices=tuple(EVALUATOR_IDENTITIES),
+        default=None,
+        help="evaluation backend (default: config eval_backend — claude per D19, "
+        "env TRADINGAGENTS_EVAL_BACKEND)",
+    )
     parser.add_argument(
         "--force",
         action="store_true",
@@ -508,7 +615,13 @@ def main(
     s3_copy: S3Copy | None = None,
 ) -> int:
     args = build_parser().parse_args(argv)
-    return evaluate_brief(Path(args.brief), force=args.force, runner=runner, s3_copy=s3_copy)
+    return evaluate_brief(
+        Path(args.brief),
+        force=args.force,
+        backend=args.backend,
+        runner=runner,
+        s3_copy=s3_copy,
+    )
 
 
 if __name__ == "__main__":

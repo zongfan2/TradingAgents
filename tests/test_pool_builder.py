@@ -185,6 +185,10 @@ def pool_dir(tmp_path, monkeypatch):
     directory = tmp_path / "pools"
     directory.mkdir()
     monkeypatch.setenv(pool_builder.POOL_DIR_ENV, str(directory))
+    # These tests' fixtures are claude-flavored; the shipped default backend
+    # is codex per D19, so pin the config env (the resolution itself is
+    # covered by the dedicated default-backend test below).
+    monkeypatch.setenv("TRADINGAGENTS_COLLECT_BACKEND", "claude")
     return directory
 
 
@@ -888,6 +892,30 @@ def test_fresh_run_writes_contract_valid_pool(pool_dir):
     cached = json.loads(cache.read_text(encoding="utf-8"))
     assert cached["backend"] == "claude"
     assert cached["nominations"][0]["ticker"] == "AVGO"
+
+
+@pytest.mark.unit
+def test_default_backend_is_codex_when_env_unset(pool_dir, monkeypatch):
+    # D19: with no TRADINGAGENTS_COLLECT_BACKEND set, nomination runs on codex
+    # and both the pool's generator and the cache provenance record it.
+    monkeypatch.delenv("TRADINGAGENTS_COLLECT_BACKEND", raising=False)
+    runner = FakeRunner([nomination_json(nominee("AVGO", 7.5))])
+    result = build_pool("us", as_of=RUN_DATE, runner=runner, fetch_ohlcv=FakeFetcher())
+    assert result.outcome == "written"
+    assert runner.calls[0][0] == "codex"
+    assert read_written_pool(pool_dir).generator == "codex-deep-search"
+    cache = pool_builder.nomination_cache_path(pool_dir, "us", RUN_DATE)
+    assert json.loads(cache.read_text(encoding="utf-8"))["backend"] == "codex"
+
+
+@pytest.mark.unit
+def test_explicit_backend_beats_the_env_default(pool_dir):
+    # pool_dir pins TRADINGAGENTS_COLLECT_BACKEND=claude; the explicit
+    # argument still wins (CLI --backend routes through the same parameter).
+    runner = FakeRunner([nomination_json(nominee("AVGO", 7.5))])
+    build_pool("us", as_of=RUN_DATE, backend="codex", runner=runner, fetch_ohlcv=FakeFetcher())
+    assert runner.calls[0][0] == "codex"
+    assert read_written_pool(pool_dir).generator == "codex-deep-search"
 
 
 @pytest.mark.unit
@@ -1669,3 +1697,20 @@ def test_default_runner_uses_the_budget_sized_timeout(monkeypatch):
     assert pool_builder.default_runner("claude", "PROMPT") == "[]"
     assert seen["cmd"][0] == "claude"
     assert seen["timeout"] == 360.0  # budget-derived, not the outer 900s
+
+
+@pytest.mark.unit
+def test_default_runner_codex_command_is_a_working_invocation(monkeypatch):
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen["input"] = kwargs.get("input")
+        return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+
+    monkeypatch.setattr(pool_builder.subprocess, "run", fake_run)
+    assert pool_builder.default_runner("codex", "PROMPT") == "[]"
+    # D19 (codex is the collection default): web search on, git-repo trust
+    # check skipped (components inherit an arbitrary cwd), prompt over stdin.
+    assert seen["cmd"] == ["codex", "exec", "--search", "--skip-git-repo-check", "-"]
+    assert seen["input"] == "PROMPT"

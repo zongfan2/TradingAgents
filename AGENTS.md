@@ -47,5 +47,5 @@ Environment lives in `.venv` (Python 3.14, `pip install -e .`). API keys are in
 
 - **Pipeline side** (macro-brief consumption in TradingAgents): built by Claude Code — see `specs/macro-brief-pipeline.md`.
 - **Collector** (daily deep-search job producing briefs): to be built by Codex — see `specs/macro-brief-collector.md`.
-- **Evaluator** (GPT-5.6 Terra scoring brief accuracy): to be built by Codex — see `specs/macro-brief-evaluator.md`.
+- **Evaluator** (Claude-backed accuracy scoring by default; GPT-5.6 Terra selectable): to be built by Claude Code — see `specs/macro-brief-evaluator.md`.
 - The shared interface between all three is `specs/macro-brief-data-contract.md`. **Change the contract first, then the components.**

@@ -52,8 +52,10 @@ included — constructs a broker client.
   orders ≤ 10; ≤ 10 live submissions per slot. The 15% notional cap is sized
   so the 1% risk budget binds first whenever the stop distance ≥ ~6.7% — the
   cap is a backstop, not the effective sizer.
-- **S7 — Secrets**: `ALPACA_API_KEY` / `ALPACA_SECRET_KEY` read from `.env`;
-  never logged, never echoed into ledger or status files.
+- **S7 — Secrets**: `ALPACA_API_KEY` / `ALPACA_SECRET_KEY` read from `.env`
+  (canonical names win; the alternate names `ALPACA_API_KEY_ID` /
+  `ALPACA_API_SECRET_KEY` are accepted as fallbacks); never logged, never
+  echoed into ledger or status files.
 - **S8 — Market-state guards** (checked before any live submit): the broker
   calendar/clock must say today is a trading session (holiday/weekend ⇒ skip
   all, reason `market-closed`; half-days are fine — DAY orders respect the

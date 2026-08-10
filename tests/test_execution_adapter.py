@@ -949,15 +949,67 @@ def test_s7_real_broker_factory_error_paths_never_echo_secrets(tmp_path, monkeyp
     assert read_orders(config) == []
 
     # Missing-credentials BrokerError: the message names the variables, never
-    # values, and nothing else leaks either.
-    monkeypatch.delenv("ALPACA_API_KEY")
-    monkeypatch.delenv("ALPACA_SECRET_KEY")
+    # values, and nothing else leaks either. All four accepted names (the
+    # factory now falls back to ALPACA_API_KEY_ID / ALPACA_API_SECRET_KEY)
+    # are pinned EMPTY rather than deleted: load_dotenv(override=False) never
+    # overwrites a present-but-empty var, so a developer .env found via the
+    # dotenv frame walk cannot satisfy the lookup and dodge the error.
+    for var in (
+        "ALPACA_API_KEY",
+        "ALPACA_SECRET_KEY",
+        "ALPACA_API_KEY_ID",
+        "ALPACA_API_SECRET_KEY",
+    ):
+        monkeypatch.setenv(var, "")
     assert ea.main(["submit", "--date", DATE_ISO], clock=clock) == 1
     err = capsys.readouterr().err
     assert "ALPACA_API_KEY" in err and api_secret not in err
     for path in (tmp_path / "state").rglob("*"):
         if path.is_file():
             assert api_secret not in path.read_text(encoding="utf-8"), path
+
+
+@pytest.mark.unit
+def test_s7_credential_fallback_order_canonical_wins(tmp_path, monkeypatch):
+    """S7 credential names: ALPACA_API_KEY / ALPACA_SECRET_KEY are canonical
+    and win when both name sets are present; ALPACA_API_KEY_ID /
+    ALPACA_API_SECRET_KEY (this user's .env spelling) fill in as fallbacks."""
+    monkeypatch.chdir(tmp_path)  # load_dotenv must not pick up the repo .env
+    seen = {}
+
+    class FakeBrokerCls:
+        def __init__(self, api_key, secret_key):
+            seen["keys"] = (api_key, secret_key)
+
+    monkeypatch.setattr(ea, "AlpacaPaperBroker", FakeBrokerCls)
+    monkeypatch.setenv("ALPACA_API_KEY", "CANON-KEY")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "CANON-SECRET")
+    monkeypatch.setenv("ALPACA_API_KEY_ID", "ALT-KEY")
+    monkeypatch.setenv("ALPACA_API_SECRET_KEY", "ALT-SECRET")
+    ea.default_broker_factory()
+    assert seen["keys"] == ("CANON-KEY", "CANON-SECRET")  # canonical wins
+
+    # Alternates fill in when the canonical names are blank. (Blank, not
+    # deleted: load_dotenv(override=False) never overwrites a present var, so
+    # a developer .env found via the dotenv frame walk cannot interfere.)
+    monkeypatch.setenv("ALPACA_API_KEY", "")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "")
+    ea.default_broker_factory()
+    assert seen["keys"] == ("ALT-KEY", "ALT-SECRET")
+
+    # The fallback is per-variable: a canonical key with an alternate secret.
+    monkeypatch.setenv("ALPACA_API_KEY", "CANON-KEY")
+    ea.default_broker_factory()
+    assert seen["keys"] == ("CANON-KEY", "ALT-SECRET")
+
+    # Nothing set ⇒ BrokerError naming every accepted variable, never values.
+    for var in ("ALPACA_API_KEY", "ALPACA_API_KEY_ID", "ALPACA_API_SECRET_KEY"):
+        monkeypatch.setenv(var, "")
+    with pytest.raises(ea.BrokerError) as excinfo:
+        ea.default_broker_factory()
+    message = str(excinfo.value)
+    assert "ALPACA_API_KEY" in message and "ALPACA_API_KEY_ID" in message
+    assert "ALT-" not in message and "CANON-" not in message
 
 
 # ---------------------------------------------------------------------------

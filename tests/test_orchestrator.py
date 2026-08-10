@@ -290,6 +290,73 @@ def test_component_env_exports_resolved_data_dirs(tmp_path):
 
 
 @pytest.mark.unit
+def test_component_env_exports_backend_roles():
+    # D19 split-brain guard, backend edition: orchestrated subprocesses must
+    # see the orchestrator's *resolved* backend roles — codex collects,
+    # claude evaluates, out of the box.
+    env = orchestrator.component_env(load_config({}))
+    assert env["TRADINGAGENTS_COLLECT_BACKEND"] == "codex"
+    assert env["TRADINGAGENTS_EVAL_BACKEND"] == "claude"
+
+    # Overrides propagate resolved, exactly like the data dirs.
+    config = load_config(
+        {
+            "TRADINGAGENTS_COLLECT_BACKEND": "claude",
+            "TRADINGAGENTS_EVAL_BACKEND": "codex",
+        }
+    )
+    env = orchestrator.component_env(config)
+    assert env["TRADINGAGENTS_COLLECT_BACKEND"] == "claude"
+    assert env["TRADINGAGENTS_EVAL_BACKEND"] == "codex"
+
+
+@pytest.mark.unit
+def test_default_runner_spawns_collectors_on_codex_and_evaluator_on_claude(
+    tmp_path, monkeypatch
+):
+    """Out of the box, the orchestrated subprocesses land on the D19 split:
+    the argv carries no --backend (the CLIs defer to the env-aware config),
+    and the exported env resolves collect=codex / eval=claude — the exact
+    resolution each component's own load_config() performs."""
+    config = make_config(tmp_path)
+    calls = []
+
+    class FakeProc:
+        pid = 4321
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return ("", "")
+
+    def fake_popen(argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        return FakeProc()
+
+    monkeypatch.setattr(orchestrator.subprocess, "Popen", fake_popen)
+    for component in ("macro_collector", "pool_builder", "ticker_collectors"):
+        orch = orchestrator.Orchestrator(
+            config, "cn", slot_date=SLOT_DATE,
+            notifier=recording_notifier()[0], clock=clock,
+        )
+        orch.run_slot(only=component)
+    write_eval(config, "cn", SLOT_DATE)
+    orch = orchestrator.Orchestrator(
+        config, "cn", slot_date=SLOT_DATE, notifier=recording_notifier()[0], clock=clock
+    )
+    assert orch.run_slot(only="macro_evaluator") == 0
+
+    assert len(calls) == 4
+    for argv, kwargs in calls:
+        assert "--backend" not in argv  # backend defers to the exported env
+        env = kwargs["env"]
+        assert env["TRADINGAGENTS_COLLECT_BACKEND"] == "codex"
+        assert env["TRADINGAGENTS_EVAL_BACKEND"] == "claude"
+        resolved = load_config(env)  # what the subprocess itself will resolve
+        assert resolved.collect_backend == "codex"
+        assert resolved.eval_backend == "claude"
+
+
+@pytest.mark.unit
 def test_default_runner_spawns_components_with_resolved_dir_env(tmp_path, monkeypatch):
     """The collector subprocess must resolve the SAME brief dir the
     orchestrator hands the evaluator — the env travels through Popen."""
@@ -1147,7 +1214,9 @@ def test_default_registry_step_3_and_4_argvs_match_the_real_clis(tmp_path):
     # backend/force (the orchestrator never overrides them).
     args = pool_builder.build_parser().parse_args(pool_argv[3:])
     assert (args.session, args.date) == ("cn", SLOT_DATE)
-    assert args.backend == "claude"
+    # D19: no hardcoded backend — None defers to config collect_backend
+    # (default codex), which component_env exports resolved.
+    assert args.backend is None
     assert args.force is False
 
     ticker_argv = registry["ticker_collectors"].build_argv(ctx)
@@ -1158,7 +1227,8 @@ def test_default_registry_step_3_and_4_argvs_match_the_real_clis(tmp_path):
     args = ticker_collector.build_parser().parse_args(ticker_argv[3:])
     assert (args.session, args.date) == ("cn", SLOT_DATE)
     assert args.tickers is None
-    assert args.backend == "claude"
+    # D19: no hardcoded backend — None defers to config collect_backend.
+    assert args.backend is None
     assert args.force is False
 
     # Step 6 argv parses against the REAL analysis-runner CLI, defaults intact

@@ -30,8 +30,9 @@ Safety invariants (spec S1-S9, each individually tested):
 - S6  caps: per-order notional (BUY only — closes are risk-reducing and
       exempt), gross exposure counting pending entries, open positions +
       pending entries, live submissions per slot.
-- S7  secrets (``.env`` ``ALPACA_API_KEY``/``ALPACA_SECRET_KEY``) never
-      logged, never echoed into ledger or status files.
+- S7  secrets (``.env`` ``ALPACA_API_KEY``/``ALPACA_SECRET_KEY``, with the
+      alternate names ``ALPACA_API_KEY_ID``/``ALPACA_API_SECRET_KEY`` accepted
+      as fallbacks) never logged, never echoed into ledger or status files.
 - S8  market-state guards, fail-closed: broker calendar/clock trading day,
       asset tradability, quote freshness (``max_quote_age_minutes``); ANY
       guard source error ⇒ skip ``guard-unavailable`` — never submit on
@@ -437,14 +438,24 @@ class AlpacaPaperBroker:
 
 def default_broker_factory() -> AlpacaBroker:
     """Production broker: keys from ``.env`` (S7 — values are never logged,
-    never echoed; only their *absence* is reported)."""
+    never echoed; only their *absence* is reported).
+
+    The canonical names ``ALPACA_API_KEY`` / ``ALPACA_SECRET_KEY`` win; the
+    alternate names ``ALPACA_API_KEY_ID`` / ``ALPACA_API_SECRET_KEY`` (Alpaca
+    docs variants that real ``.env`` files carry) are accepted as fallbacks.
+    """
     from dotenv import load_dotenv
 
     load_dotenv()
-    api_key = os.environ.get("ALPACA_API_KEY") or ""
-    secret_key = os.environ.get("ALPACA_SECRET_KEY") or ""
+    api_key = os.environ.get("ALPACA_API_KEY") or os.environ.get("ALPACA_API_KEY_ID") or ""
+    secret_key = (
+        os.environ.get("ALPACA_SECRET_KEY") or os.environ.get("ALPACA_API_SECRET_KEY") or ""
+    )
     if not api_key or not secret_key:
-        raise BrokerError("ALPACA_API_KEY / ALPACA_SECRET_KEY not configured in .env")
+        raise BrokerError(
+            "ALPACA_API_KEY / ALPACA_SECRET_KEY (or the alternate names "
+            "ALPACA_API_KEY_ID / ALPACA_API_SECRET_KEY) not configured in .env"
+        )
     return AlpacaPaperBroker(api_key, secret_key)
 
 

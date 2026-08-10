@@ -98,9 +98,15 @@ GENERATORS = {
 }
 
 #: Default backend commands; the rendered prompt is piped on stdin.
+#: ``--skip-git-repo-check``: codex exec refuses to run outside a trusted git
+#: worktree, and orchestrated components inherit an arbitrary cwd — without
+#: it the codex path dies before searching (D19 makes codex the default).
+#: Deliberately no ``--model`` (unlike the evaluator's pinned gpt-5.6-terra):
+#: collection deep searches ride the codex CLI's user-configured default
+#: model, and the generator id stays the CLI-level ``codex-deep-search``.
 BACKEND_COMMANDS = {
     "claude": ("claude", "-p", "--allowedTools", "WebSearch,WebFetch"),
-    "codex": ("codex", "exec", "--search", "-"),
+    "codex": ("codex", "exec", "--search", "--skip-git-repo-check", "-"),
 }
 
 #: Worst-case backend calls per ticker: initial attempt + one errors-appended
@@ -608,7 +614,7 @@ def collect_all(
     session: str,
     as_of: date | str | None = None,
     *,
-    backend: str = "claude",
+    backend: str | None = None,
     force: bool = False,
     tickers: Sequence[str] | None = None,
     runner: Runner | None = None,
@@ -619,21 +625,25 @@ def collect_all(
 ) -> CollectSummary:
     """Collect briefs for the session's ``core ∪ opportunity`` tickers.
 
-    Raises :class:`NoTickersError` (R1's distinct failure) when even the
-    core-yaml fallback yields no tickers, and :class:`CollectorError` on an
-    unreadable pool/core file; individual ticker failures never raise — they
-    are ``failed`` entries in the returned summary (R6).
+    ``backend`` ``None`` resolves from the shared config's ``collect_backend``
+    (env ``TRADINGAGENTS_COLLECT_BACKEND``, default ``codex`` per D19); an
+    explicit value always wins. Raises :class:`NoTickersError` (R1's distinct
+    failure) when even the core-yaml fallback yields no tickers, and
+    :class:`CollectorError` on an unreadable pool/core file; individual ticker
+    failures never raise — they are ``failed`` entries in the returned
+    summary (R6).
     """
     if session not in SESSIONS:
         raise CollectorError(f"unknown session '{session}' — expected one of {sorted(SESSIONS)}")
+    config = load_config()
+    if backend is None:
+        backend = config.collect_backend
     if backend not in GENERATORS:
         raise CollectorError(f"unknown backend '{backend}' — expected one of {sorted(GENERATORS)}")
     if as_of is None:
         as_of = session_date(session)  # R1: today in the *session* timezone
     elif isinstance(as_of, str):
         as_of = date.fromisoformat(as_of)
-
-    config = load_config()
     brief_dir = Path(brief_dir).expanduser() if brief_dir else config.ticker_brief_dir
     pool_dir = Path(pool_dir).expanduser() if pool_dir else config.pool_dir
     if pool_max_staleness_days is None:
@@ -721,8 +731,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--backend",
         choices=tuple(GENERATORS),
-        default="claude",
-        help="deep-search backend (default: claude)",
+        default=None,
+        help="deep-search backend (default: config collect_backend — codex per "
+        "D19, env TRADINGAGENTS_COLLECT_BACKEND)",
     )
     parser.add_argument(
         "--force",

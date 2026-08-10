@@ -112,9 +112,15 @@ GENERATORS = {
 }
 
 #: Default backend commands; the rendered prompt is piped on stdin.
+#: ``--skip-git-repo-check``: codex exec refuses to run outside a trusted git
+#: worktree, and orchestrated components inherit an arbitrary cwd — without
+#: it the codex path dies before searching (D19 makes codex the default).
+#: Deliberately no ``--model`` (unlike the evaluator's pinned gpt-5.6-terra):
+#: collection deep searches ride the codex CLI's user-configured default
+#: model, and the generator id stays the CLI-level ``codex-deep-search``.
 BACKEND_COMMANDS = {
     "claude": ("claude", "-p", "--allowedTools", "WebSearch,WebFetch"),
-    "codex": ("codex", "exec", "--search", "-"),
+    "codex": ("codex", "exec", "--search", "--skip-git-repo-check", "-"),
 }
 
 #: Nomination worst case: the initial deep search plus one errors-appended
@@ -1072,7 +1078,7 @@ def build_pool(
     session: str,
     as_of: date | str | None = None,
     *,
-    backend: str = "claude",
+    backend: str | None = None,
     force: bool = False,
     runner: Runner | None = None,
     fetch_ohlcv: FetchOhlcv | None = None,
@@ -1082,9 +1088,13 @@ def build_pool(
 ) -> BuildResult:
     """Run stages 1–5 for one session slot; raises :class:`BuilderError` only
     on the R4 hard failures (unreadable core, contract-invalid output, write
-    failure)."""
+    failure). ``backend`` ``None`` resolves from the shared config's
+    ``collect_backend`` (env ``TRADINGAGENTS_COLLECT_BACKEND``, default
+    ``codex`` per D19); an explicit value always wins."""
     if session not in SESSIONS:
         raise BuilderError(f"unknown session '{session}' — expected one of {sorted(SESSIONS)}")
+    if backend is None:
+        backend = load_config().collect_backend
     if backend not in GENERATORS:
         raise BuilderError(f"unknown backend '{backend}' — expected one of {sorted(GENERATORS)}")
     if as_of is None:
@@ -1260,8 +1270,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--backend",
         choices=tuple(GENERATORS),
-        default="claude",
-        help="deep-search backend for nomination (default: claude)",
+        default=None,
+        help="deep-search backend for nomination (default: config "
+        "collect_backend — codex per D19, env TRADINGAGENTS_COLLECT_BACKEND)",
     )
     parser.add_argument(
         "--force",

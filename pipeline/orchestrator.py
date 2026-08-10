@@ -103,9 +103,19 @@ _DATA_DIR_ENV_KEYS = {
     "TRADINGAGENTS_LEDGER_DIR": "ledger_dir",
 }
 
+#: D19 backend roles, exported like the data dirs: the collectors and the
+#: evaluator resolve their default ``--backend`` from these env vars via the
+#: shared config, so orchestrated subprocesses must see the orchestrator's
+#: *resolved* values (codex collects, claude evaluates, out of the box).
+_BACKEND_ENV_KEYS = {
+    "TRADINGAGENTS_COLLECT_BACKEND": "collect_backend",
+    "TRADINGAGENTS_EVAL_BACKEND": "eval_backend",
+}
+
 
 def component_env(config: PipelineConfig) -> dict[str, str]:
-    """Subprocess environment carrying the orchestrator's *resolved* data dirs.
+    """Subprocess environment carrying the orchestrator's *resolved* data dirs
+    and backend roles.
 
     Split-brain guard: components resolve their directories from their own
     ``TRADINGAGENTS_*_DIR`` env vars only (the macro collector/evaluator never
@@ -113,10 +123,15 @@ def component_env(config: PipelineConfig) -> dict[str, str]:
     dirs from ``state_dir``. Exporting every resolved path makes each
     component read and write exactly the directories the orchestrator uses —
     a ``TRADINGAGENTS_STATE_DIR``-only override otherwise sends the collector
-    to ``~/.tradingagents`` while the evaluator argv points elsewhere.
+    to ``~/.tradingagents`` while the evaluator argv points elsewhere. The
+    same rule covers the D19 backend split (``collect_backend`` /
+    ``eval_backend``): every component defaults its backend from the exact
+    values this orchestrator resolved.
     """
     env = dict(os.environ)
     for key, attr in _DATA_DIR_ENV_KEYS.items():
+        env[key] = str(getattr(config, attr))
+    for key, attr in _BACKEND_ENV_KEYS.items():
         env[key] = str(getattr(config, attr))
     return env
 

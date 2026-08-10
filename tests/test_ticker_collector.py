@@ -160,6 +160,10 @@ def dirs(tmp_path, monkeypatch):
     monkeypatch.setenv("TRADINGAGENTS_POOL_DIR", str(pool_dir))
     monkeypatch.delenv(ticker_collector.CONCURRENCY_ENV, raising=False)
     monkeypatch.delenv("TRADINGAGENTS_POOL_MAX_STALENESS_DAYS", raising=False)
+    # These tests' fixtures are claude-flavored; the shipped default backend
+    # is codex per D19, so pin the config env (the resolution itself is
+    # covered by the dedicated default-backend test below).
+    monkeypatch.setenv("TRADINGAGENTS_COLLECT_BACKEND", "claude")
     return brief_dir, pool_dir
 
 
@@ -537,6 +541,50 @@ def test_default_runner_claude_command(monkeypatch):
     assert seen["cmd"] == ["claude", "-p", "--allowedTools", "WebSearch,WebFetch"]
     assert seen["input"] == "PROMPT"  # prompt goes over stdin
     assert seen["timeout"] == ticker_collector.BACKEND_TIMEOUT_SECONDS  # ceiling default
+
+
+@pytest.mark.unit
+def test_default_runner_codex_command_is_a_working_invocation(monkeypatch):
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen["input"] = kwargs.get("input")
+        return subprocess.CompletedProcess(cmd, 0, stdout="BRIEF TEXT", stderr="")
+
+    monkeypatch.setattr(ticker_collector.subprocess, "run", fake_run)
+    assert ticker_collector.default_runner("codex", "PROMPT") == "BRIEF TEXT"
+    # D19 (codex is the collection default): web search on, git-repo trust
+    # check skipped (components inherit an arbitrary cwd), prompt over stdin.
+    assert seen["cmd"] == ["codex", "exec", "--search", "--skip-git-repo-check", "-"]
+    assert seen["input"] == "PROMPT"
+
+
+@pytest.mark.unit
+def test_default_backend_is_codex_when_env_unset(dirs, monkeypatch):
+    # D19: with no TRADINGAGENTS_COLLECT_BACKEND set, the fan-out collects on
+    # codex and stamps codex-deep-search briefs.
+    _brief_dir, pool_dir = dirs
+    monkeypatch.delenv("TRADINGAGENTS_COLLECT_BACKEND", raising=False)
+    write_pool(pool_dir, core=("NVDA",), opportunity=())
+    fake = FakeBackend({"NVDA": [make_ticker_brief(generator="codex-deep-search")]})
+    summary = collect_all("us", as_of=AS_OF, runner=fake)
+    assert summary.written == 1
+    backend, _ticker, prompt = fake.calls[0]
+    assert backend == "codex"
+    assert "generator: codex-deep-search" in prompt
+
+
+@pytest.mark.unit
+def test_explicit_backend_beats_the_env_default(dirs):
+    # dirs pins TRADINGAGENTS_COLLECT_BACKEND=claude; the explicit argument
+    # still wins (CLI --backend routes through the same parameter).
+    _brief_dir, pool_dir = dirs
+    write_pool(pool_dir, core=("NVDA",), opportunity=())
+    fake = FakeBackend({"NVDA": [make_ticker_brief(generator="codex-deep-search")]})
+    summary = collect_all("us", as_of=AS_OF, backend="codex", runner=fake)
+    assert summary.written == 1
+    assert fake.calls[0][0] == "codex"
 
 
 @pytest.mark.unit
