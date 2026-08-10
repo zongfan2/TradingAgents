@@ -3,11 +3,12 @@
 Spec: specs/orchestrator.md. One launchd-fired invocation drives a whole
 session slot: settle → macro collect/eval → pool build → ticker collect/eval →
 analysis → execution → notify. Steps whose components have not landed yet
-(settle 0, ticker evaluators 5) are registered placeholders recorded as
-``skipped`` — the driver, ordering, barrier, status, lock, and notification
-machinery are fully live; step 6 runs the real analysis runner behind the
-macro-evaluator join barrier and step 7 runs the real execution adapter
-(``us`` slots only — specs/execution-adapter.md).
+(ticker evaluators 5) are registered placeholders recorded as ``skipped`` —
+the driver, ordering, barrier, status, lock, and notification machinery are
+fully live; step 0 runs the real settle step (specs/orchestrator.md "Settle
+step (0)"), step 6 runs the real analysis runner behind the macro-evaluator
+join barrier and step 7 runs the real execution adapter (``us`` slots only —
+specs/execution-adapter.md).
 
 Design points implemented here:
 
@@ -200,6 +201,17 @@ def build_default_registry(config: PipelineConfig) -> tuple[Component, ...]:
     """The slot-sequence table with today's real components wired in."""
     python = str(config.python_executable)
 
+    def settle_argv(ctx: SlotContext) -> list[str]:
+        return [
+            python,
+            "-m",
+            "pipeline.settle",
+            "--session",
+            ctx.session,
+            "--date",
+            ctx.slot_date.isoformat(),
+        ]
+
     def collector_argv(ctx: SlotContext) -> list[str]:
         return [
             python,
@@ -265,8 +277,10 @@ def build_default_registry(config: PipelineConfig) -> tuple[Component, ...]:
         ]
 
     return (
-        # Settle (22v.10) is explicitly out of scope — registered no-op placeholder.
-        Component(0, "settle", None, placeholder_reason="settle step (22v.10) not in scope yet"),
+        # Step 0 is the real settle step (specs/orchestrator.md "Settle step
+        # (0)"): adapter refresh + outcome backfill; it never talks to the
+        # broker itself, so it runs on BOTH sessions.
+        Component(0, "settle", settle_argv),
         Component(1, "macro_collector", collector_argv),
         Component(2, "macro_evaluator", evaluator_argv),
         Component(3, "pool_builder", pool_builder_argv),
@@ -662,6 +676,8 @@ class Orchestrator:
             if result.returncode != 0:
                 status = "failed"
                 error = _one_line_reason(result) or f"exit {result.returncode}"
+            elif name == "settle":
+                status, error = _settle_outcome(result)
             elif name == "macro_evaluator":
                 status, error = self._evaluator_outcome()
             elif name == "pool_builder":
@@ -803,6 +819,35 @@ def _last_nonempty_line(text: str) -> str:
         if line.strip():
             return line.strip()
     return ""
+
+
+def _settle_outcome(result: RunResult) -> tuple[str, str | None]:
+    """Map a settle exit 0 to component status via its summary line.
+
+    The settle CLI's stdout ends with one JSON summary line carrying the
+    settled/skipped counts and the adapter-refresh outcome. A refresh failure
+    inside a successful settle is degraded-but-working — the settle spec says
+    outcome computation proceeds regardless — so it maps to ``warn`` with the
+    refresh reason passed through and the counts surfaced. Same defensive
+    posture as the other mappers: an exit 0 without a parseable summary is a
+    *reporting* gap — ``warn``, never a silent ``ok``. Hard exits never reach
+    this mapper — they map to ``failed`` with the stderr one-liner.
+    """
+    line = _last_nonempty_line(result.stdout)
+    try:
+        summary = json.loads(line) if line else None
+    except json.JSONDecodeError:
+        summary = None
+    if not isinstance(summary, dict):
+        return "warn", "exited 0 but stdout has no parseable JSON summary line"
+    if summary.get("refresh_ok") is False:
+        reason = summary.get("refresh_error") or "adapter refresh failed"
+        message = (
+            f"{reason} — {summary.get('settled', 0)} settled, "
+            f"{summary.get('skipped', 0)} skipped"
+        )
+        return "warn", message[:300]
+    return "ok", None
 
 
 def _pool_builder_outcome(result: RunResult) -> tuple[str, str | None]:

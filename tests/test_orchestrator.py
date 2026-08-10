@@ -4,8 +4,9 @@ Fully offline: the subprocess boundary (component CLIs, osascript) is faked.
 Covers ordering, 1∥3 parallelism, the evaluator join barrier before step 6,
 the failure-continuation matrix, timeouts, lockfile exclusivity + stale
 breaking, --only/--from, watchdog once-only, mid-slot kill survivability,
-concurrent cn+us slots, and the steps 3–4 wiring (pool builder + ticker
-collector argvs against the real CLIs, warn mappings, aggregate timeouts).
+concurrent cn+us slots, the steps 3–4 wiring (pool builder + ticker
+collector argvs against the real CLIs, warn mappings, aggregate timeouts),
+and the step-0 settle wiring (argv, both sessions, refresh-warn passthrough).
 """
 
 import json
@@ -24,6 +25,7 @@ from pipeline import (
     execution_adapter,
     orchestrator,
     pool_builder,
+    settle,
     ticker_collector,
 )
 from pipeline.config import (
@@ -95,6 +97,7 @@ class FakeRunner:
         if "-m" in argv:  # default-registry argvs: python -m pipeline.<module> ...
             module = argv[argv.index("-m") + 1]
             return {
+                "pipeline.settle": "settle",
                 "pipeline.macro_collector": "macro_collector",
                 "pipeline.evaluator": "macro_evaluator",
                 "pipeline.pool_builder": "pool_builder",
@@ -112,13 +115,16 @@ class FakeRunner:
         try:
             behavior = self.behaviors.get(name)
             if behavior is None:
-                if name == "analysis_runner":
-                    # Step 6 is real now: its outcome mapper parses the stdout
+                if name == "settle":
+                    # Step 0 is real now: its outcome mapper parses the stdout
                     # summary line, so the default fake emits a clean one —
                     # mirroring the other components' "exit 0 is ok" default.
+                    return orchestrator.RunResult(0, stdout=settle_summary() + "\n")
+                if name == "analysis_runner":
+                    # Step 6 is real: same summary-line default as step 0.
                     return orchestrator.RunResult(0, stdout=analysis_summary() + "\n")
                 if name == "execution_adapter":
-                    # Step 7 is real now: same summary-line default as step 6.
+                    # Step 7 is real: same summary-line default again.
                     return orchestrator.RunResult(0, stdout=execution_summary() + "\n")
                 return orchestrator.RunResult(0)
             if isinstance(behavior, BaseException):
@@ -188,6 +194,14 @@ def test_default_registry_wires_collector_and_evaluator_and_marks_placeholders(t
     assert [c.step for c in sorted(registry.values(), key=lambda c: c.step)] == list(range(8))
 
     ctx = orchestrator.SlotContext("cn", SLOT_DATE, config)
+    # Step 0 is real now (specs/orchestrator.md "Settle step (0)"): argv
+    # matches the settle CLI, both sessions (settle never talks to the broker).
+    settle_argv = registry["settle"].build_argv(ctx)
+    assert settle_argv[1:] == [
+        "-m", "pipeline.settle", "--session", "cn", "--date", "2026-01-05",
+    ]
+    assert not registry["settle"].us_only
+
     collector_argv = registry["macro_collector"].build_argv(ctx)
     assert collector_argv[1:] == [
         "-m", "pipeline.macro_collector", "--session", "cn", "--date", "2026-01-05",
@@ -213,10 +227,8 @@ def test_default_registry_wires_collector_and_evaluator_and_marks_placeholders(t
     ]
     assert registry["execution_adapter"].us_only
 
-    # Settle (22v.10) and the not-yet-landed components are placeholders.
-    for name in ("settle", "ticker_evaluators"):
-        assert registry[name].build_argv is None
-    assert "22v.10" in registry["settle"].placeholder_reason
+    # The one not-yet-landed component stays a placeholder.
+    assert registry["ticker_evaluators"].build_argv is None
 
 
 @pytest.mark.unit
@@ -233,16 +245,17 @@ def test_default_registry_slot_records_placeholders_as_skipped(tmp_path):
     assert orch.run_slot() == 0
     status = read_status(config, "cn")
     components = status["components"]
-    assert components["settle"]["status"] == "skipped"
+    assert components["settle"]["status"] == "ok"
     assert components["macro_collector"]["status"] == "ok"
     assert components["macro_evaluator"]["status"] == "ok"
     assert components["analysis_runner"]["status"] == "ok"
+    assert components["ticker_evaluators"]["status"] == "skipped"
     assert components["execution_adapter"]["status"] == "skipped"
     assert components["execution_adapter"]["error"] == "us slot only"
-    # Only the five real components spawned subprocesses.
+    # Only the six real components spawned subprocesses.
     assert sorted(name for name, _, _ in runner.calls) == [
         "analysis_runner", "macro_collector", "macro_evaluator",
-        "pool_builder", "ticker_collectors",
+        "pool_builder", "settle", "ticker_collectors",
     ]
 
 
@@ -750,9 +763,11 @@ def test_concurrent_cn_and_us_slots_leave_both_files_intact(tmp_path):
 
     def slow(argv):
         time.sleep(0.01)
-        # Steps 6/7 are real: their outcome mappers parse a stdout summary
+        # Steps 0/6/7 are real: their outcome mappers parse a stdout summary
         # line, so the slow fake emits the same clean defaults as FakeRunner.
         name = FakeRunner._component_name(argv)
+        if name == "settle":
+            return orchestrator.RunResult(0, stdout=settle_summary() + "\n")
         if name == "analysis_runner":
             return orchestrator.RunResult(0, stdout=analysis_summary() + "\n")
         if name == "execution_adapter":
@@ -1003,18 +1018,20 @@ def test_component_lines_logged_one_per_component(tmp_path):
 
 
 @pytest.mark.unit
-def test_cli_run_only_settle_offline(tmp_path, monkeypatch):
+def test_cli_run_only_placeholder_offline(tmp_path, monkeypatch):
+    # Step 0 is a real subprocess now, so the offline CLI smoke runs the one
+    # remaining placeholder (ticker_evaluators) — same CLI path, no spawn.
     monkeypatch.setenv("TRADINGAGENTS_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("TRADINGAGENTS_NOTIFICATIONS_ENABLED", "0")
     exit_code = orchestrator.main(
-        ["run", "--session", "cn", "--date", "2026-01-05", "--only", "settle"]
+        ["run", "--session", "cn", "--date", "2026-01-05", "--only", "ticker_evaluators"]
     )
     assert exit_code == 0
     status = json.loads(
         (tmp_path / "state" / "pipeline_status.cn.json").read_text(encoding="utf-8")
     )
     assert status["slot"]["date"] == "2026-01-05"
-    assert status["components"]["settle"]["status"] == "skipped"
+    assert status["components"]["ticker_evaluators"]["status"] == "skipped"
 
 
 @pytest.mark.unit
@@ -1061,6 +1078,21 @@ def analysis_summary(planned=3, completed=3, errors=0, invalid_plans=0, session=
             "skipped": [],
             "dropped": [],
             "run_ids": [],
+        }
+    )
+
+
+def settle_summary(settled=0, skipped=0, refresh_ok=True, refresh_error=None, session="us"):
+    """A settle stdout JSON summary line (specs/orchestrator.md settle step)."""
+    return json.dumps(
+        {
+            "entrypoint": "settle",
+            "date": SLOT_DATE.isoformat(),
+            "session": session,
+            "settled": settled,
+            "skipped": skipped,
+            "refresh_ok": refresh_ok,
+            "refresh_error": refresh_error,
         }
     )
 
@@ -1600,6 +1632,125 @@ def test_execution_adapter_us_only_and_timeout_wiring(tmp_path):
     assert timeout == 77.0
     assert argv[1:4] == ["-m", "pipeline.execution_adapter", "submit"]
     assert read_status(config, "us")["components"]["execution_adapter"]["status"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# Step 0 wiring — settle (specs/orchestrator.md "Settle step (0)"; additive)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_default_registry_step_0_argv_matches_the_real_settle_cli(tmp_path):
+    config = make_config(tmp_path)
+    registry = {c.name: c for c in orchestrator.build_default_registry(config)}
+    for session in ("cn", "us"):  # settle runs on BOTH sessions
+        ctx = orchestrator.SlotContext(session, SLOT_DATE, config)
+        settle_argv = registry["settle"].build_argv(ctx)
+        assert settle_argv[0] == str(config.python_executable)
+        assert settle_argv[1:] == [
+            "-m", "pipeline.settle", "--session", session, "--date", "2026-01-05",
+        ]
+        # The argv parses against the REAL settle CLI with defaults intact.
+        args = settle.build_parser().parse_args(settle_argv[3:])
+        assert (args.session, args.date) == (session, SLOT_DATE)
+
+
+@pytest.mark.unit
+def test_settle_outcome_mapper():
+    R = orchestrator.RunResult
+    # Clean summary — ok.
+    assert orchestrator._settle_outcome(
+        R(0, stdout=settle_summary(settled=2, skipped=1) + "\n")
+    ) == ("ok", None)
+    # Adapter-refresh failure inside a successful settle is degraded-but-
+    # working — warn with the refresh reason passed through and the counts.
+    status, error = orchestrator._settle_outcome(
+        R(
+            0,
+            stdout=settle_summary(
+                settled=1,
+                skipped=3,
+                refresh_ok=False,
+                refresh_error="adapter refresh exited 1: keys not configured",
+            )
+            + "\n",
+        )
+    )
+    assert status == "warn"
+    assert "adapter refresh exited 1: keys not configured" in error
+    assert "1 settled" in error
+    assert "3 skipped" in error
+    # Reporting gap on exit 0 — warn, never silently ok.
+    for stdout in ("", "not json\n", '["list"]\n'):
+        status, error = orchestrator._settle_outcome(R(0, stdout=stdout))
+        assert status == "warn"
+        assert "no parseable JSON summary line" in error
+
+
+@pytest.mark.unit
+def test_settle_warn_and_failed_mapping_in_slot(tmp_path):
+    # Refresh warn in the summary — component warn, slot exit 0, slot continues.
+    config = make_config(tmp_path / "warns")
+    write_eval(config, "us", SLOT_DATE)
+    runner = FakeRunner(
+        {
+            "settle": orchestrator.RunResult(
+                0,
+                stdout=settle_summary(refresh_ok=False, refresh_error="adapter absent") + "\n",
+            ),
+            "ticker_collectors": orchestrator.RunResult(0, stdout=ticker_summary() + "\n"),
+        }
+    )
+    notifier, sent = recording_notifier()
+    assert run_default_slot(config, "us", runner, notifier=notifier) == 0
+    record = read_status(config, "us")["components"]["settle"]
+    assert record["status"] == "warn"
+    assert "adapter absent" in record["error"]
+    # warn is not a failure notification.
+    assert not any("settle" in " ".join(argv) for argv in sent)
+
+    # Hard exit — failed, slot exit 1, and the slot still continued (failure
+    # table: settle failure ⇒ continue).
+    config = make_config(tmp_path / "fails")
+    write_eval(config, "us", SLOT_DATE)
+    runner = FakeRunner(
+        {
+            "settle": orchestrator.RunResult(1, stderr="settle: ledger dir unreadable\n"),
+            "ticker_collectors": orchestrator.RunResult(0, stdout=ticker_summary() + "\n"),
+        }
+    )
+    notifier, sent = recording_notifier()
+    assert run_default_slot(config, "us", runner, notifier=notifier) == 1
+    record = read_status(config, "us")["components"]["settle"]
+    assert record["status"] == "failed"
+    assert record["error"] == "settle: ledger dir unreadable"
+    assert read_status(config, "us")["components"]["analysis_runner"]["status"] == "ok"
+    assert any("settle failed" in " ".join(argv) for argv in sent)
+
+
+@pytest.mark.unit
+def test_settle_runs_on_both_sessions_with_the_configured_timeout(tmp_path):
+    # R1 default timeout class: adapter/settle 15 min.
+    assert DEFAULT_COMPONENT_TIMEOUTS["settle"] == 900
+
+    for session in ("cn", "us"):
+        config = make_config(tmp_path / session, component_timeouts={"settle": 55})
+        write_eval(config, session, SLOT_DATE)
+        runner = FakeRunner(
+            {"ticker_collectors": orchestrator.RunResult(0, stdout=ticker_summary() + "\n")}
+        )
+        assert run_default_slot(config, session, runner) == 0
+        calls = [(argv, t) for name, argv, t in runner.calls if name == "settle"]
+        assert len(calls) == 1
+        argv, timeout = calls[0]
+        assert timeout == 55.0
+        assert argv[1:3] == ["-m", "pipeline.settle"]
+        # Step 0 runs before everything else on the main thread.
+        assert runner.order_index("settle", "end") <= min(
+            runner.order_index(name, "start")
+            for name in ("pool_builder", "ticker_collectors", "analysis_runner")
+        )
+        assert read_status(config, session)["components"]["settle"]["status"] == "ok"
 
 
 @pytest.mark.unit

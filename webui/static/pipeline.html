@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TradingAgents · Pipeline</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand"><a href="/" class="brand-link">Trading<span>Agents</span></a></div>
+  <nav class="page-tabs" id="pageTabs">
+    <button data-page="status" class="active">状态</button>
+    <button data-page="pool">股票池</button>
+    <button data-page="briefs">简报</button>
+    <button data-page="ab">A/B 对比</button>
+    <button data-page="decisions">决策与订单</button>
+  </nav>
+  <button id="haltToggle" class="mini-btn halt-toggle" title="EXECUTION_HALT 开关">…</button>
+</header>
+
+<!-- Halt banner: shown prominently on every page while halted -->
+<div id="haltBanner" class="halt-banner" hidden>
+  ⛔ EXECUTION_HALT 已启用 —— 执行适配器全部转为 dry-run，不会有任何订单发往券商。
+</div>
+
+<main class="pipeline-layout">
+
+  <!-- Page 1: status banner -->
+  <section id="page-status" class="pipeline-page">
+    <div id="statusCards" class="status-cards"></div>
+  </section>
+
+  <!-- Page 2: pool view -->
+  <section id="page-pool" class="pipeline-page" hidden>
+    <div class="card">
+      <div class="pool-head">
+        <div class="seg" id="poolSession">
+          <button data-session="us" class="active">US</button>
+          <button data-session="cn">CN</button>
+        </div>
+        <span id="poolMeta" class="run-meta"></span>
+        <span id="poolCarried" class="badge badge-warn" hidden>⚠ carried_forward：提名失败，机会/观察层为前一日结转</span>
+      </div>
+      <div id="poolBody"></div>
+    </div>
+  </section>
+
+  <!-- Page 3: briefs view -->
+  <section id="page-briefs" class="pipeline-page" hidden>
+    <div class="briefs-grid">
+      <div class="card">
+        <h3 class="sec-title">宏观简报</h3>
+        <table class="ptable" id="macroBriefTable"><tbody></tbody></table>
+        <h3 class="sec-title">个股简报</h3>
+        <table class="ptable" id="tickerBriefTable"><tbody></tbody></table>
+      </div>
+      <div class="card" id="briefDetail" hidden>
+        <div class="brief-detail-head">
+          <span id="briefName" class="mono"></span>
+          <span id="briefVerdict" class="badge"></span>
+        </div>
+        <div id="briefFlags"></div>
+        <div id="briefBody" class="md report-body"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Page 4: A/B aggregates -->
+  <section id="page-ab" class="pipeline-page" hidden>
+    <div class="card">
+      <div class="ab-controls">
+        <label>Preset
+          <select id="abPreset"><option value="">全部</option></select>
+        </label>
+        <label class="check"><input type="checkbox" id="abPaired"> 仅配对行（paired rows only）</label>
+        <span class="run-meta">按需计算，从不落盘</span>
+      </div>
+      <div id="abCaveats" class="caveats"></div>
+      <div id="abBody"></div>
+    </div>
+  </section>
+
+  <!-- Page 5: decisions & orders -->
+  <section id="page-decisions" class="pipeline-page" hidden>
+    <div class="card">
+      <div class="trigger-row">
+        <label>手动分析 <input id="trigTicker" placeholder="NVDA / 0700.HK" size="10"></label>
+        <label>日期 <input id="trigDate" type="date"></label>
+        <button id="trigBtn" class="primary">运行分析</button>
+        <span id="trigMsg" class="run-meta"></span>
+      </div>
+      <p class="manual-note">手动运行仅记录 <code>trigger: manual</code>，<strong>绝不会被自动执行下单</strong>（执行适配器 S5）。</p>
+    </div>
+    <div class="card">
+      <div class="dec-filters">
+        <input id="fDate" placeholder="日期 YYYY-MM-DD" size="12">
+        <select id="fSession"><option value="">session</option><option>us</option><option>cn</option></select>
+        <input id="fTicker" placeholder="ticker" size="8">
+        <select id="fArm"><option value="">arm</option><option>brief</option><option>feeds</option></select>
+        <button id="fApply" class="mini-btn">筛选</button>
+      </div>
+      <div id="decisionsBody"></div>
+    </div>
+  </section>
+
+</main>
+
+<script src="pipeline.js"></script>
+</body>
+</html>

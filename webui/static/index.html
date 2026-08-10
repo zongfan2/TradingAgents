@@ -13,8 +13,15 @@
   <div class="search-wrap">
     <input id="search" type="text" placeholder="搜索代码，如 NVDA、0700.HK、BTC-USD" autocomplete="off" spellcheck="false">
   </div>
+  <a href="/pipeline.html" class="nav-link">Pipeline</a>
   <button id="settingsBtn" class="icon-btn" title="设置">⚙</button>
 </header>
+
+<!-- EXECUTION_HALT is surfaced prominently on every page while halted -->
+<div id="haltBanner" class="halt-banner" hidden>
+  ⛔ EXECUTION_HALT 已启用 —— 执行适配器全部转为 dry-run，不会有任何订单发往券商。
+  <a href="/pipeline.html">前往 Pipeline 页面管理</a>
+</div>
 
 <main class="layout">
   <section class="content">
