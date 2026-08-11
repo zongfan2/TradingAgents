@@ -224,3 +224,6 @@ reports/
 
 # Web UI local settings (contains vendor choices, no secrets)
 webui/settings.json
+
+# Local isolated development worktrees
+/.worktrees/
