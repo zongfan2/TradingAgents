@@ -11,6 +11,8 @@ def test_ci_uses_offline_verifier_for_tests_and_lint():
     assert "python -m devtools.verification.offline --only tests" in workflow
     assert "python -m devtools.verification.offline --only lint" in workflow
     assert "clean-install smoke" in workflow
+    assert "pip install ." in workflow
+    assert "import tradingagents, cli.main" in workflow
     assert "claude" not in workflow.lower()
     assert "subscription" not in workflow.lower()
 
@@ -26,6 +28,10 @@ def test_agent_guide_declares_hybrid_roles_and_required_gate():
     assert "~/.tradingagents/verification/" in guide
     assert "returns reports for Codex to assess" in guide
     assert "or patches" not in guide
+    assert (
+        "isolated worktree and returns reports for Codex to assess; it does not edit "
+        "the primary worktree" in " ".join(guide.split())
+    )
 
 
 @pytest.mark.unit
