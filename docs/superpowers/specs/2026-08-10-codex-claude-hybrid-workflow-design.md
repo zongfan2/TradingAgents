@@ -81,6 +81,12 @@ Claude gets the review packet defined below and returns the structured report.
 A required Claude verdict of `fail`, an invalid report, a timeout, or missing
 authentication blocks merge until Claude passes or the user records a waiver.
 A `warn` verdict requires Codex to disposition every finding before completion.
+When Layer 2 is explicitly optional and Claude authentication is unavailable,
+only the Claude invocation is suppressed: tracked cleanliness, exact base/head
+resolution, detached exact-head creation, and Layer 1 in that checkout must
+still succeed before the command may continue with no report. Invalid refs and
+Layer 1 failures remain blocking, and this path never invokes Claude or writes
+a review report.
 
 ### Layer 3 — live integration
 
@@ -194,9 +200,17 @@ The JSON report is authoritative for automation:
 Allowed verdicts are `pass`, `warn`, and `fail`; severities are `critical`,
 `high`, `medium`, and `low`; reviewer is `claude` or `user-waiver`. A user-waiver
 report always has verdict `warn`, a non-null waiver object, and no fabricated
-Claude tests or findings. A report is valid only when `head_sha` equals the
-revision being handed off. Re-reviewing a changed revision creates a new report.
-The Markdown companion is for humans and must not contradict the JSON verdict.
+Claude tests or findings. Claude report verdicts are deterministic: any failed
+test produces `fail`; otherwise any `not_run` test produces at least `warn`;
+passing tests are neutral; critical/high findings produce `fail`; other
+findings or limitations produce at least `warn`; only evidence with none of
+those conditions produces `pass`. Every Claude report must store exactly the
+verdict recomputed from its tests, findings, and limitations, so contradictory
+persisted JSON is schema-invalid. The user-waiver shape is the sole explicit
+exception: it stores `warn`, no tests or findings, and its waiver limitation.
+A report is valid only when `head_sha` equals the revision being handed off.
+Re-reviewing a changed revision creates a new report. The Markdown companion is
+for humans and must not contradict the JSON verdict.
 
 ## End-to-End Development Flow
 
@@ -251,7 +265,9 @@ review, and its output remains governed by the brief evaluation contracts.
 
 - Layer 1 failure: block immediately and report the failing command.
 - Required Layer 2 unavailable or invalid: block merge; do not silently downgrade.
-- Optional Layer 2 unavailable: record a warning and continue only after Layer 1.
+- Optional Layer 2 authentication unavailable: suppress only Layer 2 and
+  continue without a report only after tracked-clean/ref preflights and Layer 1
+  pass in a detached exact-head checkout; invalid refs and Layer 1 failures block.
 - Claude `fail`: block until corrected and re-reviewed, or explicitly waived.
 - Claude `warn`: Codex dispositions are mandatory; unresolved critical/high
   findings block completion.

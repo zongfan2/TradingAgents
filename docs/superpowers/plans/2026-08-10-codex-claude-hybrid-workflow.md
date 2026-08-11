@@ -47,7 +47,7 @@
 
 **Interfaces:**
 - Produces from `devtools.verification.models`: `Severity`, `ReviewVerdict`, `Reviewer`, `TestStatus`, `TestRun`, `Finding`, `ClaudeJudgment`, `Waiver`, `ReviewReport`.
-- Produces: `compute_verdict(findings: Sequence[Finding], limitations: Sequence[str]) -> ReviewVerdict`.
+- Produces: `compute_verdict(tests_run: Sequence[TestRun], findings: Sequence[Finding], limitations: Sequence[str]) -> ReviewVerdict`.
 - Produces: `build_report(judgment: ClaudeJudgment, *, base_sha: str, head_sha: str, reviewed_at: datetime) -> ReviewReport`.
 - Produces: `build_waiver_report(*, base_sha: str, head_sha: str, waiver: Waiver) -> ReviewReport`.
 - Later tasks rely on strict `extra="forbid"`, lower-case enum values, and 40–64 character lowercase hexadecimal commit SHAs.
@@ -67,6 +67,7 @@ from devtools.verification.models import (
     Finding,
     ReviewReport,
     ReviewVerdict,
+    TestRun,
     Waiver,
     build_report,
     build_waiver_report,
@@ -88,20 +89,27 @@ def finding(severity: str) -> Finding:
     )
 
 
+def model_test_run(status: str) -> TestRun:
+    return TestRun(command="pytest -q", status=status, summary="controlled result")
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("findings", "limitations", "expected"),
+    ("tests_run", "findings", "limitations", "expected"),
     [
-        ([], [], ReviewVerdict.PASS),
-        ([finding("low")], [], ReviewVerdict.WARN),
-        ([finding("medium")], [], ReviewVerdict.WARN),
-        ([finding("high")], [], ReviewVerdict.FAIL),
-        ([finding("critical")], [], ReviewVerdict.FAIL),
-        ([], ["live boundary not exercised"], ReviewVerdict.WARN),
+        ([], [], [], ReviewVerdict.PASS),
+        ([model_test_run("pass")], [], [], ReviewVerdict.PASS),
+        ([model_test_run("fail")], [], [], ReviewVerdict.FAIL),
+        ([model_test_run("not_run")], [], [], ReviewVerdict.WARN),
+        ([], [finding("low")], [], ReviewVerdict.WARN),
+        ([], [finding("medium")], [], ReviewVerdict.WARN),
+        ([], [finding("high")], [], ReviewVerdict.FAIL),
+        ([], [finding("critical")], [], ReviewVerdict.FAIL),
+        ([], [], ["live boundary not exercised"], ReviewVerdict.WARN),
     ],
 )
-def test_compute_verdict(findings, limitations, expected):
-    assert compute_verdict(findings, limitations) is expected
+def test_compute_verdict(tests_run, findings, limitations, expected):
+    assert compute_verdict(tests_run, findings, limitations) is expected
 
 
 @pytest.mark.unit
@@ -284,8 +292,14 @@ class ReviewReport(StrictModel):
 
     @model_validator(mode="after")
     def validate_reviewer_shape(self):
-        if self.reviewer is Reviewer.CLAUDE and self.waiver is not None:
-            raise ValueError("claude report cannot carry a waiver")
+        if self.reviewer is Reviewer.CLAUDE:
+            if self.waiver is not None:
+                raise ValueError("claude report cannot carry a waiver")
+            expected = compute_verdict(
+                self.tests_run, self.findings, self.limitations
+            )
+            if self.verdict is not expected:
+                raise ValueError("claude report verdict contradicts review evidence")
         if self.reviewer is Reviewer.USER_WAIVER:
             if self.waiver is None or self.verdict is not ReviewVerdict.WARN:
                 raise ValueError("user-waiver report requires waiver and warn verdict")
@@ -295,12 +309,18 @@ class ReviewReport(StrictModel):
 
 
 def compute_verdict(
-    findings: Sequence[Finding], limitations: Sequence[str]
+    tests_run: Sequence[TestRun],
+    findings: Sequence[Finding],
+    limitations: Sequence[str],
 ) -> ReviewVerdict:
+    statuses = {item.status for item in tests_run}
     severities = {item.severity for item in findings}
-    if severities & {Severity.CRITICAL, Severity.HIGH}:
+    if TestStatus.FAIL in statuses or severities & {
+        Severity.CRITICAL,
+        Severity.HIGH,
+    }:
         return ReviewVerdict.FAIL
-    if severities or limitations:
+    if TestStatus.NOT_RUN in statuses or severities or limitations:
         return ReviewVerdict.WARN
     return ReviewVerdict.PASS
 
@@ -316,7 +336,9 @@ def build_report(
         base_sha=base_sha,
         head_sha=head_sha,
         reviewed_at=reviewed_at,
-        verdict=compute_verdict(judgment.findings, judgment.limitations),
+        verdict=compute_verdict(
+            judgment.tests_run, judgment.findings, judgment.limitations
+        ),
         tests_run=judgment.tests_run,
         findings=judgment.findings,
         limitations=judgment.limitations,
@@ -684,6 +706,11 @@ git commit -m "feat(devtools): add isolated Claude review preflights"
 - Produces: `run_review(...) -> ReviewOutcome | None`, `write_user_waiver(...) -> ReviewOutcome`, `load_current_report(...) -> ReviewReport`, `render_markdown(report) -> str`, and `main(argv=None) -> int`.
 - CLI subcommands: `run --base <ref> [--head <ref>] [--optional]`, `check [--head <ref>]`, and `waive --base <ref> --reason <text> --unverified-risk <text> --user-approved`.
 - Exit codes: `0=pass, explicit user waiver, or explicitly optional unavailable`, `1=operational/validation error`, `3=warn`, `4=fail`.
+- `required=False` suppresses only `AuthUnavailable` from Layer 2. Before it may
+  return `None`, `run_review` still requires tracked cleanliness, exact base/head
+  resolution, a detached exact-head worktree, and successful Layer 1 there. It
+  never invokes Claude or writes a report on this path. Invalid refs, Layer 1
+  failures, and every non-auth `ReviewError` propagate.
 
 - [ ] **Step 1: Write failing orchestration tests**
 
@@ -793,7 +820,9 @@ def test_run_review_stamps_identity_and_writes_both_reports(tmp_path, monkeypatc
 
 
 @pytest.mark.unit
-def test_required_missing_auth_raises_but_optional_returns_none(tmp_path, monkeypatch):
+def test_required_missing_auth_raises_but_optional_runs_layer1_then_returns_none(
+    tmp_path, monkeypatch
+):
     def unavailable(**kwargs):
         raise review.AuthUnavailable("not logged in")
     monkeypatch.setattr(review, "check_claude_auth", unavailable)
@@ -806,14 +835,34 @@ def test_required_missing_auth_raises_but_optional_returns_none(tmp_path, monkey
             original_symptom="none",
             required=True,
         )
+    monkeypatch.setattr(review, "ensure_tracked_clean", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        review,
+        "resolve_commit",
+        lambda repo, ref, **kwargs: {"HEAD~1": "a" * 40, "HEAD": "b" * 40}[ref],
+    )
+    monkeypatch.setattr(
+        review,
+        "detached_worktree",
+        lambda *args, **kwargs: fake_worktree(tmp_path / "isolated"),
+    )
+    layer1_calls = []
+    monkeypatch.setattr(
+        review,
+        "run_layer1",
+        lambda *args, **kwargs: layer1_calls.append(args) or "gate passed",
+    )
     assert review.run_review(
         repo=tmp_path,
         base_ref="HEAD~1",
+        report_dir=tmp_path / "reports",
         acceptance="test the gate",
         risk="optional review",
         original_symptom="none",
         required=False,
     ) is None
+    assert layer1_calls and layer1_calls[0][0] == tmp_path / "isolated"
+    assert not list((tmp_path / "reports").glob("*"))
 
 
 @pytest.mark.unit
