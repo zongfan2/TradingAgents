@@ -77,3 +77,27 @@ def test_cli_reports_missing_python_in_one_stderr_line(tmp_path, capsys):
     assert capsys.readouterr().err.splitlines() == [
         f"error: Python executable does not exist: {tmp_path / 'missing'}"
     ]
+
+
+@pytest.mark.unit
+def test_cli_resolves_relative_python_before_running_from_repo(tmp_path, monkeypatch):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    python_executable = tmp_path / "bin" / "python"
+    python_executable.parent.mkdir()
+    python_executable.touch()
+    monkeypatch.chdir(tmp_path)
+    received = {}
+
+    def run_gate(repo, python, only):
+        received.update(repo=repo, python=python, only=only)
+        return 0
+
+    monkeypatch.setattr(offline, "run_gate", run_gate)
+
+    assert offline.main(["--repo", str(repo_root), "--python", "bin/python"]) == 0
+    assert received == {
+        "repo": repo_root,
+        "python": python_executable.resolve(),
+        "only": "all",
+    }
