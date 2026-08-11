@@ -43,7 +43,9 @@ report is captured. Claude returns only a report or patch for Codex to assess.
 
 Only the user can waive a required Claude gate. The waiver records the commit,
 reason, unverified risk, and date in the verification report; unavailable
-credentials or exhausted quota are not implicit waivers.
+credentials or exhausted quota are not implicit waivers. A waiver report is
+stamped `reviewer: user-waiver`, never presented as a Claude review or `pass`,
+and can be created only after an explicit user instruction for that revision.
 
 ## Verification Layers
 
@@ -190,7 +192,9 @@ The JSON report is authoritative for automation:
 ```
 
 Allowed verdicts are `pass`, `warn`, and `fail`; severities are `critical`,
-`high`, `medium`, and `low`. A report is valid only when `head_sha` equals the
+`high`, `medium`, and `low`; reviewer is `claude` or `user-waiver`. A user-waiver
+report always has verdict `warn`, a non-null waiver object, and no fabricated
+Claude tests or findings. A report is valid only when `head_sha` equals the
 revision being handed off. Re-reviewing a changed revision creates a new report.
 The Markdown companion is for humans and must not contradict the JSON verdict.
 
@@ -251,6 +255,8 @@ review, and its output remains governed by the brief evaluation contracts.
 - Claude `fail`: block until corrected and re-reviewed, or explicitly waived.
 - Claude `warn`: Codex dispositions are mandatory; unresolved critical/high
   findings block completion.
+- Explicit user waiver: satisfies the gate for the bound revision but is
+  reported as `waived`, never `pass`; changing the revision invalidates it.
 - Stale report SHA: treat as missing.
 - Live integration unavailable: record `not_run` with the reason; whether it
   blocks depends on the component acceptance criteria.
@@ -261,7 +267,8 @@ The first implementation should add only:
 
 1. a deterministic verification command that excludes integration tests;
 2. a Claude review runner with auth, revision, timeout, and JSON-schema checks;
-3. a small report schema/validator and local report directory;
+3. a small report schema/validator, explicit user-waiver command, and local
+   report directory;
 4. documented risk classification and handoff commands in `AGENTS.md`;
 5. CI alignment so local and GitHub deterministic gates use the same command;
 6. offline tests for report validation, stale-SHA rejection, temporary-worktree
@@ -278,7 +285,8 @@ management are explicitly deferred.
 2. A required Claude review cannot pass with missing auth, malformed output, a
    timeout, a `fail` verdict, or a report for another head SHA.
 3. A valid current-revision `pass` report satisfies Layer 2; `warn` and `fail`
-   follow the failure rules above.
+   follow the failure rules above. An explicitly authorized current-revision
+   waiver satisfies the gate while remaining visibly `waived`.
 4. Mandatory triggers and the two-point complex-bug rule are documented in the
    agent guide; the first implementation does not claim to infer them automatically.
 5. Claude cannot edit the primary worktree through the review runner.
