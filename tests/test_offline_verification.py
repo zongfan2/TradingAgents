@@ -85,7 +85,9 @@ def test_cli_resolves_relative_python_before_running_from_repo(tmp_path, monkeyp
     repo_root.mkdir()
     python_executable = tmp_path / "bin" / "python"
     python_executable.parent.mkdir()
-    python_executable.touch()
+    python_target = tmp_path / "python-target"
+    python_target.touch()
+    python_executable.symlink_to(python_target)
     monkeypatch.chdir(tmp_path)
     received = {}
 
@@ -98,6 +100,6 @@ def test_cli_resolves_relative_python_before_running_from_repo(tmp_path, monkeyp
     assert offline.main(["--repo", str(repo_root), "--python", "bin/python"]) == 0
     assert received == {
         "repo": repo_root,
-        "python": python_executable.resolve(),
+        "python": python_executable.absolute(),
         "only": "all",
     }

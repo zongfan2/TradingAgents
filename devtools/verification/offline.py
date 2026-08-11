@@ -83,7 +83,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     python_executable = (
         args.python_executable or repo_root / ".venv/bin/python"
-    ).resolve()
+    ).absolute()
     if not python_executable.is_file():
         print(f"error: Python executable does not exist: {python_executable}", file=sys.stderr)
         return 1
