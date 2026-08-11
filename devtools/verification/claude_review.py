@@ -84,6 +84,12 @@ def check_claude_auth(*, runner: Runner = default_runner) -> None:
     except subprocess.TimeoutExpired as exc:
         raise AuthUnavailable("Claude auth status timed out") from exc
     if result.returncode:
+        try:
+            failed_status = json.loads(result.stdout)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise AuthUnavailable("Claude auth status failed") from exc
+        if isinstance(failed_status, dict) and failed_status.get("loggedIn") is False:
+            raise AuthUnavailable("Claude CLI is not logged in")
         raise AuthUnavailable("Claude auth status failed")
     try:
         status = json.loads(result.stdout)

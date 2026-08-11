@@ -130,6 +130,16 @@ def test_auth_rejects_unusable_status_without_echoing_output(result, message):
 
 
 @pytest.mark.unit
+def test_auth_reports_logged_out_json_even_when_cli_exits_nonzero():
+    with pytest.raises(review.AuthUnavailable, match="not logged in"):
+        review.check_claude_auth(
+            runner=lambda argv, **kwargs: completed(
+                argv, code=1, stdout='{"loggedIn": false}'
+            )
+        )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("length", [40, 64])
 def test_resolve_commit_returns_full_lowercase_sha(tmp_path, length):
     sha = "A" * length
