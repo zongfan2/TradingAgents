@@ -53,8 +53,8 @@ Environment lives in `.venv` (Python 3.14, `pip install -e .`). API keys are in
 - **Codex — primary builder** owns production edits, tests, specs, contract-first
   changes, deterministic verification, and final integration.
 - **Claude Code — independent verifier** reviews coherent risky changes from an
-  isolated worktree and returns reports or patches for Codex to assess; it does
-  not edit the primary worktree.
+  isolated worktree and returns reports for Codex to assess; it does not edit
+  the primary worktree.
 
 Run the deterministic gate for every completed change and before handoff:
 
@@ -82,8 +82,8 @@ the root cause remains unclear after roughly 30 minutes; multiple plausible
 fixes have architectural trade-offs; or it can affect normal paths that did not
 show the original symptom.
 
-After the deterministic gate passes, run and then check the SHA-bound review
-report (reports live under `~/.tradingagents/verification/`):
+After the deterministic gate passes, run and then check the report bound to
+the reviewed head SHA (reports live under `~/.tradingagents/verification/`):
 
 ```bash
 .venv/bin/python -m devtools.verification.claude_review run --base HEAD~1 --head HEAD --acceptance "describe the accepted behavior" --risk "state the mandatory trigger or score" --original-symptom "describe the bug, or none"
