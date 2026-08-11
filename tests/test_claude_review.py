@@ -1,14 +1,75 @@
 import json
 import subprocess
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from devtools.verification import claude_review as review
+from devtools.verification.models import (
+    ClaudeJudgment,
+    Finding,
+    Reviewer,
+    Waiver,
+    build_report,
+    build_waiver_report,
+)
 
 
 def completed(argv, code=0, stdout="", stderr=""):
     return subprocess.CompletedProcess(argv, code, stdout=stdout, stderr=stderr)
+
+
+@contextmanager
+def fake_worktree(path):
+    path.mkdir(parents=True, exist_ok=True)
+    yield path
+
+
+def model_finding(severity):
+    return Finding(
+        severity=severity,
+        file="pipeline/x.py",
+        line=10,
+        title="finding",
+        evidence="evidence",
+        suggested_test="test it",
+    )
+
+
+def model_report(*, findings=(), head_sha="b" * 40):
+    return build_report(
+        ClaudeJudgment(tests_run=[], findings=list(findings), limitations=[]),
+        base_sha="a" * 40,
+        head_sha=head_sha,
+        reviewed_at=datetime(2026, 8, 10, tzinfo=timezone.utc),
+    )
+
+
+def write_report(directory, *, head_sha):
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{head_sha}.claude.json"
+    path.write_text(model_report(head_sha=head_sha).model_dump_json(), encoding="utf-8")
+    return path
+
+
+def prepare_review_preflights(monkeypatch, tmp_path):
+    monkeypatch.setattr(review, "check_claude_auth", lambda **kwargs: None)
+    monkeypatch.setattr(review, "ensure_tracked_clean", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        review,
+        "resolve_commit",
+        lambda repo, ref, **kwargs: {"base": "a" * 40, "HEAD": "b" * 40}[ref],
+    )
+    monkeypatch.setattr(review, "git_diff", lambda *args, **kwargs: "diff --git a/x b/x")
+    monkeypatch.setattr(review, "changed_files", lambda *args, **kwargs: ["x"])
+    monkeypatch.setattr(
+        review,
+        "detached_worktree",
+        lambda *args, **kwargs: fake_worktree(tmp_path / "isolated"),
+    )
+    monkeypatch.setattr(review, "run_layer1", lambda *args, **kwargs: "gate passed")
 
 
 @pytest.mark.unit
@@ -433,3 +494,569 @@ def test_cleanup_runner_exception_does_not_mask_review_exception(tmp_path):
         raise ValueError("original review failure")
 
     assert len(warnings_seen) == 2
+
+
+@pytest.mark.unit
+def test_run_review_stamps_identity_and_writes_both_reports(tmp_path, monkeypatch):
+    judgment = '{"tests_run": [], "findings": [], "limitations": []}'
+    prepare_review_preflights(monkeypatch, tmp_path)
+
+    seen = {}
+
+    def claude_runner(argv, **kwargs):
+        seen["argv"] = argv
+        seen["cwd"] = kwargs["cwd"]
+        return completed(argv, stdout=judgment)
+
+    outcome = review.run_review(
+        repo=tmp_path,
+        base_ref="base",
+        head_ref="HEAD",
+        report_dir=tmp_path / "reports",
+        acceptance="works",
+        risk="mandatory: contract",
+        original_symptom="none",
+        runner=claude_runner,
+    )
+    assert outcome.report.verdict.value == "pass"
+    assert outcome.report.head_sha == "b" * 40
+    assert outcome.json_path.exists() and outcome.markdown_path.exists()
+    assert seen["cwd"] == tmp_path / "isolated"
+    assert "Write" in seen["argv"][seen["argv"].index("--disallowedTools") + 1]
+
+
+@pytest.mark.unit
+def test_required_missing_auth_raises_but_optional_returns_none(tmp_path, monkeypatch):
+    def unavailable(**kwargs):
+        raise review.AuthUnavailable("not logged in")
+
+    monkeypatch.setattr(review, "check_claude_auth", unavailable)
+    with pytest.raises(review.AuthUnavailable):
+        review.run_review(
+            repo=tmp_path,
+            base_ref="HEAD~1",
+            acceptance="test the gate",
+            risk="mandatory: new component",
+            original_symptom="none",
+            required=True,
+        )
+    assert (
+        review.run_review(
+            repo=tmp_path,
+            base_ref="HEAD~1",
+            acceptance="test the gate",
+            risk="optional review",
+            original_symptom="none",
+            required=False,
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_layer1_runs_against_isolated_head_before_claude(tmp_path):
+    seen = {}
+
+    def runner(argv, **kwargs):
+        seen["argv"] = argv
+        seen["cwd"] = kwargs["cwd"]
+        return completed(argv, stdout="gate passed")
+
+    summary = review.run_layer1(tmp_path, Path("/venv/python"), runner)
+    assert seen["argv"] == [
+        "/venv/python",
+        "-m",
+        "devtools.verification.offline",
+        "--only",
+        "all",
+        "--repo",
+        str(tmp_path),
+        "--python",
+        "/venv/python",
+    ]
+    assert seen["cwd"] == tmp_path
+    assert summary == "gate passed"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("severity", "expected"),
+    [(None, 0), ("medium", 3), ("high", 4)],
+)
+def test_exit_code_follows_computed_verdict(severity, expected):
+    findings = [] if severity is None else [model_finding(severity)]
+    report = model_report(findings=findings)
+    assert review.exit_code_for_report(report) == expected
+
+
+@pytest.mark.unit
+def test_explicit_user_waiver_is_bound_and_exits_zero(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        review,
+        "resolve_commit",
+        lambda repo, ref, **kwargs: {"base": "a" * 40, "HEAD": "b" * 40}[ref],
+    )
+    outcome = review.write_user_waiver(
+        repo=tmp_path,
+        base_ref="base",
+        head_ref="HEAD",
+        report_dir=tmp_path / "reports",
+        reason="user accepted the unverified change",
+        unverified_risk="Claude did not test scheduler behavior",
+        user_approved=True,
+        clock=lambda: datetime(2026, 8, 10, tzinfo=timezone.utc),
+    )
+    assert outcome.report.reviewer is Reviewer.USER_WAIVER
+    assert outcome.report.verdict.value == "warn"
+    assert outcome.report.waiver.reason == "user accepted the unverified change"
+    assert review.exit_code_for_report(outcome.report) == 0
+
+
+@pytest.mark.unit
+def test_waiver_without_explicit_user_approval_is_rejected(tmp_path):
+    with pytest.raises(review.ReviewError, match="explicit user approval"):
+        review.write_user_waiver(
+            repo=tmp_path,
+            base_ref="base",
+            reason="not enough",
+            unverified_risk="unknown",
+            user_approved=False,
+        )
+
+
+@pytest.mark.unit
+def test_check_rejects_stale_report(tmp_path):
+    path = write_report(tmp_path, head_sha="a" * 40)
+    with pytest.raises(review.ReviewError, match="stale"):
+        review.load_current_report(path, expected_head="b" * 40)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("side_effect", "message"),
+    [
+        (subprocess.TimeoutExpired(["claude"], 10), "timed out"),
+        (None, "exited 9"),
+    ],
+)
+def test_claude_failures_are_concise(tmp_path, monkeypatch, side_effect, message):
+    prepare_review_preflights(monkeypatch, tmp_path)
+
+    def failing(argv, **kwargs):
+        if side_effect:
+            raise side_effect
+        return completed(argv, code=9, stderr="quota exceeded\nsecret detail")
+
+    with pytest.raises(review.ReviewError, match=message):
+        review.run_review(
+            repo=tmp_path,
+            base_ref="base",
+            acceptance="test failure mapping",
+            risk="mandatory: new component",
+            original_symptom="none",
+            runner=failing,
+        )
+
+
+@pytest.mark.unit
+def test_invalid_claude_json_writes_no_partial_report(tmp_path, monkeypatch):
+    prepare_review_preflights(monkeypatch, tmp_path)
+    with pytest.raises(review.ReviewError, match="valid judgment JSON"):
+        review.run_review(
+            repo=tmp_path,
+            base_ref="base",
+            report_dir=tmp_path / "reports",
+            acceptance="reject invalid output",
+            risk="mandatory: new component",
+            original_symptom="none",
+            runner=lambda argv, **kwargs: completed(argv, stdout="not json"),
+        )
+    assert not list((tmp_path / "reports").glob("*"))
+
+
+@pytest.mark.unit
+def test_markdown_is_derived_from_report():
+    report = model_report(findings=[model_finding("medium")])
+    rendered = review.render_markdown(report)
+    assert "Verdict: warn" in rendered
+    assert "pipeline/x.py:10" in rendered
+    assert "finding" in rendered
+
+
+@pytest.mark.unit
+def test_markdown_renders_zero_findings_and_limitations():
+    report = build_report(
+        ClaudeJudgment(
+            tests_run=[], findings=[], limitations=["live boundary not exercised"]
+        ),
+        base_sha="a" * 40,
+        head_sha="b" * 40,
+        reviewed_at=datetime(2026, 8, 10, tzinfo=timezone.utc),
+    )
+    rendered = review.render_markdown(report)
+    assert "No findings." in rendered
+    assert "live boundary not exercised" in rendered
+
+
+@pytest.mark.unit
+def test_atomic_write_failure_leaves_no_final_or_temp_file(tmp_path, monkeypatch):
+    target = tmp_path / "report.json"
+
+    def disk_full(source, destination):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(review.os, "replace", disk_full)
+    with pytest.raises(review.ReviewError, match="write report"):
+        review.atomic_write_text(target, "{}\n")
+    assert not target.exists()
+    assert not list(tmp_path.glob(f".{target.name}.*"))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["run", "--base", "base"],
+        [
+            "waive",
+            "--base",
+            "base",
+            "--reason",
+            "reason",
+            "--unverified-risk",
+            "risk",
+        ],
+    ],
+)
+def test_cli_reserves_argparse_exit_two_for_missing_required_fields(argv):
+    with pytest.raises(SystemExit) as error:
+        review.main(argv)
+    assert error.value.code == 2
+
+
+@pytest.mark.unit
+def test_run_cli_computes_review_and_returns_report_verdict(tmp_path, monkeypatch, capsys):
+    seen = {}
+    report = model_report(findings=[model_finding("medium")])
+    outcome = review.ReviewOutcome(
+        report,
+        tmp_path / f"{report.head_sha}.claude.json",
+        tmp_path / f"{report.head_sha}.claude.md",
+    )
+
+    def fake_run_review(**kwargs):
+        seen.update(kwargs)
+        return outcome
+
+    monkeypatch.setattr(review, "run_review", fake_run_review)
+    result = review.main(
+        [
+            "run",
+            "--base",
+            "base",
+            "--head",
+            "topic",
+            "--acceptance",
+            "works",
+            "--risk",
+            "mandatory",
+            "--original-symptom",
+            "none",
+            "--report-dir",
+            str(tmp_path),
+            "--timeout",
+            "17",
+        ]
+    )
+    assert result == 3
+    assert seen["base_ref"] == "base"
+    assert seen["head_ref"] == "topic"
+    assert seen["acceptance"] == "works"
+    assert seen["risk"] == "mandatory"
+    assert seen["original_symptom"] == "none"
+    assert seen["report_dir"] == tmp_path
+    assert seen["timeout"] == 17
+    assert seen["required"] is True
+    assert capsys.readouterr().out.strip() == f"warn {outcome.json_path}"
+
+
+@pytest.mark.unit
+def test_run_cli_optional_unavailable_exits_zero(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(review, "run_review", lambda **kwargs: None)
+    result = review.main(
+        [
+            "run",
+            "--base",
+            "base",
+            "--acceptance",
+            "works",
+            "--risk",
+            "optional",
+            "--original-symptom",
+            "none",
+            "--optional",
+            "--report-dir",
+            str(tmp_path),
+        ]
+    )
+    assert result == 0
+    assert capsys.readouterr().out.strip() == "optional Claude review unavailable"
+
+
+@pytest.mark.unit
+def test_check_cli_resolves_exact_head_and_loads_sha_named_report(
+    tmp_path, monkeypatch, capsys
+):
+    head = "b" * 40
+    expected_path = tmp_path / f"{head}.claude.json"
+    seen = {}
+    monkeypatch.setattr(
+        review,
+        "resolve_commit",
+        lambda repo, ref, **kwargs: seen.setdefault("resolved", (repo, ref)) and head,
+    )
+
+    def fake_load(path, *, expected_head):
+        seen["loaded"] = (path, expected_head)
+        return model_report(head_sha=head)
+
+    monkeypatch.setattr(review, "load_current_report", fake_load)
+    result = review.main(
+        ["check", "--head", "topic", "--report-dir", str(tmp_path)]
+    )
+    assert result == 0
+    assert seen["resolved"][1] == "topic"
+    assert seen["loaded"] == (expected_path, head)
+    assert capsys.readouterr().out.strip() == f"pass {expected_path}"
+
+
+@pytest.mark.unit
+def test_check_cli_prints_waived_and_exits_zero(tmp_path, monkeypatch, capsys):
+    waiver_report = build_waiver_report(
+        base_sha="a" * 40,
+        head_sha="b" * 40,
+        waiver=Waiver(
+            approved_by="user",
+            approved_at=datetime(2026, 8, 10, tzinfo=timezone.utc),
+            reason="accepted",
+            unverified_risk="risk",
+        ),
+    )
+    path = tmp_path / f"{'b' * 40}.claude.json"
+    monkeypatch.setattr(review, "resolve_commit", lambda *args, **kwargs: "b" * 40)
+    monkeypatch.setattr(review, "load_current_report", lambda *args, **kwargs: waiver_report)
+    assert review.main(["check", "--report", str(path)]) == 0
+    assert capsys.readouterr().out.strip() == f"waived {path}"
+
+
+@pytest.mark.unit
+def test_waive_cli_passes_literal_approval_and_prints_waived(
+    tmp_path, monkeypatch, capsys
+):
+    seen = {}
+    report = build_waiver_report(
+        base_sha="a" * 40,
+        head_sha="b" * 40,
+        waiver=Waiver(
+            approved_by="user",
+            approved_at=datetime(2026, 8, 10, tzinfo=timezone.utc),
+            reason="accepted",
+            unverified_risk="scheduler",
+        ),
+    )
+    outcome = review.ReviewOutcome(
+        report,
+        tmp_path / f"{report.head_sha}.claude.json",
+        tmp_path / f"{report.head_sha}.claude.md",
+    )
+
+    def fake_waiver(**kwargs):
+        seen.update(kwargs)
+        return outcome
+
+    monkeypatch.setattr(review, "write_user_waiver", fake_waiver)
+    result = review.main(
+        [
+            "waive",
+            "--base",
+            "base",
+            "--head",
+            "topic",
+            "--reason",
+            "accepted",
+            "--unverified-risk",
+            "scheduler",
+            "--user-approved",
+            "--report-dir",
+            str(tmp_path),
+        ]
+    )
+    assert result == 0
+    assert seen["user_approved"] is True
+    assert seen["reason"] == "accepted"
+    assert seen["unverified_risk"] == "scheduler"
+    assert capsys.readouterr().out.strip() == f"waived {outcome.json_path}"
+
+
+@pytest.mark.unit
+def test_cli_operational_error_is_one_line_without_raw_output(monkeypatch, capsys):
+    monkeypatch.setattr(
+        review,
+        "run_review",
+        lambda **kwargs: (_ for _ in ()).throw(review.ReviewError("review timed out")),
+    )
+    result = review.main(
+        [
+            "run",
+            "--base",
+            "base",
+            "--acceptance",
+            "works",
+            "--risk",
+            "mandatory",
+            "--original-symptom",
+            "none",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert result == 1
+    assert captured.out == ""
+    assert captured.err == "error: review timed out\n"
+
+
+@pytest.mark.unit
+def test_run_review_uses_exact_safe_argv_packet_stdin_and_timeout(
+    tmp_path, monkeypatch
+):
+    prepare_review_preflights(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        review, "run_layer1", lambda *args, **kwargs: "exact isolated gate result"
+    )
+    python = Path("/approved/venv/python")
+    seen = {}
+
+    def runner(argv, **kwargs):
+        seen.update(argv=argv, kwargs=kwargs)
+        return completed(
+            argv,
+            stdout='{"tests_run": [], "findings": [], "limitations": []}',
+        )
+
+    review.run_review(
+        repo=tmp_path,
+        base_ref="base",
+        acceptance="works",
+        risk="mandatory",
+        original_symptom="none",
+        report_dir=tmp_path / "reports",
+        python_executable=python,
+        timeout=37,
+        runner=runner,
+    )
+    assert seen["argv"] == [
+        "claude",
+        "-p",
+        "--output-format",
+        "text",
+        "--allowedTools",
+        "Read,Grep,Glob,Bash(git diff:*),Bash(git status:*),"
+        "Bash(/approved/venv/python -m pytest:*),"
+        "Bash(/approved/venv/python -m ruff:*)",
+        "--disallowedTools",
+        "Write,Edit,NotebookEdit",
+    ]
+    assert seen["kwargs"]["cwd"] == tmp_path / "isolated"
+    assert seen["kwargs"]["timeout"] == 37
+    assert seen["kwargs"]["shell"] is False
+    assert "exact isolated gate result" in seen["kwargs"]["input"]
+
+
+@pytest.mark.unit
+def test_layer1_failure_prevents_claude_invocation(tmp_path, monkeypatch):
+    prepare_review_preflights(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        review,
+        "run_layer1",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            review.ReviewError("Layer 1 verification exited 1")
+        ),
+    )
+
+    def forbidden_runner(argv, **kwargs):
+        pytest.fail("Claude must not run after Layer 1 fails")
+
+    with pytest.raises(review.ReviewError, match="Layer 1 verification exited 1"):
+        review.run_review(
+            repo=tmp_path,
+            base_ref="base",
+            acceptance="works",
+            risk="mandatory",
+            original_symptom="none",
+            runner=forbidden_runner,
+        )
+
+
+@pytest.mark.unit
+def test_default_report_dir_reads_only_named_override(monkeypatch, tmp_path):
+    configured = tmp_path / "configured"
+    monkeypatch.setenv("TRADINGAGENTS_VERIFICATION_DIR", str(configured))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    assert review.default_report_dir() == configured
+    monkeypatch.delenv("TRADINGAGENTS_VERIFICATION_DIR")
+    assert review.default_report_dir() == tmp_path / "home/.tradingagents/verification"
+
+
+@pytest.mark.unit
+def test_harness_normalizes_injected_clock_to_utc(tmp_path, monkeypatch):
+    prepare_review_preflights(monkeypatch, tmp_path)
+    supplied = datetime(
+        2026, 8, 10, 12, 0, tzinfo=timezone(timedelta(hours=5))
+    )
+    outcome = review.run_review(
+        repo=tmp_path,
+        base_ref="base",
+        acceptance="works",
+        risk="mandatory",
+        original_symptom="none",
+        report_dir=tmp_path / "reports",
+        runner=lambda argv, **kwargs: completed(
+            argv,
+            stdout='{"tests_run": [], "findings": [], "limitations": []}',
+        ),
+        clock=lambda: supplied,
+    )
+    assert outcome.report.reviewed_at == datetime(
+        2026, 8, 10, 7, 0, tzinfo=timezone.utc
+    )
+    assert outcome.report.reviewed_at.utcoffset() == timedelta(0)
+
+
+@pytest.mark.unit
+def test_second_artifact_failure_removes_report_pair(tmp_path, monkeypatch):
+    prepare_review_preflights(monkeypatch, tmp_path)
+    real_write = review.atomic_write_text
+    calls = 0
+
+    def fail_second(path, content):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise review.ReviewError("could not write report markdown")
+        return real_write(path, content)
+
+    monkeypatch.setattr(review, "atomic_write_text", fail_second)
+    report_dir = tmp_path / "reports"
+    with pytest.raises(review.ReviewError, match="write report"):
+        review.run_review(
+            repo=tmp_path,
+            base_ref="base",
+            acceptance="works",
+            risk="mandatory",
+            original_symptom="none",
+            report_dir=report_dir,
+            runner=lambda argv, **kwargs: completed(
+                argv,
+                stdout='{"tests_run": [], "findings": [], "limitations": []}',
+            ),
+        )
+    assert not list(report_dir.glob("*"))
