@@ -130,7 +130,7 @@ def changed_files(
     """Return changed paths between two resolved commits."""
     output = git_text(
         repo,
-        ["diff", "--name-only", f"{base_sha}..{head_sha}"],
+        ["diff", "--no-ext-diff", "--name-only", f"{base_sha}..{head_sha}"],
         runner,
     )
     return output.splitlines()

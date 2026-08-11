@@ -161,7 +161,7 @@ def test_diff_helpers_use_exact_commit_range_and_return_text(tmp_path):
             {"cwd": tmp_path, "timeout": 120, "shell": False},
         ),
         (
-            ["git", "diff", "--name-only", f"{base}..{head}"],
+            ["git", "diff", "--no-ext-diff", "--name-only", f"{base}..{head}"],
             {"cwd": tmp_path, "timeout": 120, "shell": False},
         ),
     ]
