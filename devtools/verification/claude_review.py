@@ -245,13 +245,12 @@ def detached_worktree(
         target = Path(root) / "worktree"
         argv = ["git", "worktree", "add", "--detach", str(target), head_sha]
         try:
-            result = runner(argv, cwd=repo, timeout=120, shell=False)
-        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-            raise ReviewError("could not create detached review worktree") from exc
-        if result.returncode:
-            raise ReviewError("could not create detached review worktree")
-
-        try:
+            try:
+                result = runner(argv, cwd=repo, timeout=120, shell=False)
+            except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+                raise ReviewError("could not create detached review worktree") from exc
+            if result.returncode:
+                raise ReviewError("could not create detached review worktree")
             yield target
         finally:
             cleanup_commands = (

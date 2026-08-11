@@ -378,6 +378,23 @@ def test_detached_worktree_uses_exact_head_and_shell_disabled(tmp_path):
 
 
 @pytest.mark.unit
+def test_add_failure_still_removes_and_prunes(tmp_path):
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append(argv)
+        return completed(argv, code=1 if len(calls) == 1 else 0)
+
+    with (
+        pytest.raises(review.ReviewError, match="create detached"),
+        review.detached_worktree(tmp_path, "a" * 40, runner=runner),
+    ):
+        pytest.fail("a failed add must never yield")
+
+    assert [argv[2] for argv in calls] == ["add", "remove", "prune"]
+
+
+@pytest.mark.unit
 def test_cleanup_warnings_do_not_mask_review_exception(tmp_path):
     calls = 0
 
