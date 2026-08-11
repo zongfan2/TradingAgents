@@ -532,22 +532,27 @@ def run_review(
     _required_text(acceptance, "acceptance")
     _required_text(risk, "risk")
     _required_text(original_symptom, "original symptom")
+    auth_available = True
     try:
         check_claude_auth(runner=runner)
     except AuthUnavailable:
-        if not required:
-            return None
-        raise
+        if required:
+            raise
+        auth_available = False
 
     ensure_tracked_clean(repo, runner=runner)
     base_sha = resolve_commit(repo, base_ref, runner=runner)
     head_sha = resolve_commit(repo, head_ref, runner=runner)
-    diff = git_diff(repo, base_sha, head_sha, runner=runner)
-    paths = changed_files(repo, base_sha, head_sha, runner=runner)
     python = python_executable or (repo / ".venv/bin/python").absolute()
+
+    if auth_available:
+        diff = git_diff(repo, base_sha, head_sha, runner=runner)
+        paths = changed_files(repo, base_sha, head_sha, runner=runner)
 
     with detached_worktree(repo, head_sha, runner=runner) as isolated:
         layer1_result = run_layer1(isolated, python, runner=runner)
+        if not auth_available:
+            return None
         packet = build_review_packet(
             repo=repo,
             base_sha=base_sha,

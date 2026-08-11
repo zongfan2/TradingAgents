@@ -84,9 +84,15 @@ class ReviewReport(StrictModel):
 
     @model_validator(mode="after")
     def validate_reviewer_shape(self) -> ReviewReport:
-        if self.reviewer is Reviewer.CLAUDE and self.waiver is not None:
-            raise ValueError("claude report cannot carry a waiver")
-        if self.reviewer is Reviewer.USER_WAIVER:
+        if self.reviewer is Reviewer.CLAUDE:
+            if self.waiver is not None:
+                raise ValueError("claude report cannot carry a waiver")
+            expected = compute_verdict(
+                self.tests_run, self.findings, self.limitations
+            )
+            if self.verdict is not expected:
+                raise ValueError("claude report verdict contradicts review evidence")
+        elif self.reviewer is Reviewer.USER_WAIVER:
             if self.waiver is None or self.verdict is not ReviewVerdict.WARN:
                 raise ValueError("user-waiver report requires waiver and warn verdict")
             if self.tests_run or self.findings:
@@ -95,12 +101,18 @@ class ReviewReport(StrictModel):
 
 
 def compute_verdict(
-    findings: Sequence[Finding], limitations: Sequence[str]
+    tests_run: Sequence[TestRun],
+    findings: Sequence[Finding],
+    limitations: Sequence[str],
 ) -> ReviewVerdict:
+    statuses = {item.status for item in tests_run}
     severities = {item.severity for item in findings}
-    if severities & {Severity.CRITICAL, Severity.HIGH}:
+    if TestStatus.FAIL in statuses or severities & {
+        Severity.CRITICAL,
+        Severity.HIGH,
+    }:
         return ReviewVerdict.FAIL
-    if severities or limitations:
+    if TestStatus.NOT_RUN in statuses or severities or limitations:
         return ReviewVerdict.WARN
     return ReviewVerdict.PASS
 
@@ -116,7 +128,9 @@ def build_report(
         base_sha=base_sha,
         head_sha=head_sha,
         reviewed_at=reviewed_at,
-        verdict=compute_verdict(judgment.findings, judgment.limitations),
+        verdict=compute_verdict(
+            judgment.tests_run, judgment.findings, judgment.limitations
+        ),
         tests_run=judgment.tests_run,
         findings=judgment.findings,
         limitations=judgment.limitations,

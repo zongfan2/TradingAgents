@@ -8,6 +8,7 @@ from devtools.verification.models import (
     Finding,
     ReviewReport,
     ReviewVerdict,
+    TestRun as ReviewTestRun,
     Waiver,
     build_report,
     build_waiver_report,
@@ -29,20 +30,27 @@ def finding(severity: str) -> Finding:
     )
 
 
+def model_test_run(status: str) -> ReviewTestRun:
+    return ReviewTestRun(command="pytest -q", status=status, summary="controlled result")
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("findings", "limitations", "expected"),
+    ("tests_run", "findings", "limitations", "expected"),
     [
-        ([], [], ReviewVerdict.PASS),
-        ([finding("low")], [], ReviewVerdict.WARN),
-        ([finding("medium")], [], ReviewVerdict.WARN),
-        ([finding("high")], [], ReviewVerdict.FAIL),
-        ([finding("critical")], [], ReviewVerdict.FAIL),
-        ([], ["live boundary not exercised"], ReviewVerdict.WARN),
+        ([], [], [], ReviewVerdict.PASS),
+        ([model_test_run("pass")], [], [], ReviewVerdict.PASS),
+        ([model_test_run("fail")], [], [], ReviewVerdict.FAIL),
+        ([model_test_run("not_run")], [], [], ReviewVerdict.WARN),
+        ([], [finding("low")], [], ReviewVerdict.WARN),
+        ([], [finding("medium")], [], ReviewVerdict.WARN),
+        ([], [finding("high")], [], ReviewVerdict.FAIL),
+        ([], [finding("critical")], [], ReviewVerdict.FAIL),
+        ([], [], ["live boundary not exercised"], ReviewVerdict.WARN),
     ],
 )
-def test_compute_verdict(findings, limitations, expected):
-    assert compute_verdict(findings, limitations) is expected
+def test_compute_verdict(tests_run, findings, limitations, expected):
+    assert compute_verdict(tests_run, findings, limitations) is expected
 
 
 @pytest.mark.unit
@@ -125,4 +133,27 @@ def test_claude_report_cannot_carry_a_waiver():
                 "reason": "no",
                 "unverified_risk": "unknown",
             },
+        )
+
+
+@pytest.mark.unit
+def test_claude_report_rejects_verdict_that_contradicts_test_evidence():
+    with pytest.raises(ValidationError, match="contradict"):
+        ReviewReport(
+            schema_version=1,
+            base_sha=BASE,
+            head_sha=HEAD,
+            reviewed_at="2026-08-10T12:00:00Z",
+            reviewer="claude",
+            verdict="pass",
+            tests_run=[
+                {
+                    "command": "pytest -q",
+                    "status": "fail",
+                    "summary": "one regression failed",
+                }
+            ],
+            findings=[],
+            limitations=[],
+            waiver=None,
         )

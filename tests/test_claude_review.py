@@ -536,7 +536,7 @@ def test_run_review_stamps_identity_and_writes_both_reports(tmp_path, monkeypatc
 
 
 @pytest.mark.unit
-def test_required_missing_auth_raises_but_optional_returns_none(tmp_path, monkeypatch):
+def test_required_missing_auth_raises_immediately(tmp_path, monkeypatch):
     def unavailable(**kwargs):
         raise review.AuthUnavailable("not logged in")
 
@@ -550,17 +550,158 @@ def test_required_missing_auth_raises_but_optional_returns_none(tmp_path, monkey
             original_symptom="none",
             required=True,
         )
+
+
+@pytest.mark.unit
+def test_optional_missing_auth_runs_exact_head_layer1_without_claude_or_report(
+    tmp_path, monkeypatch
+):
+    events = []
+
+    def unavailable(**kwargs):
+        events.append("auth-unavailable")
+        raise review.AuthUnavailable("not logged in")
+
+    def clean(*args, **kwargs):
+        events.append("tracked-clean")
+
+    def resolve(repo, ref, **kwargs):
+        events.append(f"resolve:{ref}")
+        return {"base": "a" * 40, "HEAD": "b" * 40}[ref]
+
+    @contextmanager
+    def exact_worktree(repo, head_sha, **kwargs):
+        events.append(f"worktree:{head_sha}")
+        isolated = tmp_path / "isolated"
+        isolated.mkdir()
+        yield isolated
+
+    def layer1(worktree, python_executable, **kwargs):
+        events.append(f"layer1:{worktree.name}")
+        return "gate passed"
+
+    def forbidden_claude(argv, **kwargs):
+        pytest.fail("Claude must not run when optional authentication is unavailable")
+
+    monkeypatch.setattr(review, "check_claude_auth", unavailable)
+    monkeypatch.setattr(review, "ensure_tracked_clean", clean)
+    monkeypatch.setattr(review, "resolve_commit", resolve)
+    monkeypatch.setattr(review, "git_diff", lambda *args, **kwargs: "diff")
+    monkeypatch.setattr(review, "changed_files", lambda *args, **kwargs: ["x.py"])
+    monkeypatch.setattr(review, "detached_worktree", exact_worktree)
+    monkeypatch.setattr(review, "run_layer1", layer1)
+    report_dir = tmp_path / "reports"
+
     assert (
         review.run_review(
             repo=tmp_path,
-            base_ref="HEAD~1",
+            base_ref="base",
+            acceptance="test the gate",
+            risk="optional review",
+            original_symptom="none",
+            report_dir=report_dir,
+            required=False,
+            runner=forbidden_claude,
+        )
+        is None
+    )
+    assert events == [
+        "auth-unavailable",
+        "tracked-clean",
+        "resolve:base",
+        "resolve:HEAD",
+        f"worktree:{'b' * 40}",
+        "layer1:isolated",
+    ]
+    assert not report_dir.exists()
+
+
+@pytest.mark.unit
+def test_optional_missing_auth_propagates_invalid_ref(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        review,
+        "check_claude_auth",
+        lambda **kwargs: (_ for _ in ()).throw(
+            review.AuthUnavailable("not logged in")
+        ),
+    )
+    monkeypatch.setattr(review, "ensure_tracked_clean", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        review,
+        "resolve_commit",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            review.ReviewError("could not resolve commit")
+        ),
+    )
+    with pytest.raises(review.ReviewError, match="resolve commit"):
+        review.run_review(
+            repo=tmp_path,
+            base_ref="missing",
             acceptance="test the gate",
             risk="optional review",
             original_symptom="none",
             required=False,
         )
-        is None
+
+
+@pytest.mark.unit
+def test_optional_missing_auth_propagates_layer1_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        review,
+        "check_claude_auth",
+        lambda **kwargs: (_ for _ in ()).throw(
+            review.AuthUnavailable("not logged in")
+        ),
     )
+    monkeypatch.setattr(review, "ensure_tracked_clean", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        review,
+        "resolve_commit",
+        lambda repo, ref, **kwargs: {"base": "a" * 40, "HEAD": "b" * 40}[ref],
+    )
+    monkeypatch.setattr(review, "git_diff", lambda *args, **kwargs: "diff")
+    monkeypatch.setattr(review, "changed_files", lambda *args, **kwargs: ["x.py"])
+    monkeypatch.setattr(
+        review,
+        "detached_worktree",
+        lambda *args, **kwargs: fake_worktree(tmp_path / "isolated"),
+    )
+    monkeypatch.setattr(
+        review,
+        "run_layer1",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            review.ReviewError("Layer 1 verification exited 1")
+        ),
+    )
+    with pytest.raises(review.ReviewError, match="Layer 1 verification exited 1"):
+        review.run_review(
+            repo=tmp_path,
+            base_ref="base",
+            acceptance="test the gate",
+            risk="optional review",
+            original_symptom="none",
+            required=False,
+        )
+
+
+@pytest.mark.unit
+def test_optional_review_propagates_non_auth_review_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        review,
+        "check_claude_auth",
+        lambda **kwargs: (_ for _ in ()).throw(
+            review.ReviewError("unexpected auth inspection error")
+        ),
+    )
+    with pytest.raises(review.ReviewError, match="unexpected auth inspection"):
+        review.run_review(
+            repo=tmp_path,
+            base_ref="base",
+            acceptance="test the gate",
+            risk="optional review",
+            original_symptom="none",
+            required=False,
+        )
 
 
 @pytest.mark.unit
@@ -639,6 +780,24 @@ def test_check_rejects_stale_report(tmp_path):
     path = write_report(tmp_path, head_sha="a" * 40)
     with pytest.raises(review.ReviewError, match="stale"):
         review.load_current_report(path, expected_head="b" * 40)
+
+
+@pytest.mark.unit
+def test_check_rejects_stored_verdict_that_contradicts_test_evidence(tmp_path):
+    head = "b" * 40
+    payload = model_report(head_sha=head).model_dump(mode="json")
+    payload["verdict"] = "pass"
+    payload["tests_run"] = [
+        {
+            "command": "pytest -q",
+            "status": "fail",
+            "summary": "one regression failed",
+        }
+    ]
+    path = tmp_path / f"{head}.claude.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(review.ReviewError, match="schema validation"):
+        review.load_current_report(path, expected_head=head)
 
 
 @pytest.mark.unit
