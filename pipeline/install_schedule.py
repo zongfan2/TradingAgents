@@ -77,6 +77,13 @@ def session_label(session: str) -> str:
 
 WATCHDOG_LABEL = f"{LABEL_PREFIX}.watchdog"
 
+#: The repo root — ``python -m pipeline.<module>`` resolves the package from
+#: the working directory (pipeline/ is not an installed package), and launchd's
+#: default cwd is ``/``. Omitting WorkingDirectory made every scheduled fire
+#: die with ModuleNotFoundError for two weeks before anything else could run
+#: (found 2026-08-24); the watchdog crashed identically, so nothing alerted.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
 
 def build_session_plist(
     config: PipelineConfig, session: str, fire_times: Sequence[tuple[int, int]]
@@ -91,6 +98,7 @@ def build_session_plist(
             "--session",
             session,
         ],
+        "WorkingDirectory": str(REPO_ROOT),
         "StartCalendarInterval": [{"Hour": h, "Minute": m} for h, m in fire_times],
         "RunAtLoad": False,
         "StandardOutPath": str(config.state_dir / f"launchd.{session}.out.log"),
@@ -107,6 +115,7 @@ def build_watchdog_plist(config: PipelineConfig) -> dict:
             "pipeline.orchestrator",
             "watchdog",
         ],
+        "WorkingDirectory": str(REPO_ROOT),
         "StartInterval": WATCHDOG_INTERVAL_S,
         "RunAtLoad": False,
         "StandardOutPath": str(config.state_dir / "launchd.watchdog.out.log"),

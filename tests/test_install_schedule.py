@@ -369,3 +369,19 @@ def test_session_date_derivation_never_uses_host_clock():
 
     assert session_date("cn", instant) == date(2026, 1, 6)
     assert session_date("us", instant) == date(2026, 1, 5)
+
+
+@pytest.mark.unit
+def test_plists_set_working_directory_to_repo_root(tmp_path):
+    # Regression: launchd's default cwd is "/" where `python -m pipeline.*`
+    # cannot resolve the package — two weeks of scheduled fires died on
+    # ModuleNotFoundError before WorkingDirectory was emitted (2026-08-24).
+    from pipeline import install_schedule as mod
+    from pipeline.config import load_config
+    cfg = load_config()
+    repo_root = str(mod.REPO_ROOT)
+    assert repo_root.endswith("TradingAgents")
+    session_plist = mod.build_session_plist(cfg, "us", [(8, 30)])
+    watchdog_plist = mod.build_watchdog_plist(cfg)
+    assert session_plist["WorkingDirectory"] == repo_root
+    assert watchdog_plist["WorkingDirectory"] == repo_root
