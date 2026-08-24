@@ -1276,7 +1276,30 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _load_repo_dotenv() -> None:
+    """Fill missing env keys from the repo-root ``.env`` (setdefault — never
+    overrides launchd/shell-provided values). Under launchd the process env is
+    only the plist's PATH, so orchestrator-level knobs (timeouts, slot times)
+    and component credentials all live in ``.env``; ``run_one`` already does
+    the same for its children (2026-08-24). ``TRADINGAGENTS_SKIP_DOTENV``
+    disables the load (tests set it — the real .env must not leak into
+    fixtures)."""
+    if os.environ.get("TRADINGAGENTS_SKIP_DOTENV"):
+        return
+    root_env = Path(__file__).resolve().parent.parent / ".env"
+    if not root_env.exists():
+        return
+    for raw in root_env.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if value.strip():
+            os.environ.setdefault(key.strip(), value.strip())
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    _load_repo_dotenv()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     args = build_parser().parse_args(argv)
     config = load_config()

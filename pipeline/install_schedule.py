@@ -238,6 +238,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    from pipeline.orchestrator import _load_repo_dotenv
+    _load_repo_dotenv()
     args = build_parser().parse_args(argv)
     config = load_config()
     host_tz = args.host_tz or host_timezone_name()

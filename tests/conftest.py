@@ -5,6 +5,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# Importing the package triggers tradingagents/__init__.py's load_dotenv(),
+# which pours the developer's real repo .env into os.environ (override=False).
+# Force it HERE, once, so the hermetic strip below sees the complete damage —
+# otherwise the first test that imports tradingagents re-pollutes the env
+# mid-session (bit us 2026-08-24 when TRADINGAGENTS_SLOT_TIME_US landed in
+# .env and leaked into the installer tests).
+import tradingagents  # noqa: F401,E402
+
 
 def pytest_configure(config):
     for marker in ("unit", "integration", "smoke"):
@@ -74,3 +82,15 @@ def mock_llm_client():
         return_value=client,
     ):
         yield client
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_tradingagents_env(monkeypatch):
+    """Strip EVERY ambient TRADINGAGENTS_* env var and block entrypoint-level
+    .env loading, so each test sees only shipped defaults plus what it sets
+    itself. The developer's real .env (loaded by the package import above and
+    by orchestrator/installer mains) must never skew assertions."""
+    for key in list(os.environ):
+        if key.startswith("TRADINGAGENTS_"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("TRADINGAGENTS_SKIP_DOTENV", "1")
