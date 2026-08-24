@@ -21,6 +21,8 @@ from __future__ import annotations
 import argparse
 import os
 import plistlib
+import shutil
+import sys
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -84,6 +86,35 @@ WATCHDOG_LABEL = f"{LABEL_PREFIX}.watchdog"
 #: (found 2026-08-24); the watchdog crashed identically, so nothing alerted.
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+#: Baseline PATH for launchd jobs. launchd gives agents a minimal PATH
+#: (/usr/bin:/bin:/usr/sbin:/sbin) that misses nvm/homebrew-installed CLIs —
+#: the 2026-08-24 us slot lost its whole collection layer to "codex not found
+#: on PATH". launchd_path() resolves the backend CLIs' actual directories at
+#: install time and bakes them into the plist's EnvironmentVariables.
+_STANDARD_PATH_DIRS = ("/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin")
+_REQUIRED_CLIS = ("codex", "claude")
+
+
+def launchd_path() -> str:
+    """PATH for the generated plists: backend-CLI dirs first, then standard dirs."""
+    dirs: list[str] = []
+    for cli in _REQUIRED_CLIS:
+        found = shutil.which(cli)
+        if found:
+            # Keep the symlink's own directory (e.g. nvm's bin/) — resolving
+            # would land in the npm package dir where the entry is codex.js,
+            # not an executable named ``codex``.
+            parent = str(Path(found).parent)
+            if parent not in dirs:
+                dirs.append(parent)
+        else:
+            print(f"install-schedule: warning: {cli!r} not found on the current PATH — "
+                  "scheduled runs will fail to invoke it", file=sys.stderr)
+    for d in _STANDARD_PATH_DIRS:
+        if d not in dirs:
+            dirs.append(d)
+    return ":".join(dirs)
+
 
 def build_session_plist(
     config: PipelineConfig, session: str, fire_times: Sequence[tuple[int, int]]
@@ -99,6 +130,7 @@ def build_session_plist(
             session,
         ],
         "WorkingDirectory": str(REPO_ROOT),
+        "EnvironmentVariables": {"PATH": launchd_path()},
         "StartCalendarInterval": [{"Hour": h, "Minute": m} for h, m in fire_times],
         "RunAtLoad": False,
         "StandardOutPath": str(config.state_dir / f"launchd.{session}.out.log"),
@@ -116,6 +148,7 @@ def build_watchdog_plist(config: PipelineConfig) -> dict:
             "watchdog",
         ],
         "WorkingDirectory": str(REPO_ROOT),
+        "EnvironmentVariables": {"PATH": launchd_path()},
         "StartInterval": WATCHDOG_INTERVAL_S,
         "RunAtLoad": False,
         "StandardOutPath": str(config.state_dir / "launchd.watchdog.out.log"),
