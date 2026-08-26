@@ -230,3 +230,76 @@ def get_global_news_yfinance(
 
     except Exception as e:
         return f"Error fetching global news: {str(e)}"
+
+
+def search_news_yfinance(
+    query: str,
+    curr_date: str,
+    look_back_days: int | None = None,
+    limit: int | None = None,
+) -> str:
+    """
+    Search news with a caller-supplied free-form query using yfinance Search.
+
+    Unlike ``get_global_news_yfinance``, which runs the fixed macro query list
+    from config, the query here is chosen by the caller — this is the primitive
+    behind the news analyst's autonomous ``search_news`` tool.
+
+    Args:
+        query: Free-form search query (company, competitor, sector, event, ...)
+        curr_date: Current date in yyyy-mm-dd format
+        look_back_days: Number of days to look back. ``None`` falls back to
+            ``global_news_lookback_days`` from the active config.
+        limit: Maximum number of articles to return. ``None`` falls back to
+            ``news_article_limit`` from the active config.
+
+    Returns:
+        Formatted string containing matching news articles
+    """
+    config = get_config()
+    if look_back_days is None:
+        look_back_days = config["global_news_lookback_days"]
+    if limit is None:
+        limit = config["news_article_limit"]
+
+    try:
+        search = yf_retry(lambda: yf.Search(
+            query=query,
+            news_count=limit,
+            enable_fuzzy_query=True,
+        ))
+        articles = search.news or []
+
+        curr_dt = datetime.strptime(curr_date, "%Y-%m-%d")
+        start_dt = curr_dt - relativedelta(days=look_back_days)
+        start_date = start_dt.strftime("%Y-%m-%d")
+
+        news_str = ""
+        kept = 0
+        seen_titles = set()
+        for article in articles:
+            data = _extract_article_data(article)
+            if not data["title"] or data["title"] in seen_titles:
+                continue
+            if not _in_news_window(data["pub_date"], start_dt, curr_dt):
+                continue
+            seen_titles.add(data["title"])
+            news_str += f"### {data['title']} (source: {data['publisher']})\n"
+            if data["summary"]:
+                news_str += f"{data['summary']}\n"
+            if data["link"]:
+                news_str += f"Link: {data['link']}\n"
+            news_str += "\n"
+            kept += 1
+            if kept >= limit:
+                break
+
+        if kept == 0:
+            return (
+                f"No news found for query '{query}' between {start_date} and {curr_date}"
+            )
+
+        return f"## News search results for '{query}', from {start_date} to {curr_date}:\n\n{news_str}"
+
+    except Exception as e:
+        return f"Error searching news for '{query}': {str(e)}"

@@ -34,15 +34,33 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Local web UI (webui/server.py). Optional so the core install stays lean;
+# tests/test_webui*.py import the server, so dev pulls this in below.
+webui = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "httpx>=0.27",
+]
 dev = [
     "ruff>=0.15",
     "pytest>=8.0",
     "pytest-subtests>=0.13",
+    # The suite imports webui/server.py — a fresh `pip install -e ".[dev]"`
+    # must be able to run every offline test (bit CI on 2026-08-24 and the
+    # 2026-08-05 venv rebuild before that).
+    "tradingagents[webui]",
 ]
 # Amazon Bedrock support (AWS SigV4 auth + boto3). Optional so the core install
 # stays lean: pip install "tradingagents[bedrock]".
 bedrock = [
     "langchain-aws>=1.5.0",
+]
+# Alpaca paper-trading SDK for the execution adapter (adapter spec R2;
+# lazy-imported by pipeline/execution_adapter.py only). Optional so the
+# offline pipeline and tests — which fake the broker boundary — never need
+# it: pip install "tradingagents[execution]".
+execution = [
+    "alpaca-py>=0.33.0",
 ]
 
 [project.scripts]

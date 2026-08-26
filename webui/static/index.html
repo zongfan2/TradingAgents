@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TradingAgents</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">Trading<span>Agents</span></div>
+  <div class="search-wrap">
+    <input id="search" type="text" placeholder="搜索代码，如 NVDA、0700.HK、BTC-USD" autocomplete="off" spellcheck="false">
+  </div>
+  <a href="/pipeline.html" class="nav-link">Pipeline</a>
+  <button id="settingsBtn" class="icon-btn" title="设置">⚙</button>
+</header>
+
+<!-- EXECUTION_HALT is surfaced prominently on every page while halted -->
+<div id="haltBanner" class="halt-banner" hidden>
+  ⛔ EXECUTION_HALT 已启用 —— 执行适配器全部转为 dry-run，不会有任何订单发往券商。
+  <a href="/pipeline.html">前往 Pipeline 页面管理</a>
+</div>
+
+<main class="layout">
+  <section class="content">
+
+    <!-- Hero: quote + chart -->
+    <div class="card hero">
+      <div class="hero-head">
+        <div>
+          <div id="qName" class="q-name">—</div>
+          <div id="qTicker" class="q-ticker"></div>
+        </div>
+      </div>
+      <div id="qPrice" class="q-price">—</div>
+      <div id="qChange" class="q-change"></div>
+      <div class="chart-wrap">
+        <svg id="chart" preserveAspectRatio="none"></svg>
+        <div id="chartTip" class="chart-tip" hidden></div>
+      </div>
+      <div class="range-tabs" id="rangeTabs">
+        <button data-range="1w">1周</button>
+        <button data-range="1mo" class="active">1月</button>
+        <button data-range="3mo">3月</button>
+        <button data-range="1y">1年</button>
+      </div>
+    </div>
+
+    <!-- Analyze -->
+    <div class="card">
+      <div class="analyze-row">
+        <label>分析日期 <input type="date" id="runDate"></label>
+        <button id="analyzeBtn" class="primary">开始多智能体分析</button>
+        <span id="runMeta" class="run-meta"></span>
+      </div>
+
+      <div id="pipeline" class="pipeline" hidden>
+        <div class="step" data-step="0"><i></i>分析师团队</div>
+        <div class="step" data-step="1"><i></i>多空研究</div>
+        <div class="step" data-step="2"><i></i>交易员</div>
+        <div class="step" data-step="3"><i></i>风险管理</div>
+        <div class="step" data-step="4"><i></i>投资组合经理</div>
+      </div>
+
+      <pre id="runLog" class="run-log" hidden></pre>
+    </div>
+
+    <!-- Decision -->
+    <div id="decisionCard" class="card decision" hidden>
+      <div class="decision-head">
+        <span id="decisionBadge" class="badge">—</span>
+        <span id="decisionTicker" class="decision-ticker"></span>
+      </div>
+      <div id="decisionBody" class="md"></div>
+    </div>
+
+    <!-- Reports -->
+    <div id="reportsCard" class="card" hidden>
+      <div class="tabs" id="reportTabs"></div>
+      <div id="reportBody" class="md report-body"></div>
+    </div>
+  </section>
+
+  <aside class="sidebar">
+    <div class="card">
+      <div class="side-head">自选列表
+        <button id="addWatch" class="mini-btn">＋当前</button>
+      </div>
+      <ul id="watchlist" class="watchlist"></ul>
+    </div>
+    <div class="card">
+      <div class="side-head">历史报告</div>
+      <ul id="history" class="history"></ul>
+    </div>
+  </aside>
+</main>
+
+<!-- Settings modal -->
+<div id="settingsModal" class="modal" hidden>
+  <div class="modal-card">
+    <div class="modal-head">
+      <h2>设置</h2>
+      <button id="settingsClose" class="icon-btn">✕</button>
+    </div>
+
+    <div class="settings-grid">
+      <section>
+        <h3>LLM</h3>
+        <label>Provider
+          <select id="sProvider"></select>
+        </label>
+        <label>深度思考模型 <input id="sDeep" list="deepModels" placeholder="deep model id"></label>
+        <datalist id="deepModels"></datalist>
+        <label>快速思考模型 <input id="sQuick" list="quickModels" placeholder="quick model id"></label>
+        <datalist id="quickModels"></datalist>
+        <label>Backend URL（可选，OpenAI 兼容端点/代理）
+          <input id="sBackend" placeholder="http://localhost:3456/v1">
+        </label>
+        <div class="row3">
+          <label>OpenAI effort
+            <select id="sOaiEffort"><option value="">默认</option><option>low</option><option>medium</option><option>high</option></select>
+          </label>
+          <label>Claude effort
+            <select id="sAntEffort"><option value="">默认</option><option>low</option><option>medium</option><option>high</option></select>
+          </label>
+          <label>Gemini thinking
+            <select id="sGooThink"><option value="">默认</option><option>minimal</option><option>high</option></select>
+          </label>
+        </div>
+        <label>Temperature（可选，留空用各家默认）<input id="sTemp" type="number" step="0.1" min="0" max="2"></label>
+      </section>
+
+      <section>
+        <h3>API Keys<span class="hint">（本地写入仓库 .env，服务端不回显已存的值）</span></h3>
+        <div id="keysGrid" class="keys-grid"></div>
+      </section>
+
+      <section>
+        <h3>数据源</h3>
+        <div id="vendorsGrid" class="vendors-grid"></div>
+      </section>
+
+      <section>
+        <h3>流水线</h3>
+        <div class="row3">
+          <label>辩论轮数 <input id="sDebate" type="number" min="1" max="5"></label>
+          <label>风险轮数 <input id="sRisk" type="number" min="1" max="5"></label>
+          <label>报告语言 <select id="sLang"></select></label>
+        </div>
+        <label class="check"><input id="sCkpt" type="checkbox"> 启用 checkpoint 断点续跑</label>
+      </section>
+    </div>
+
+    <div class="modal-foot">
+      <span id="saveMsg" class="save-msg"></span>
+      <button id="saveSettings" class="primary">保存设置</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

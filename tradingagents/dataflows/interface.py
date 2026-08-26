@@ -18,7 +18,9 @@ from .errors import (
     VendorRateLimitError,
 )
 from .fred import get_macro_data as get_fred_macro_data
+from .macro_brief import get_macro_brief_local
 from .polymarket import get_prediction_markets as get_polymarket_prediction_markets
+from .ticker_brief import get_ticker_brief_local
 from .y_finance import (
     get_balance_sheet as get_yfinance_balance_sheet,
     get_cashflow as get_yfinance_cashflow,
@@ -28,7 +30,7 @@ from .y_finance import (
     get_stock_stats_indicators_window,
     get_YFin_data_online,
 )
-from .yfinance_news import get_global_news_yfinance, get_news_yfinance
+from .yfinance_news import get_global_news_yfinance, get_news_yfinance, search_news_yfinance
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +63,7 @@ TOOLS_CATEGORIES = {
             "get_news",
             "get_global_news",
             "get_insider_transactions",
+            "search_news",
         ]
     },
     "macro_data": {
@@ -73,6 +76,18 @@ TOOLS_CATEGORIES = {
         "description": "Market-implied probabilities for forward-looking events",
         "tools": [
             "get_prediction_markets",
+        ]
+    },
+    "macro_brief": {
+        "description": "Pre-compiled daily deep-search macro brief (offline collector)",
+        "tools": [
+            "get_macro_brief",
+        ]
+    },
+    "ticker_brief": {
+        "description": "Pre-compiled daily deep-search ticker brief (offline collector)",
+        "tools": [
+            "get_ticker_brief",
         ]
     }
 }
@@ -89,7 +104,7 @@ VENDOR_LIST = [
 # sentinel instead of aborting the run (a bad LLM-supplied indicator, a missing
 # key, or a network blip should not crash an analysis over flavour data). Core
 # categories (prices, fundamentals, news) still raise so a broken primary is loud.
-OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets"}
+OPTIONAL_CATEGORIES = {"macro_data", "prediction_markets", "macro_brief", "ticker_brief"}
 
 # Mapping of methods to their vendor-specific implementations
 VENDOR_METHODS = {
@@ -133,6 +148,11 @@ VENDOR_METHODS = {
         "alpha_vantage": get_alpha_vantage_insider_transactions,
         "yfinance": get_yfinance_insider_transactions,
     },
+    # Free-form query search is yfinance-only for now; a websearch vendor
+    # (Tavily/Exa/...) can be added here without touching the tool layer.
+    "search_news": {
+        "yfinance": search_news_yfinance,
+    },
     # macro_data
     "get_macro_indicators": {
         "fred": get_fred_macro_data,
@@ -140,6 +160,14 @@ VENDOR_METHODS = {
     # prediction_markets
     "get_prediction_markets": {
         "polymarket": get_polymarket_prediction_markets,
+    },
+    # macro_brief
+    "get_macro_brief": {
+        "local": get_macro_brief_local,
+    },
+    # ticker_brief
+    "get_ticker_brief": {
+        "local": get_ticker_brief_local,
     },
 }
 

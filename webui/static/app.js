@@ -1,0 +1,533 @@
+/* TradingAgents Web UI — frontend logic (vanilla JS, no dependencies) */
+"use strict";
+
+const $ = (sel) => document.querySelector(sel);
+const api = async (path, opts) => {
+  const res = await fetch(path, opts);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || res.statusText);
+  }
+  return res.json();
+};
+
+const state = {
+  ticker: localStorage.getItem("ta.ticker") || "NVDA",
+  range: "1mo",
+  quote: null,
+  meta: null,
+  runId: null,
+  pollTimer: null,
+};
+
+/* ---------------- markdown (minimal, escape-first) ---------------- */
+// Quotes must be escaped too: report markdown is LLM output summarizing
+// attacker-reachable sources (news/Reddit/StockTwits), and an unescaped quote
+// in a link URL would break out of the href attribute and inject handlers.
+function esc(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+// Only plain http(s) URLs with no quote/angle characters may reach an href.
+function safeUrl(u) {
+  return /^https?:\/\/[^\s"'<>]+$/.test(u) ? u : null;
+}
+function mdInline(s) {
+  // Code spans are extracted first and restored last, so emphasis and link
+  // rules can't rewrite the inside of a code span. The placeholder is
+  // NUL-delimited: esc()-ed markdown can never contain \u0000, so ordinary
+  // space-surrounded numbers in prose ("grew 15 percent") are never
+  // mistaken for a placeholder and rendered as <code>undefined</code>.
+  const spans = [];
+  let out = s.replace(/`([^`]+)`/g, (_, code) => {
+    spans.push(code);
+    return `\u0000${spans.length - 1}\u0000`;
+  });
+  out = out
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*([^*]+)\*/g, "<em>$1</em>")
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (whole, text, url) => {
+      // URL arrives already entity-escaped by esc(); decode the quote entities
+      // back before validating so a legitimate URL isn't rejected.
+      const raw = url.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&");
+      const safe = safeUrl(raw);
+      return safe
+        ? `<a href="${esc(safe)}" target="_blank" rel="noopener noreferrer">${text}</a>`
+        : whole;
+    });
+  return out.replace(/\u0000(\d+)\u0000/g, (m, i) =>
+    spans[Number(i)] === undefined ? m : `<code>${spans[Number(i)]}</code>`);
+}
+function mdToHtml(src) {
+  const lines = esc(src).split(/\r?\n/);
+  const out = [];
+  let list = null, table = null, code = false;
+  const closeList = () => { if (list) { out.push(`</${list}>`); list = null; } };
+  const closeTable = () => { if (table) { out.push("</tbody></table>"); table = null; } };
+  for (const raw of lines) {
+    const line = raw;
+    if (line.trim().startsWith("```")) {
+      closeList(); closeTable();
+      out.push(code ? "</pre>" : "<pre>"); code = !code; continue;
+    }
+    if (code) { out.push(line); continue; }
+    const h = line.match(/^(#{1,4})\s+(.*)/);
+    if (h) { closeList(); closeTable(); out.push(`<h${h[1].length}>${mdInline(h[2])}</h${h[1].length}>`); continue; }
+    if (/^\s*(---|\*\*\*)\s*$/.test(line)) { closeList(); closeTable(); out.push("<hr>"); continue; }
+    if (/^\s*\|.*\|\s*$/.test(line)) {
+      closeList();
+      const cells = line.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+      if (cells.every((c) => /^:?-{2,}:?$/.test(c))) continue; // separator row
+      if (!table) { table = true; out.push("<table><tbody>"); out.push("<tr>" + cells.map((c) => `<th>${mdInline(c)}</th>`).join("") + "</tr>"); }
+      else out.push("<tr>" + cells.map((c) => `<td>${mdInline(c)}</td>`).join("") + "</tr>");
+      continue;
+    }
+    closeTable();
+    const ul = line.match(/^\s*[-*]\s+(.*)/);
+    const ol = line.match(/^\s*\d+[.)]\s+(.*)/);
+    if (ul || ol) {
+      const kind = ul ? "ul" : "ol";
+      if (list !== kind) { closeList(); out.push(`<${kind}>`); list = kind; }
+      out.push(`<li>${mdInline((ul || ol)[1])}</li>`); continue;
+    }
+    closeList();
+    if (line.trim() === "") continue;
+    out.push(`<p>${mdInline(line)}</p>`);
+  }
+  closeList(); closeTable(); if (code) out.push("</pre>");
+  return out.join("\n");
+}
+
+/* ---------------- quote + chart ---------------- */
+async function loadQuote(ticker, range) {
+  state.ticker = ticker;
+  localStorage.setItem("ta.ticker", ticker);
+  $("#qName").textContent = "载入中…";
+  $("#qTicker").textContent = ticker;
+  try {
+    const q = await api(`/api/quote/${encodeURIComponent(ticker)}?range=${range}`);
+    state.quote = q;
+    $("#qName").textContent = q.name || q.ticker;
+    $("#qTicker").textContent = q.ticker;
+    $("#qPrice").textContent = fmtPrice(q.price);
+    const up = q.change >= 0;
+    const chg = $("#qChange");
+    chg.textContent = `${up ? "+" : ""}${q.change} (${up ? "+" : ""}${q.change_pct}%) · ${rangeLabel(range)}`;
+    chg.className = "q-change " + (up ? "up" : "down");
+    drawChart(q.points, up);
+  } catch (e) {
+    // Drop the stale quote too, so a resize or hover can't redraw / tooltip
+    // the previous ticker's series under the new symbol's header.
+    state.quote = null;
+    $("#qName").textContent = "无法获取行情";
+    $("#qPrice").textContent = "—";
+    $("#qChange").textContent = e.message;
+    $("#qChange").className = "q-change";
+    drawChart([], true);
+  }
+}
+function localDateStr(d = new Date()) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+const fmtPrice = (p) => (p >= 1000 ? p.toLocaleString("en-US", { maximumFractionDigits: 2 }) : String(p));
+const rangeLabel = (r) => ({ "1w": "过去 1 周", "1mo": "过去 1 月", "3mo": "过去 3 月", "1y": "过去 1 年" }[r] || r);
+
+function drawChart(points, up) {
+  const svg = $("#chart");
+  const W = svg.clientWidth || 800, H = 220, PAD = 6;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  svg.innerHTML = "";
+  // Detach handlers from the previous series before bailing, or a failed load
+  // leaves the old chart's crosshair live over an empty plot.
+  svg.onmousemove = null;
+  svg.onmouseleave = null;
+  $("#chartTip").hidden = true;
+  if (!points || points.length < 2) return;
+  const closes = points.map((p) => p.close);
+  const min = Math.min(...closes), max = Math.max(...closes);
+  const x = (i) => PAD + (i / (points.length - 1)) * (W - PAD * 2);
+  const y = (c) => (max === min) ? H / 2 : PAD + (1 - (c - min) / (max - min)) * (H - PAD * 2);
+  const color = up ? "#00c805" : "#ff5000";
+  const path = points.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p.close).toFixed(1)}`).join("");
+
+  const ns = "http://www.w3.org/2000/svg";
+  const grad = document.createElementNS(ns, "linearGradient");
+  grad.id = "areaGrad"; grad.setAttribute("x1", 0); grad.setAttribute("y1", 0);
+  grad.setAttribute("x2", 0); grad.setAttribute("y2", 1);
+  grad.innerHTML = `<stop offset="0" stop-color="${color}" stop-opacity="0.18"/><stop offset="1" stop-color="${color}" stop-opacity="0"/>`;
+  const defs = document.createElementNS(ns, "defs");
+  defs.appendChild(grad); svg.appendChild(defs);
+
+  const area = document.createElementNS(ns, "path");
+  area.setAttribute("d", `${path}L${x(points.length - 1)},${H}L${x(0)},${H}Z`);
+  area.setAttribute("fill", "url(#areaGrad)");
+  svg.appendChild(area);
+
+  const line = document.createElementNS(ns, "path");
+  line.setAttribute("d", path);
+  line.setAttribute("fill", "none");
+  line.setAttribute("stroke", color);
+  line.setAttribute("stroke-width", "2");
+  line.setAttribute("stroke-linejoin", "round");
+  svg.appendChild(line);
+
+  // crosshair + tooltip
+  const vline = document.createElementNS(ns, "line");
+  vline.setAttribute("stroke", "#6b6f7b"); vline.setAttribute("stroke-dasharray", "3,3");
+  vline.setAttribute("y1", 0); vline.setAttribute("y2", H); vline.style.display = "none";
+  svg.appendChild(vline);
+  const dot = document.createElementNS(ns, "circle");
+  dot.setAttribute("r", 4); dot.setAttribute("fill", color); dot.style.display = "none";
+  svg.appendChild(dot);
+
+  const tip = $("#chartTip");
+  svg.onmousemove = (ev) => {
+    const rect = svg.getBoundingClientRect();
+    const px = ((ev.clientX - rect.left) / rect.width) * W;
+    const i = Math.max(0, Math.min(points.length - 1, Math.round(((px - PAD) / (W - PAD * 2)) * (points.length - 1))));
+    const p = points[i];
+    vline.setAttribute("x1", x(i)); vline.setAttribute("x2", x(i)); vline.style.display = "";
+    dot.setAttribute("cx", x(i)); dot.setAttribute("cy", y(p.close)); dot.style.display = "";
+    tip.hidden = false;
+    tip.style.left = `${(x(i) / W) * 100}%`;
+    tip.innerHTML = `<span class="tip-date">${p.date}</span> · ${fmtPrice(p.close)}`;
+  };
+  svg.onmouseleave = () => { vline.style.display = "none"; dot.style.display = "none"; tip.hidden = true; };
+}
+
+/* ---------------- analyze run ---------------- */
+async function startAnalysis() {
+  const btn = $("#analyzeBtn");
+  btn.disabled = true;
+  $("#runMeta").textContent = "";
+  try {
+    const { run_id } = await api("/api/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ticker: state.ticker, date: $("#runDate").value }),
+    });
+    state.runId = run_id;
+    state.pollFails = 0;
+    if (state.pollTimer) clearTimeout(state.pollTimer);
+    $("#pipeline").hidden = false;
+    $("#runLog").hidden = false;
+    $("#decisionCard").hidden = true;
+    $("#reportsCard").hidden = true;
+    setPipeline(0);
+    poll();
+  } catch (e) {
+    btn.disabled = false;
+    $("#runMeta").textContent = `启动失败：${e.message}`;
+  }
+}
+
+function setPipeline(stage) {
+  document.querySelectorAll(".pipeline .step").forEach((el) => {
+    const i = Number(el.dataset.step);
+    el.classList.toggle("done", i < stage);
+    el.classList.toggle("active", i === stage);
+  });
+}
+
+// Only the analyst phase emits identifiable log lines (data-vendor routing,
+// autonomous search queries, source fallbacks); the research/trader/risk/PM
+// nodes log nothing distinctive. So mark the analyst step precisely and show
+// the later steps as collectively in-progress rather than inventing a stage.
+const ANALYST_MARKERS = /search_news|autonomous query|Vendor '|vendor |Reddit|StockTwits|yfinance|alpha_vantage|get_(news|stock_data|indicators|fundamentals)/i;
+function analystPhaseActive(lines) {
+  const recent = lines.slice(-25).join("\n");
+  return ANALYST_MARKERS.test(recent);
+}
+function setRunningPipeline(lines) {
+  const inAnalysts = analystPhaseActive(lines);
+  document.querySelectorAll(".pipeline .step").forEach((el) => {
+    const i = Number(el.dataset.step);
+    el.classList.remove("done");
+    // Step 0 is definite; the rest share an indeterminate "working" state.
+    el.classList.toggle("active", inAnalysts ? i === 0 : true);
+    el.classList.toggle("indeterminate", !inAnalysts && i > 0);
+  });
+}
+
+async function poll() {
+  if (!state.runId) return;
+  try {
+    const run = await api(`/api/runs/${state.runId}`);
+    const log = $("#runLog");
+    log.textContent = (run.log_tail || []).join("\n");
+    log.scrollTop = log.scrollHeight;
+    const started = new Date(run.started_at);
+    const secs = Math.floor((Date.now() - started.getTime()) / 1000);
+    $("#runMeta").textContent = `${run.ticker} · ${run.date} · ${run.status === "running" ? `运行中 ${Math.floor(secs / 60)}m${secs % 60}s` : run.status}`;
+
+    if (run.status === "running") {
+      state.pollFails = 0;
+      setRunningPipeline(run.log_tail || []);
+      state.pollTimer = setTimeout(poll, 2500);
+      return;
+    }
+    $("#analyzeBtn").disabled = false;
+    if (run.status === "done") {
+      setPipeline(5);
+      showDecision(run);
+      showReports(run.reports || {});
+      loadHistory();
+    } else {
+      $("#runMeta").textContent = `失败：${run.error || "未知错误"}`;
+    }
+  } catch (e) {
+    // A single transient failure must not abandon a run that is still going —
+    // keep retrying (with backoff) and only give up after repeated failures.
+    state.pollFails = (state.pollFails || 0) + 1;
+    if (state.pollFails <= 5) {
+      $("#runMeta").textContent = `连接中断，重试中（${state.pollFails}/5）…`;
+      state.pollTimer = setTimeout(poll, 2500 * state.pollFails);
+      return;
+    }
+    $("#runMeta").textContent = `轮询失败：${e.message}（分析可能仍在后台运行，刷新页面后可在历史报告中查看）`;
+    $("#analyzeBtn").disabled = false;
+  }
+}
+
+function classifyRating(r) {
+  const s = (r || "").toLowerCase();
+  if (/(strong\s*)?buy|overweight|bullish|加仓|增持|买入/.test(s)) return "";
+  if (/(strong\s*)?sell|underweight|bearish|减持|卖出/.test(s)) return "down";
+  return "hold";
+}
+function showDecision(run) {
+  $("#decisionCard").hidden = false;
+  const badge = $("#decisionBadge");
+  badge.textContent = run.decision || "—";
+  badge.className = "badge " + classifyRating(run.decision);
+  $("#decisionTicker").textContent = `${run.ticker} · ${run.date}`;
+  $("#decisionBody").innerHTML = mdToHtml(run.final_decision_md || "");
+}
+
+const SECTION_LABELS = [
+  [/1_analysts\/market/, "技术面"], [/1_analysts\/sentiment/, "情绪"],
+  [/1_analysts\/news/, "新闻"], [/1_analysts\/fundamentals/, "基本面"],
+  [/2_research\/bull/, "多头"], [/2_research\/bear/, "空头"], [/2_research\/manager/, "研究经理"],
+  [/3_trading/, "交易员"],
+  // The three risk debators are separate files; label them individually so the
+  // tabs aren't three identical "风险".
+  [/4_risk\/aggressive/, "风险·激进"], [/4_risk\/conservative/, "风险·保守"],
+  [/4_risk\/neutral/, "风险·中性"], [/4_risk/, "风险"],
+  [/5_portfolio/, "最终决策"], [/complete_report/, "完整报告"],
+];
+// Pipeline order, not alphabetical — reports should read the way the run ran.
+const SECTION_ORDER = [
+  /complete_report/, /1_analysts\/market/, /1_analysts\/sentiment/, /1_analysts\/news/,
+  /1_analysts\/fundamentals/, /2_research\/bull/, /2_research\/bear/, /2_research\/manager/,
+  /3_trading/, /4_risk\/aggressive/, /4_risk\/conservative/, /4_risk\/neutral/, /5_portfolio/,
+];
+function sectionRank(path) {
+  const i = SECTION_ORDER.findIndex((re) => re.test(path));
+  return i === -1 ? SECTION_ORDER.length : i;
+}
+function sectionLabel(path) {
+  for (const [re, label] of SECTION_LABELS) if (re.test(path)) return label;
+  return path.replace(/\.md$/, "");
+}
+function showReports(sections) {
+  const names = Object.keys(sections);
+  if (!names.length) return;
+  $("#reportsCard").hidden = false;
+  const tabs = $("#reportTabs");
+  tabs.innerHTML = "";
+  names.sort((a, b) => sectionRank(a) - sectionRank(b) || a.localeCompare(b));
+  names.forEach((name, idx) => {
+    const b = document.createElement("button");
+    b.textContent = sectionLabel(name);
+    b.onclick = () => {
+      tabs.querySelectorAll("button").forEach((x) => x.classList.remove("active"));
+      b.classList.add("active");
+      $("#reportBody").innerHTML = mdToHtml(sections[name]);
+    };
+    tabs.appendChild(b);
+    if (idx === 0) b.click();
+  });
+}
+
+/* ---------------- watchlist ---------------- */
+const getWatch = () => JSON.parse(localStorage.getItem("ta.watch") || '["NVDA","AAPL","0700.HK","BTC-USD"]');
+const setWatch = (w) => localStorage.setItem("ta.watch", JSON.stringify(w));
+
+async function renderWatchlist() {
+  const ul = $("#watchlist");
+  ul.innerHTML = "";
+  for (const sym of getWatch()) {
+    const li = document.createElement("li");
+    li.innerHTML = `<span class="w-sym">${esc(sym)}</span>
+      <span class="w-px">…<div class="w-chg"></div></span>
+      <button class="w-del" title="移除">✕</button>`;
+    li.onclick = () => { loadQuote(sym, state.range); };
+    li.querySelector(".w-del").onclick = (ev) => {
+      ev.stopPropagation();
+      setWatch(getWatch().filter((s) => s !== sym));
+      renderWatchlist();
+    };
+    ul.appendChild(li);
+    api(`/api/quote/${encodeURIComponent(sym)}?range=1w`).then((q) => {
+      const up = q.change >= 0;
+      li.querySelector(".w-px").innerHTML =
+        `${fmtPrice(q.price)}<div class="w-chg ${up ? "up" : "down"}">${up ? "+" : ""}${q.change_pct}%</div>`;
+    }).catch(() => { li.querySelector(".w-px").textContent = "—"; });
+  }
+}
+
+/* ---------------- history ---------------- */
+async function loadHistory() {
+  try {
+    const entries = await api("/api/reports");
+    const ul = $("#history");
+    ul.innerHTML = "";
+    entries.forEach((e) => {
+      const li = document.createElement("li");
+      li.textContent = e.name;
+      li.onclick = async () => {
+        const rep = await api(`/api/reports/${encodeURIComponent(e.name)}`);
+        $("#decisionCard").hidden = true;
+        showReports(rep.sections);
+        $("#reportsCard").scrollIntoView({ behavior: "smooth" });
+      };
+      ul.appendChild(li);
+    });
+  } catch { /* history is best-effort */ }
+}
+
+/* ---------------- settings ---------------- */
+async function openSettings() {
+  const [meta, cfg] = await Promise.all([state.meta ? Promise.resolve(state.meta) : api("/api/meta"), api("/api/config")]);
+  state.meta = meta;
+
+  const prov = $("#sProvider");
+  const current = cfg.settings.llm_provider || "openai";
+  const options = meta.providers.includes(current) ? meta.providers : [current, ...meta.providers];
+  // Keep an unlisted provider (e.g. azure, or one set by hand in .env) as a
+  // valid option, otherwise saving would silently blank llm_provider.
+  prov.innerHTML = options.map((p) => `<option value="${p}">${p}</option>`).join("");
+  prov.value = current;
+  prov.onchange = () => fillModelSuggestions(meta, prov.value);
+  fillModelSuggestions(meta, prov.value);
+
+  $("#sDeep").value = cfg.settings.deep_think_llm || "";
+  $("#sQuick").value = cfg.settings.quick_think_llm || "";
+  $("#sBackend").value = cfg.settings.backend_url || "";
+  $("#sOaiEffort").value = cfg.settings.openai_reasoning_effort || "";
+  $("#sAntEffort").value = cfg.settings.anthropic_effort || "";
+  $("#sGooThink").value = cfg.settings.google_thinking_level || "";
+  $("#sTemp").value = cfg.settings.temperature ?? "";
+  $("#sDebate").value = cfg.settings.max_debate_rounds ?? 1;
+  $("#sRisk").value = cfg.settings.max_risk_discuss_rounds ?? 1;
+  $("#sCkpt").checked = !!cfg.settings.checkpoint_enabled;
+
+  const lang = $("#sLang");
+  lang.innerHTML = meta.languages.map((l) => `<option>${l}</option>`).join("");
+  lang.value = cfg.settings.output_language || "English";
+
+  const keys = $("#keysGrid");
+  keys.innerHTML = meta.key_env_vars.map((name) => `
+    <label>${name}${cfg.keys[name] ? '<span class="configured">已配置 ✓</span>' : ""}
+      <input type="password" data-key="${name}" placeholder="${cfg.keys[name] ? "（保留现值，输入则覆盖）" : "未配置"}" autocomplete="off">
+    </label>`).join("");
+
+  const vendors = $("#vendorsGrid");
+  vendors.innerHTML = Object.entries(meta.vendor_options).map(([cat, opts]) => `
+    <label>${cat}
+      <select data-vendor="${cat}">
+        ${opts.map((o) => `<option value="${o}" ${cfg.vendors[cat] === o ? "selected" : ""}>${o}</option>`).join("")}
+      </select>
+    </label>`).join("");
+
+  $("#saveMsg").textContent = "";
+  $("#settingsModal").hidden = false;
+}
+
+function fillModelSuggestions(meta, provider) {
+  const sug = meta.model_suggestions[provider] || { quick: [], deep: [] };
+  $("#deepModels").innerHTML = (sug.deep || []).map((m) => `<option value="${m.value}">${m.label}</option>`).join("");
+  $("#quickModels").innerHTML = (sug.quick || []).map((m) => `<option value="${m.value}">${m.label}</option>`).join("");
+}
+
+async function saveSettings() {
+  const keys = {};
+  document.querySelectorAll("#keysGrid input").forEach((inp) => {
+    if (inp.value.trim()) keys[inp.dataset.key] = inp.value.trim();
+  });
+  const vendors = {};
+  document.querySelectorAll("#vendorsGrid select").forEach((sel) => { vendors[sel.dataset.vendor] = sel.value; });
+  const payload = {
+    settings: {
+      llm_provider: $("#sProvider").value,
+      deep_think_llm: $("#sDeep").value.trim(),
+      quick_think_llm: $("#sQuick").value.trim(),
+      backend_url: $("#sBackend").value.trim(),
+      openai_reasoning_effort: $("#sOaiEffort").value,
+      anthropic_effort: $("#sAntEffort").value,
+      google_thinking_level: $("#sGooThink").value,
+      temperature: $("#sTemp").value === "" ? "" : Number($("#sTemp").value),
+      max_debate_rounds: Number($("#sDebate").value) || 1,
+      max_risk_discuss_rounds: Number($("#sRisk").value) || 1,
+      output_language: $("#sLang").value,
+      checkpoint_enabled: $("#sCkpt").checked,
+    },
+    vendors, keys,
+  };
+  try {
+    await api("/api/config", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    $("#saveMsg").textContent = "已保存 ✓（写入 .env 与 webui/settings.json）";
+    document.querySelectorAll("#keysGrid input").forEach((inp) => { inp.value = ""; });
+  } catch (e) {
+    $("#saveMsg").textContent = `保存失败：${e.message}`;
+  }
+}
+
+/* ---------------- EXECUTION_HALT banner (visible on every page) --------- */
+async function refreshHaltBanner() {
+  try {
+    const h = await api("/api/pipeline/halt");
+    $("#haltBanner").hidden = !h.halted;
+  } catch (e) { /* endpoint unreachable — keep the last known banner state */ }
+}
+
+/* ---------------- init ---------------- */
+function init() {
+  // Local date, not UTC: the server validates against its own local date, so an
+  // evening user west of UTC would otherwise get "date cannot be in the future".
+  $("#runDate").value = localDateStr();
+  $("#analyzeBtn").onclick = startAnalysis;
+  $("#settingsBtn").onclick = openSettings;
+  $("#settingsClose").onclick = () => { $("#settingsModal").hidden = true; };
+  $("#settingsModal").onclick = (e) => { if (e.target === $("#settingsModal")) $("#settingsModal").hidden = true; };
+  $("#saveSettings").onclick = saveSettings;
+  $("#addWatch").onclick = () => {
+    const w = getWatch();
+    if (!w.includes(state.ticker)) { w.push(state.ticker); setWatch(w); renderWatchlist(); }
+  };
+  $("#search").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && e.target.value.trim()) {
+      loadQuote(e.target.value.trim().toUpperCase(), state.range);
+      e.target.value = "";
+    }
+  });
+  $("#rangeTabs").addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    document.querySelectorAll("#rangeTabs button").forEach((x) => x.classList.remove("active"));
+    b.classList.add("active");
+    state.range = b.dataset.range;
+    loadQuote(state.ticker, state.range);
+  });
+  window.addEventListener("resize", () => { if (state.quote) drawChart(state.quote.points, state.quote.change >= 0); });
+
+  loadQuote(state.ticker, state.range);
+  renderWatchlist();
+  loadHistory();
+  refreshHaltBanner();
+  setInterval(refreshHaltBanner, 30000);
+}
+init();
