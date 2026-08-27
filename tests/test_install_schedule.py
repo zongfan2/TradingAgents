@@ -369,3 +369,47 @@ def test_session_date_derivation_never_uses_host_clock():
 
     assert session_date("cn", instant) == date(2026, 1, 6)
     assert session_date("us", instant) == date(2026, 1, 5)
+
+
+@pytest.mark.unit
+def test_plists_set_working_directory_to_repo_root(tmp_path):
+    # Regression: launchd's default cwd is "/" where `python -m pipeline.*`
+    # cannot resolve the package — two weeks of scheduled fires died on
+    # ModuleNotFoundError before WorkingDirectory was emitted (2026-08-24).
+    from pipeline import install_schedule as mod
+    from pipeline.config import load_config
+    cfg = load_config()
+    repo_root = str(mod.REPO_ROOT)
+    assert repo_root.endswith("TradingAgents")
+    session_plist = mod.build_session_plist(cfg, "us", [(8, 30)])
+    watchdog_plist = mod.build_watchdog_plist(cfg)
+    assert session_plist["WorkingDirectory"] == repo_root
+    assert watchdog_plist["WorkingDirectory"] == repo_root
+
+
+@pytest.mark.unit
+def test_plists_bake_backend_cli_dirs_into_path(monkeypatch, tmp_path):
+    # Regression: launchd's minimal PATH lacks nvm/homebrew dirs — the
+    # 2026-08-24 us slot lost its entire collection layer to
+    # "codex not found on PATH". The installer resolves the CLIs at
+    # generation time and bakes their dirs into EnvironmentVariables.
+    from pipeline import install_schedule as mod
+    from pipeline.config import load_config
+    fake_bin = tmp_path / "nvm-bin"
+    fake_bin.mkdir()
+    # Mirror the real nvm layout: bin/ holds SYMLINKS into the package dir
+    # where the entry file has a different name (codex.js) — the plist must
+    # keep the symlink dir, not resolve through it.
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    for cli in ("codex", "claude"):
+        real = pkg / f"{cli}.js"
+        real.write_text("#!/bin/sh\n")
+        real.chmod(0o755)
+        (fake_bin / cli).symlink_to(real)
+    monkeypatch.setenv("PATH", f"{fake_bin}:/usr/bin:/bin")
+    cfg = load_config()
+    for plist in (mod.build_session_plist(cfg, "us", [(8, 30)]), mod.build_watchdog_plist(cfg)):
+        path = plist["EnvironmentVariables"]["PATH"]
+        assert path.startswith(str(fake_bin))
+        assert "/usr/bin" in path and "/bin" in path
