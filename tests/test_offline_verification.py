@@ -1,4 +1,5 @@
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -77,6 +78,27 @@ def test_cli_reports_missing_python_in_one_stderr_line(tmp_path, capsys):
     assert capsys.readouterr().err.splitlines() == [
         f"error: Python executable does not exist: {tmp_path / 'missing'}"
     ]
+
+
+@pytest.mark.unit
+def test_cli_defaults_to_invoking_python_when_repo_has_no_venv(tmp_path, monkeypatch):
+    """A linked worktree can validly share its primary checkout's venv."""
+    repo_root = tmp_path / "linked-worktree"
+    repo_root.mkdir()
+    received = {}
+
+    def run_gate(repo, python, only):
+        received.update(repo=repo, python=python, only=only)
+        return 0
+
+    monkeypatch.setattr(offline, "run_gate", run_gate)
+
+    assert offline.main(["--repo", str(repo_root)]) == 0
+    assert received == {
+        "repo": repo_root,
+        "python": Path(sys.executable),
+        "only": "all",
+    }
 
 
 @pytest.mark.unit
