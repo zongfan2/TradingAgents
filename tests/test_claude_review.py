@@ -1182,10 +1182,10 @@ def test_run_review_uses_exact_safe_argv_packet_stdin_and_timeout(
         runner=runner,
     )
     assert seen["argv"][:4] == ["claude", "-p", "--output-format", "text"]
-    assert seen["argv"][seen["argv"].index("--tools") + 1] == "Read,Grep,Glob"
-    assert seen["argv"][seen["argv"].index("--allowedTools") + 1] == "Read,Grep,Glob"
+    assert seen["argv"][seen["argv"].index("--tools") + 1] == "Read"
+    assert seen["argv"][seen["argv"].index("--allowedTools") + 1] == "Read"
     assert seen["argv"][seen["argv"].index("--disallowedTools") + 1] == (
-        "Bash,Write,Edit,NotebookEdit"
+        "Bash,Grep,Glob,Write,Edit,NotebookEdit"
     )
     assert seen["kwargs"]["cwd"] == tmp_path / "isolated"
     assert seen["kwargs"]["timeout"] == 37
