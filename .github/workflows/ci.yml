@@ -28,7 +28,7 @@ jobs:
           .venv/bin/python -m pip install --upgrade pip
           .venv/bin/pip install -e ".[dev]"
       - name: Run deterministic test suite
-        run: python -m devtools.verification.offline --only tests
+        run: .venv/bin/python -m devtools.verification.offline --only tests
 
   smoke-install:
     name: clean-install smoke
@@ -59,4 +59,4 @@ jobs:
           python -m venv .venv
           .venv/bin/pip install "ruff>=0.15"
       - name: Lint the repository
-        run: python -m devtools.verification.offline --only lint
+        run: .venv/bin/python -m devtools.verification.offline --only lint

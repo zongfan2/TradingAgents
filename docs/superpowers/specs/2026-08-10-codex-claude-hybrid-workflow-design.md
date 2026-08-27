@@ -32,8 +32,9 @@ investigate, not an instruction to accept blindly.
 ### Claude Code — independent verifier
 
 Claude receives a bounded review packet after Codex has a coherent change. It
-checks the governing specs and contracts, reviews the diff, runs targeted tests,
-adds adversarial test ideas, and reports findings. The runner always checks out
+checks the governing specs and contracts, reviews the diff and deterministic
+Layer 1 evidence, adds adversarial test ideas, and reports findings. Claude has
+only Read, Grep, and Glob capabilities; it does not run shell commands. The runner always checks out
 the head revision into an isolated temporary worktree and starts Claude there;
 the primary worktree is never exposed as Claude's writable working directory.
 Any experiment stays in the temporary worktree, which is removed after the
@@ -146,19 +147,19 @@ escalate any change to Claude when uncertainty remains.
 
 Codex provides Claude with a bounded packet so the review is reproducible:
 
-- repository path, base SHA, and head SHA;
+- detached-checkout identity, base SHA, and head SHA;
 - changed-file list and diff;
 - governing component specs and data contracts;
 - requested behavior and acceptance criteria;
 - Codex's risk classification and known limitations;
 - exact Layer 1 commands and results;
 - the original symptom and regression test for a bug fix;
-- explicit permission boundaries, including no primary-worktree edits and no
+- explicit permission boundaries, including no primary-worktree access and no
   external integration calls unless Layer 3 was requested. The Claude model
   call required by Layer 2 is not itself a Layer 3 test.
 
-The packet excludes `.env`, credentials, unrelated untracked files, generated
-runtime data, and prior model reasoning.
+The packet excludes primary-worktree paths, `.env`, credentials, unrelated
+untracked files, generated runtime data, and prior model reasoning.
 
 ## Claude Report Contract
 
