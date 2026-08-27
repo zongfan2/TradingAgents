@@ -1,5 +1,6 @@
 import json
 import subprocess
+import sys
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -70,6 +71,9 @@ def prepare_review_preflights(monkeypatch, tmp_path):
         lambda *args, **kwargs: fake_worktree(tmp_path / "isolated"),
     )
     monkeypatch.setattr(review, "run_layer1", lambda *args, **kwargs: "gate passed")
+    monkeypatch.setattr(
+        review, "review_boundaries", lambda *args, **kwargs: (), raising=False
+    )
 
 
 @pytest.mark.unit
@@ -110,6 +114,14 @@ def test_auth_translates_process_start_failures(failure, message):
 
     with pytest.raises(review.AuthUnavailable, match=message):
         review.check_claude_auth(runner=runner)
+
+
+@pytest.mark.unit
+def test_auth_translates_general_os_errors_to_auth_unavailable():
+    with pytest.raises(review.AuthUnavailable, match="auth status unavailable"):
+        review.check_claude_auth(
+            runner=lambda argv, **kwargs: (_ for _ in ()).throw(OSError("broken pipe"))
+        )
 
 
 @pytest.mark.unit
@@ -308,7 +320,6 @@ def test_packet_contains_required_context_policy_and_exact_schema(tmp_path, monk
         original_symptom="invalid output returned exit 0",
     )
     required = [
-        str(tmp_path),
         "a" * 40,
         "b" * 40,
         "pipeline/x.py",
@@ -316,7 +327,7 @@ def test_packet_contains_required_context_policy_and_exact_schema(tmp_path, monk
         "diff --git a/x b/x",
         "fallback returns non-zero",
         "complex bug: retry semantics changed",
-        "1459 passed; ruff clean",
+        "Layer 1 deterministic gate completed.",
         "invalid output returned exit 0",
         "Codex",
         "Claude Code",
@@ -329,10 +340,12 @@ def test_packet_contains_required_context_policy_and_exact_schema(tmp_path, monk
         "Do not edit the primary worktree",
         "Do not make external integration calls",
         "Return JSON only",
+        "Detached isolated checkout",
         json.dumps(review.ClaudeJudgment.model_json_schema(), indent=2, sort_keys=True),
     ]
     for expected in required:
         assert expected in packet
+    assert str(tmp_path) not in packet
     assert "must-not-leak" not in packet
     assert "file-must-not-leak" not in packet
 
@@ -590,6 +603,7 @@ def test_optional_missing_auth_runs_exact_head_layer1_without_claude_or_report(
     monkeypatch.setattr(review, "changed_files", lambda *args, **kwargs: ["x.py"])
     monkeypatch.setattr(review, "detached_worktree", exact_worktree)
     monkeypatch.setattr(review, "run_layer1", layer1)
+    monkeypatch.setattr(review, "review_boundaries", lambda *args, **kwargs: ())
     report_dir = tmp_path / "reports"
 
     assert (
@@ -673,6 +687,7 @@ def test_optional_missing_auth_propagates_layer1_failure(tmp_path, monkeypatch):
             review.ReviewError("Layer 1 verification exited 1")
         ),
     )
+    monkeypatch.setattr(review, "review_boundaries", lambda *args, **kwargs: ())
     with pytest.raises(review.ReviewError, match="Layer 1 verification exited 1"):
         review.run_review(
             repo=tmp_path,
@@ -730,6 +745,49 @@ def test_layer1_runs_against_isolated_head_before_claude(tmp_path):
 
 
 @pytest.mark.unit
+def test_layer1_failure_has_bounded_sanitized_step_summary(tmp_path):
+    with pytest.raises(review.ReviewError, match=r"exited 7 \(tests\)") as error:
+        review.run_layer1(
+            tmp_path,
+            Path("/venv/python"),
+            runner=lambda argv, **kwargs: completed(
+                argv,
+                code=7,
+                stdout="==> tests: /private/secret/python -m pytest\nsecret traceback",
+            ),
+        )
+    assert "private/secret" not in str(error.value)
+    assert "traceback" not in str(error.value)
+
+
+@pytest.mark.unit
+def test_review_defaults_layer1_to_invoking_python_without_local_venv(tmp_path, monkeypatch):
+    repo = tmp_path / "linked-worktree"
+    repo.mkdir()
+    report_dir = tmp_path / "reports"
+    prepare_review_preflights(monkeypatch, tmp_path)
+    seen = {}
+
+    def layer1(worktree, python_executable, **kwargs):
+        seen["python"] = python_executable
+        return "gate passed"
+
+    monkeypatch.setattr(review, "run_layer1", layer1)
+    review.run_review(
+        repo=repo,
+        base_ref="base",
+        acceptance="works",
+        risk="mandatory",
+        original_symptom="none",
+        report_dir=report_dir,
+        runner=lambda argv, **kwargs: completed(
+            argv, stdout='{"tests_run": [], "findings": [], "limitations": []}'
+        ),
+    )
+    assert seen["python"] == Path(sys.executable).absolute()
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("severity", "expected"),
     [(None, 0), ("medium", 3), ("high", 4)],
@@ -747,6 +805,7 @@ def test_explicit_user_waiver_is_bound_and_exits_zero(tmp_path, monkeypatch):
         "resolve_commit",
         lambda repo, ref, **kwargs: {"base": "a" * 40, "HEAD": "b" * 40}[ref],
     )
+    monkeypatch.setattr(review, "review_boundaries", lambda *args, **kwargs: ())
     outcome = review.write_user_waiver(
         repo=tmp_path,
         base_ref="base",
@@ -1122,22 +1181,214 @@ def test_run_review_uses_exact_safe_argv_packet_stdin_and_timeout(
         timeout=37,
         runner=runner,
     )
-    assert seen["argv"] == [
-        "claude",
-        "-p",
-        "--output-format",
-        "text",
-        "--allowedTools",
-        "Read,Grep,Glob,Bash(git diff:*),Bash(git status:*),"
-        "Bash(/approved/venv/python -m pytest:*),"
-        "Bash(/approved/venv/python -m ruff:*)",
-        "--disallowedTools",
-        "Write,Edit,NotebookEdit",
-    ]
+    assert seen["argv"][:4] == ["claude", "-p", "--output-format", "text"]
+    assert seen["argv"][seen["argv"].index("--tools") + 1] == "Read,Grep,Glob"
+    assert seen["argv"][seen["argv"].index("--allowedTools") + 1] == "Read,Grep,Glob"
+    assert seen["argv"][seen["argv"].index("--disallowedTools") + 1] == (
+        "Bash,Write,Edit,NotebookEdit"
+    )
     assert seen["kwargs"]["cwd"] == tmp_path / "isolated"
     assert seen["kwargs"]["timeout"] == 37
     assert seen["kwargs"]["shell"] is False
-    assert "exact isolated gate result" in seen["kwargs"]["input"]
+    assert "Layer 1 deterministic gate completed." in seen["kwargs"]["input"]
+
+
+@pytest.mark.unit
+def test_claude_argv_is_read_only_and_denies_preexisting_boundaries():
+    primary = Path("/private/primary")
+    common = Path("/private/git-common")
+    argv = review._claude_argv((primary, common))
+    assert argv[argv.index("--tools") + 1] == "Read,Grep,Glob"
+    assert argv[argv.index("--allowedTools") + 1] == "Read,Grep,Glob"
+    assert argv[argv.index("--disallowedTools") + 1] == "Bash,Write,Edit,NotebookEdit"
+    assert "--safe-mode" in argv
+    assert "--no-session-persistence" in argv
+    assert argv[argv.index("--permission-mode") + 1] == "dontAsk"
+    assert argv[argv.index("--setting-sources") + 1] == ""
+    settings = json.loads(argv[argv.index("--settings") + 1])
+    for path in (primary, common):
+        for tool in ("Read", "Grep", "Glob"):
+            assert f"{tool}({path}/**)" in settings["permissions"]["deny"]
+
+
+@pytest.mark.unit
+def test_review_settings_deny_preexisting_paths_but_not_isolated_checkout(
+    tmp_path, monkeypatch
+):
+    repo = tmp_path / "primary"
+    common = tmp_path / "git-common"
+    isolated = tmp_path / "isolated"
+    report_dir = tmp_path / "reports"
+    prepare_review_preflights(monkeypatch, tmp_path)
+    monkeypatch.setattr(review, "review_boundaries", lambda *args, **kwargs: (repo, common))
+    seen = {}
+
+    def runner(argv, **kwargs):
+        seen.update(argv=argv, kwargs=kwargs)
+        return completed(argv, stdout='{"tests_run": [], "findings": [], "limitations": []}')
+
+    review.run_review(
+        repo=repo,
+        base_ref="base",
+        acceptance="works",
+        risk="mandatory",
+        original_symptom="none",
+        report_dir=report_dir,
+        runner=runner,
+    )
+    assert seen["kwargs"]["cwd"] == isolated
+    denied = json.loads(seen["argv"][seen["argv"].index("--settings") + 1])["permissions"][
+        "deny"
+    ]
+    for path in (repo, common):
+        assert f"Read({path}/**)" in denied
+    assert f"Read({isolated}/**)" not in denied
+
+
+@pytest.mark.unit
+def test_review_packet_does_not_disclose_primary_repository_path():
+    primary = Path("/private/primary")
+    packet = review.build_review_packet(
+        repo=primary,
+        base_sha="a" * 40,
+        head_sha="b" * 40,
+        diff="diff",
+        changed_files=["x.py"],
+        acceptance="works",
+        risk="mandatory",
+        layer1_result="passed",
+        original_symptom="none",
+    )
+    assert str(primary) not in packet
+    assert "Detached isolated checkout" in packet
+    assert "only Read, Grep, and Glob" in packet
+    assert "Do not run shell commands" in packet
+
+
+@pytest.mark.unit
+def test_review_packet_sanitizes_primary_path_from_layer1_evidence():
+    primary = Path("/private/primary")
+    packet = review.build_review_packet(
+        repo=primary,
+        base_sha="a" * 40,
+        head_sha="b" * 40,
+        diff="diff",
+        changed_files=["x.py"],
+        acceptance="works",
+        risk="mandatory",
+        layer1_result=f"==> tests: {primary}/.venv/bin/python -m pytest\n1559 passed",
+        original_symptom="none",
+    )
+    assert str(primary) not in packet
+    assert "Layer 1 completed: tests." in packet
+
+
+@pytest.mark.unit
+def test_review_boundaries_include_every_worktree_and_git_common_dir(tmp_path):
+    primary = tmp_path / "primary"
+    linked = tmp_path / "linked"
+    common = tmp_path / "git-common"
+
+    def runner(argv, **kwargs):
+        if argv == ["git", "worktree", "list", "--porcelain"]:
+            return completed(argv, stdout=f"worktree {primary}\n\nworktree {linked}\n")
+        assert argv == ["git", "rev-parse", "--git-common-dir"]
+        return completed(argv, stdout=str(common) + "\n")
+
+    assert review.review_boundaries(primary, runner=runner) == (primary, linked, common)
+
+
+@pytest.mark.unit
+def test_report_dir_rejects_aliases_and_all_repository_boundaries(tmp_path):
+    repo = tmp_path / "repo"
+    primary = tmp_path / "primary"
+    linked = tmp_path / "linked"
+    common = tmp_path / "git-common"
+    safe = tmp_path / "verification"
+    alias = tmp_path / "verification-alias"
+    alias.symlink_to(safe, target_is_directory=True)
+
+    def runner(argv, **kwargs):
+        if argv == ["git", "worktree", "list", "--porcelain"]:
+            return completed(argv, stdout=f"worktree {primary}\n\nworktree {linked}\n")
+        assert argv == ["git", "rev-parse", "--git-common-dir"]
+        return completed(argv, stdout=str(common) + "\n")
+
+    assert review.normalize_report_dir(repo, safe.absolute(), runner=runner) == safe.absolute()
+    for invalid in (
+        Path("relative"),
+        alias.absolute(),
+        primary / "reports",
+        linked / "reports",
+        common / "reports",
+    ):
+        with pytest.raises(review.ReviewError, match="report directory"):
+            review.normalize_report_dir(repo, invalid, runner=runner)
+
+
+@pytest.mark.unit
+def test_run_and_waive_reject_relative_report_directories(tmp_path, monkeypatch):
+    prepare_review_preflights(monkeypatch, tmp_path)
+    with pytest.raises(review.ReviewError, match="report directory"):
+        review.run_review(
+            repo=tmp_path,
+            base_ref="base",
+            acceptance="works",
+            risk="mandatory",
+            original_symptom="none",
+            report_dir=Path("relative"),
+            runner=lambda argv, **kwargs: completed(
+                argv, stdout='{"tests_run": [], "findings": [], "limitations": []}'
+            ),
+        )
+    with pytest.raises(review.ReviewError, match="report directory"):
+        review.write_user_waiver(
+            repo=tmp_path,
+            base_ref="base",
+            reason="accepted",
+            unverified_risk="risk",
+            user_approved=True,
+            report_dir=Path("relative"),
+        )
+
+
+@pytest.mark.unit
+def test_check_cli_rejects_relative_report_directory(monkeypatch, capsys):
+    monkeypatch.setattr(review, "resolve_commit", lambda *args, **kwargs: "b" * 40)
+    result = review.main(["check", "--report-dir", "relative"])
+    assert result == review.EXIT_ERROR
+    assert capsys.readouterr().err == (
+        "error: report directory must be absolute and outside repository boundaries\n"
+    )
+
+
+@pytest.mark.unit
+def test_persist_report_restores_preexisting_pair_when_markdown_replace_fails(
+    tmp_path, monkeypatch
+):
+    report_dir = tmp_path / "reports"
+    old = model_report(head_sha="b" * 40)
+    json_path = report_dir / f"{old.head_sha}.claude.json"
+    markdown_path = report_dir / f"{old.head_sha}.claude.md"
+    report_dir.mkdir()
+    old_json = old.model_dump_json() + "\n"
+    old_markdown = "# previously valid evidence\n"
+    json_path.write_text(old_json, encoding="utf-8")
+    markdown_path.write_text(old_markdown, encoding="utf-8")
+    replacements = []
+    real_replace = review.os.replace
+
+    def fail_markdown_replace(source, destination):
+        replacements.append(destination)
+        if destination == markdown_path and replacements.count(markdown_path) == 1:
+            raise OSError("disk full")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(review.os, "replace", fail_markdown_replace)
+    with pytest.raises(review.ReviewError, match="write report"):
+        review._persist_report(model_report(findings=[model_finding("medium")]), report_dir)
+    assert json_path.read_text(encoding="utf-8") == old_json
+    assert markdown_path.read_text(encoding="utf-8") == old_markdown
 
 
 @pytest.mark.unit
@@ -1201,20 +1452,22 @@ def test_harness_normalizes_injected_clock_to_utc(tmp_path, monkeypatch):
 
 
 @pytest.mark.unit
-def test_second_artifact_failure_removes_report_pair(tmp_path, monkeypatch):
+def test_second_artifact_replacement_failure_leaves_no_new_report_pair(tmp_path, monkeypatch):
     prepare_review_preflights(monkeypatch, tmp_path)
-    real_write = review.atomic_write_text
-    calls = 0
-
-    def fail_second(path, content):
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            raise review.ReviewError("could not write report markdown")
-        return real_write(path, content)
-
-    monkeypatch.setattr(review, "atomic_write_text", fail_second)
     report_dir = tmp_path / "reports"
+    markdown_path = report_dir / f"{'b' * 40}.claude.md"
+    real_replace = review.os.replace
+    markdown_attempts = 0
+
+    def fail_markdown_replace(source, destination):
+        nonlocal markdown_attempts
+        if destination == markdown_path:
+            markdown_attempts += 1
+            if markdown_attempts == 1:
+                raise OSError("disk full")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(review.os, "replace", fail_markdown_replace)
     with pytest.raises(review.ReviewError, match="write report"):
         review.run_review(
             repo=tmp_path,

@@ -83,6 +83,8 @@ def check_claude_auth(*, runner: Runner = default_runner) -> None:
         raise AuthUnavailable("Claude CLI not found") from exc
     except subprocess.TimeoutExpired as exc:
         raise AuthUnavailable("Claude auth status timed out") from exc
+    except OSError as exc:
+        raise AuthUnavailable("Claude auth status unavailable") from exc
     if result.returncode:
         try:
             failed_status = json.loads(result.stdout)
@@ -195,8 +197,20 @@ def build_review_packet(
     original_symptom: str,
 ) -> str:
     """Build a bounded, secret-free independent-review prompt."""
+    del repo
     schema = json.dumps(ClaudeJudgment.model_json_schema(), indent=2, sort_keys=True)
     paths = "\n".join(f"- {path}" for path in changed_files) or "- (none)"
+    completed_steps: list[str] = []
+    for line in layer1_result.splitlines():
+        if line.startswith("==> "):
+            step = line.removeprefix("==> ").partition(":")[0]
+            if step in {"tests", "lint", "diff"} and step not in completed_steps:
+                completed_steps.append(step)
+    layer1_summary = (
+        f"Layer 1 completed: {', '.join(completed_steps)}."
+        if completed_steps
+        else "Layer 1 deterministic gate completed."
+    )
     return f"""# Independent Claude Code review packet
 
 ## Roles and authority
@@ -205,7 +219,7 @@ def build_review_packet(
 - User is the sole authority for waivers and external-integration authorization.
 
 ## Immutable review identity
-- Repository: {repo}
+- Repository: Detached isolated checkout
 - Base commit: {base_sha}
 - Head commit: {head_sha}
 
@@ -225,7 +239,7 @@ against those sources of truth.
 
 ## Layer 1 deterministic commands and result
 The exact head checkout was checked with pytest, ruff, and git diff --check.
-{layer1_result}
+{layer1_summary}
 
 ## Original symptom and regression-test context
 {original_symptom}
@@ -236,10 +250,9 @@ The exact head checkout was checked with pytest, ruff, and git diff --check.
 ```
 
 ## Permission boundaries
-You may read repository files and run targeted pytest, ruff, git diff, and git
-status commands inside the detached temporary review worktree.
-Do not edit the primary worktree. Do not edit committed source files; experiments
-must remain disposable in the temporary worktree.
+You may use only Read, Grep, and Glob inside the detached temporary review
+worktree. Do not run shell commands. Do not edit the primary worktree or inspect
+any other checkout, Git metadata, or repository-local secret.
 Do not make external integration calls, network calls, provider calls, or consume
 additional model/API quota. Layer 3 has not been requested.
 
@@ -316,6 +329,63 @@ def default_report_dir() -> Path:
     ).expanduser()
 
 
+def review_boundaries(repo: Path, *, runner: Runner = default_runner) -> tuple[Path, ...]:
+    """Return every existing checkout and shared Git directory for ``repo``."""
+    try:
+        worktrees = runner(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=repo,
+            timeout=120,
+            shell=False,
+        )
+        common = runner(
+            ["git", "rev-parse", "--git-common-dir"],
+            cwd=repo,
+            timeout=120,
+            shell=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ReviewError("could not inspect repository boundaries") from exc
+    if worktrees.returncode or common.returncode:
+        raise ReviewError("could not inspect repository boundaries")
+
+    paths: list[Path] = []
+    for line in worktrees.stdout.splitlines():
+        if line.startswith("worktree "):
+            paths.append(Path(line.removeprefix("worktree ")).resolve())
+    common_dir = Path(common.stdout.strip())
+    if not common_dir.is_absolute():
+        common_dir = repo / common_dir
+    paths.append(common_dir.resolve())
+    return tuple(dict.fromkeys(paths))
+
+
+def normalize_report_dir(
+    repo: Path,
+    report_dir: Path,
+    *,
+    runner: Runner = default_runner,
+    boundaries: Sequence[Path] | None = None,
+) -> Path:
+    """Reject repository-backed, relative, and symlinked report locations."""
+    if not report_dir.is_absolute():
+        raise ReviewError("report directory must be absolute and outside repository boundaries")
+    try:
+        resolved = report_dir.resolve(strict=False)
+    except OSError as exc:
+        raise ReviewError("could not resolve report directory") from exc
+    if resolved != report_dir:
+        raise ReviewError("report directory must not use symlink aliases")
+    protected = boundaries if boundaries is not None else review_boundaries(repo, runner=runner)
+    for boundary in protected:
+        try:
+            resolved.relative_to(boundary)
+        except ValueError:
+            continue
+        raise ReviewError("report directory must be outside repository boundaries")
+    return resolved
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -362,7 +432,19 @@ def run_layer1(
     except OSError as exc:
         raise ReviewError("Layer 1 verification could not start") from exc
     if result.returncode:
-        raise ReviewError(f"Layer 1 verification exited {result.returncode}")
+        step = "unknown step"
+        for output in (result.stdout, result.stderr):
+            if not isinstance(output, str):
+                continue
+            for line in output.splitlines():
+                if line.startswith("==> "):
+                    candidate = line.removeprefix("==> ").partition(":")[0]
+                    if candidate in {"tests", "lint", "diff"}:
+                        step = candidate
+                        break
+            if step != "unknown step":
+                break
+        raise ReviewError(f"Layer 1 verification exited {result.returncode} ({step})")
     return "\n".join(
         text.strip()
         for text in (result.stdout, result.stderr)
@@ -370,26 +452,39 @@ def run_layer1(
     )
 
 
-def _claude_argv(python_executable: Path) -> list[str]:
-    allowed = (
-        "Read,Grep,Glob,Bash(git diff:*),Bash(git status:*),"
-        f"Bash({python_executable} -m pytest:*),"
-        f"Bash({python_executable} -m ruff:*)"
-    )
+def _claude_argv(boundaries: Sequence[Path]) -> list[str]:
+    """Build a non-interactive, read-only Claude command for one isolated checkout."""
+    allowed = "Read,Grep,Glob"
+    denied = [
+        f"{tool}({path}/**)"
+        for path in boundaries
+        for tool in ("Read", "Grep", "Glob")
+    ]
+    settings = json.dumps({"permissions": {"deny": denied}}, sort_keys=True)
     return [
         "claude",
         "-p",
         "--output-format",
         "text",
+        "--safe-mode",
+        "--no-session-persistence",
+        "--permission-mode",
+        "dontAsk",
+        "--setting-sources",
+        "",
+        "--tools",
+        allowed,
         "--allowedTools",
         allowed,
         "--disallowedTools",
-        "Write,Edit,NotebookEdit",
+        "Bash,Write,Edit,NotebookEdit",
+        "--settings",
+        settings,
     ]
 
 
-def atomic_write_text(path: Path, content: str) -> Path:
-    """Atomically replace one text artifact and remove failed temporary files."""
+def _stage_text(path: Path, content: str) -> Path:
+    """Write and fsync a report artifact without replacing its destination."""
     temporary: Path | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -404,6 +499,19 @@ def atomic_write_text(path: Path, content: str) -> Path:
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
+        return temporary
+    except OSError as exc:
+        if temporary is not None:
+            with suppress(OSError):
+                temporary.unlink(missing_ok=True)
+        raise ReviewError(f"could not write report {path.name}") from exc
+
+
+def atomic_write_text(path: Path, content: str) -> Path:
+    """Atomically replace one text artifact and remove failed temporary files."""
+    temporary: Path | None = None
+    try:
+        temporary = _stage_text(path, content)
         os.replace(temporary, path)
         temporary = None
     except OSError as exc:
@@ -477,14 +585,37 @@ def _persist_report(report: ReviewReport, report_dir: Path) -> ReviewOutcome:
     json_text = json.dumps(
         report.model_dump(mode="json"), indent=2, sort_keys=True
     ) + "\n"
+    markdown_text = render_markdown(report)
+    staged: list[Path | None] = [None, None]
+    backups: list[Path | None] = [None, None]
+    paths = (json_path, markdown_path)
+    replaced = [False, False]
     try:
-        atomic_write_text(json_path, json_text)
-        atomic_write_text(markdown_path, render_markdown(report))
-    except ReviewError:
-        for path in (json_path, markdown_path):
-            with suppress(OSError):
-                path.unlink(missing_ok=True)
-        raise
+        staged = [_stage_text(json_path, json_text), _stage_text(markdown_path, markdown_text)]
+        for index, path in enumerate(paths):
+            if path.exists():
+                backups[index] = _stage_text(path, path.read_text(encoding="utf-8"))
+        for index, path in enumerate(paths):
+            os.replace(staged[index], path)
+            staged[index] = None
+            replaced[index] = True
+    except OSError as exc:
+        for index, path in enumerate(paths):
+            backup = backups[index]
+            try:
+                if backup is not None:
+                    os.replace(backup, path)
+                    backups[index] = None
+                elif replaced[index]:
+                    path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise ReviewError("could not write report pair") from exc
+    finally:
+        for temporary in (*staged, *backups):
+            if temporary is not None:
+                with suppress(OSError):
+                    temporary.unlink(missing_ok=True)
     return ReviewOutcome(report, json_path, markdown_path)
 
 
@@ -543,7 +674,14 @@ def run_review(
     ensure_tracked_clean(repo, runner=runner)
     base_sha = resolve_commit(repo, base_ref, runner=runner)
     head_sha = resolve_commit(repo, head_ref, runner=runner)
-    python = python_executable or (repo / ".venv/bin/python").absolute()
+    python = python_executable or Path(sys.executable).absolute()
+    boundaries = review_boundaries(repo, runner=runner)
+    persisted_report_dir = normalize_report_dir(
+        repo,
+        report_dir or default_report_dir(),
+        runner=runner,
+        boundaries=boundaries,
+    )
 
     if auth_available:
         diff = git_diff(repo, base_sha, head_sha, runner=runner)
@@ -564,7 +702,7 @@ def run_review(
             layer1_result=layer1_result,
             original_symptom=original_symptom,
         )
-        argv = _claude_argv(python)
+        argv = _claude_argv(boundaries)
         try:
             result = runner(
                 argv,
@@ -589,7 +727,7 @@ def run_review(
         head_sha=head_sha,
         reviewed_at=_clock_utc(clock),
     )
-    return _persist_report(report, report_dir or default_report_dir())
+    return _persist_report(report, persisted_report_dir)
 
 
 def write_user_waiver(
@@ -609,6 +747,9 @@ def write_user_waiver(
         raise ReviewError("waiver requires explicit user approval")
     _required_text(reason, "waiver reason")
     _required_text(unverified_risk, "unverified risk")
+    persisted_report_dir = normalize_report_dir(
+        repo, report_dir or default_report_dir(), runner=runner
+    )
     base_sha = resolve_commit(repo, base_ref, runner=runner)
     head_sha = resolve_commit(repo, head_ref, runner=runner)
     approved_at = _clock_utc(clock)
@@ -622,7 +763,7 @@ def write_user_waiver(
             unverified_risk=unverified_risk,
         ),
     )
-    return _persist_report(report, report_dir or default_report_dir())
+    return _persist_report(report, persisted_report_dir)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -694,8 +835,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.command == "check":
             head_sha = resolve_commit(repo, args.head)
-            report_dir = args.report_dir or default_report_dir()
-            path = args.report or report_dir / f"{head_sha}.claude.json"
+            if args.report is not None:
+                report_dir = normalize_report_dir(repo, args.report.parent)
+                path = report_dir / args.report.name
+            else:
+                report_dir = normalize_report_dir(repo, args.report_dir or default_report_dir())
+                path = report_dir / f"{head_sha}.claude.json"
             report = load_current_report(path, expected_head=head_sha)
             return _print_outcome(
                 ReviewOutcome(report, path, path.with_suffix(".md"))
