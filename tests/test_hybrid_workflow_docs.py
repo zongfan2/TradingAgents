@@ -33,7 +33,7 @@ def test_agent_guide_declares_hybrid_roles_and_required_gate():
         "isolated worktree and returns reports for Codex to assess; it does not edit "
         "the primary worktree" in " ".join(guide.split())
     )
-    assert "only Read, Grep, and Glob" in guide
+    assert "only Read capability" in guide
     assert "does not run shell commands" in guide
 
 
@@ -44,7 +44,7 @@ def test_hybrid_design_and_plan_describe_read_only_claude_boundary():
         "docs/superpowers/plans/2026-08-10-codex-claude-hybrid-workflow.md",
     ):
         text = (ROOT / relative_path).read_text(encoding="utf-8")
-        assert "only Read, Grep, and Glob" in text
+        assert "only Read capability" in text
         assert "does not run shell commands" in text
 
 

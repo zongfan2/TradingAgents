@@ -34,7 +34,7 @@ investigate, not an instruction to accept blindly.
 Claude receives a bounded review packet after Codex has a coherent change. It
 checks the governing specs and contracts, reviews the diff and deterministic
 Layer 1 evidence, adds adversarial test ideas, and reports findings. Claude has
-only Read, Grep, and Glob capabilities; it does not run shell commands. The runner always checks out
+only Read capability; it does not run shell commands. The runner always checks out
 the head revision into an isolated temporary worktree and starts Claude there;
 the primary worktree is never exposed as Claude's writable working directory.
 Any experiment stays in the temporary worktree, which is removed after the

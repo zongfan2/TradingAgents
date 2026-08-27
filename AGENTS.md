@@ -54,8 +54,8 @@ Environment lives in `.venv` (Python 3.14, `pip install -e .`). API keys are in
   changes, deterministic verification, and final integration.
 - **Claude Code — independent verifier** reviews coherent risky changes from an
   isolated worktree and returns reports for Codex to assess; it does not edit
-  the primary worktree. Claude receives only Read, Grep, and Glob capabilities;
-  it does not run shell commands or inspect the primary checkout.
+  the primary worktree. Claude receives only Read capability; it does not run shell commands
+  or inspect the primary checkout.
 
 Run the deterministic gate for every completed change and before handoff:
 

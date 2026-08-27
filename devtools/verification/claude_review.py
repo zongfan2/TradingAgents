@@ -256,9 +256,8 @@ The exact head checkout was checked with pytest, ruff, and git diff --check.
 ```
 
 ## Permission boundaries
-You may use only Read, Grep, and Glob inside the detached temporary review
-worktree. Do not run shell commands. Do not edit the primary worktree or inspect
-any other checkout, Git metadata, or repository-local secret.
+You may use only Read inside the detached temporary review worktree. Do not run shell commands.
+Do not edit the primary worktree or inspect any other checkout, Git metadata, or repository-local secret.
 Do not make external integration calls, network calls, provider calls, or consume
 additional model/API quota. Layer 3 has not been requested.
 
@@ -460,12 +459,8 @@ def run_layer1(
 
 def _claude_argv(boundaries: Sequence[Path]) -> list[str]:
     """Build a non-interactive, read-only Claude command for one isolated checkout."""
-    allowed = "Read,Grep,Glob"
-    denied = [
-        f"{tool}({path}/**)"
-        for path in boundaries
-        for tool in ("Read", "Grep", "Glob")
-    ]
+    allowed = "Read"
+    denied = [f"Read(/{path.resolve()}/**)" for path in boundaries]
     settings = json.dumps({"permissions": {"deny": denied}}, sort_keys=True)
     return [
         "claude",
@@ -483,7 +478,7 @@ def _claude_argv(boundaries: Sequence[Path]) -> list[str]:
         "--allowedTools",
         allowed,
         "--disallowedTools",
-        "Bash,Write,Edit,NotebookEdit",
+        "Bash,Grep,Glob,Write,Edit,NotebookEdit",
         "--settings",
         settings,
     ]

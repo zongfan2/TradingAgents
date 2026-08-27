@@ -4,7 +4,7 @@
 
 **Goal:** Add a deterministic offline verification command and a local, revision-bound Claude review gate that lets Codex lead development while Claude independently verifies risky changes from an isolated worktree.
 
-**Architecture:** A small `devtools.verification` package owns two independent command-line entry points: `offline` composes pytest, Ruff, and diff checks; `claude_review` preflights local Claude authentication, checks out the reviewed commit in a temporary detached worktree, invokes read-only Claude, validates its structured judgment, and writes SHA-bound reports outside the repository. Claude has only Read, Grep, and Glob capabilities; it does not run shell commands. GitHub Actions runs the same deterministic command set but never receives local Claude credentials.
+**Architecture:** A small `devtools.verification` package owns two independent command-line entry points: `offline` composes pytest, Ruff, and diff checks; `claude_review` preflights local Claude authentication, checks out the reviewed commit in a temporary detached worktree, invokes read-only Claude, validates its structured judgment, and writes SHA-bound reports outside the repository. Claude has only Read capability; it does not run shell commands. GitHub Actions runs the same deterministic command set but never receives local Claude credentials.
 
 **Tech Stack:** Python 3.10+, Pydantic, `subprocess`, `tempfile`, Git worktrees, pytest, Ruff, GitHub Actions, Claude Code CLI.
 
@@ -1032,13 +1032,13 @@ The Claude argv must be a list and include:
     "claude", "-p", "--output-format", "text",
     "--safe-mode", "--no-session-persistence",
     "--permission-mode", "dontAsk", "--setting-sources", "",
-    "--tools", "Read,Grep,Glob", "--allowedTools", "Read,Grep,Glob",
-    "--disallowedTools", "Bash,Write,Edit,NotebookEdit",
+    "--tools", "Read", "--allowedTools", "Read",
+    "--disallowedTools", "Bash,Grep,Glob,Write,Edit,NotebookEdit",
     "--settings", '{"permissions":{"deny":["Read(<pre-existing-worktree>/**)"]}}',
 ]
 ```
 
-Pass the packet on stdin, set `cwd` to the isolated worktree, use the CLI timeout (default 1200 seconds), and convert missing binary, timeout, non-zero exit, invalid judgment, and schema failure to concise `ReviewError` messages. The deny settings enumerate every pre-existing worktree and the Git-common path before the isolated checkout is added, so only the isolated source tree remains readable.
+Pass the packet on stdin, set `cwd` to the isolated worktree, use the CLI timeout (default 1200 seconds), and convert missing binary, timeout, non-zero exit, invalid judgment, and schema failure to concise `ReviewError` messages. The deny settings enumerate every pre-existing worktree and the Git-common path before the isolated checkout is added, using canonical `Read(//absolute/**)` patterns, so only the isolated source tree remains readable.
 
 Immediately after creating the isolated worktree and before invoking Claude, `run_review` calls `run_layer1` with the exact head checkout. A non-zero Layer 1 result raises `ReviewError` and prevents the Claude model call. The captured Layer 1 stdout/stderr summary is inserted into the review packet, proving the deterministic result belongs to the reviewed revision.
 

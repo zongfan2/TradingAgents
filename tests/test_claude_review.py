@@ -1195,20 +1195,22 @@ def test_run_review_uses_exact_safe_argv_packet_stdin_and_timeout(
 
 @pytest.mark.unit
 def test_claude_argv_is_read_only_and_denies_preexisting_boundaries():
-    primary = Path("/private/primary")
+    primary = Path("/private/parent/../primary")
     common = Path("/private/git-common")
     argv = review._claude_argv((primary, common))
-    assert argv[argv.index("--tools") + 1] == "Read,Grep,Glob"
-    assert argv[argv.index("--allowedTools") + 1] == "Read,Grep,Glob"
-    assert argv[argv.index("--disallowedTools") + 1] == "Bash,Write,Edit,NotebookEdit"
+    assert argv[argv.index("--tools") + 1] == "Read"
+    assert argv[argv.index("--allowedTools") + 1] == "Read"
+    assert argv[argv.index("--disallowedTools") + 1] == "Bash,Grep,Glob,Write,Edit,NotebookEdit"
     assert "--safe-mode" in argv
     assert "--no-session-persistence" in argv
     assert argv[argv.index("--permission-mode") + 1] == "dontAsk"
     assert argv[argv.index("--setting-sources") + 1] == ""
     settings = json.loads(argv[argv.index("--settings") + 1])
-    for path in (primary, common):
-        for tool in ("Read", "Grep", "Glob"):
-            assert f"{tool}({path}/**)" in settings["permissions"]["deny"]
+    assert settings["permissions"]["deny"] == [
+        "Read(//private/primary/**)",
+        "Read(//private/git-common/**)",
+    ]
+    assert all("Grep(" not in rule and "Glob(" not in rule for rule in settings["permissions"]["deny"])
 
 
 @pytest.mark.unit
@@ -1241,8 +1243,8 @@ def test_review_settings_deny_preexisting_paths_but_not_isolated_checkout(
         "deny"
     ]
     for path in (repo, common):
-        assert f"Read({path}/**)" in denied
-    assert f"Read({isolated}/**)" not in denied
+        assert f"Read(/{path}/**)" in denied
+    assert f"Read(/{isolated}/**)" not in denied
 
 
 @pytest.mark.unit
@@ -1261,7 +1263,7 @@ def test_review_packet_does_not_disclose_primary_repository_path():
     )
     assert str(primary) not in packet
     assert "Detached isolated checkout" in packet
-    assert "only Read, Grep, and Glob" in packet
+    assert "only Read" in packet
     assert "Do not run shell commands" in packet
 
 
