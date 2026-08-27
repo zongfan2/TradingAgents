@@ -1284,6 +1284,24 @@ def test_review_packet_sanitizes_primary_path_from_layer1_evidence():
 
 
 @pytest.mark.unit
+def test_review_packet_redacts_primary_path_from_caller_supplied_context():
+    primary = Path("/private/primary")
+    packet = review.build_review_packet(
+        repo=primary,
+        base_sha="a" * 40,
+        head_sha="b" * 40,
+        diff=f"diff --git {primary}/x.py",
+        changed_files=[str(primary / "x.py")],
+        acceptance=f"verify {primary}",
+        risk=f"risk at {primary}",
+        layer1_result="passed",
+        original_symptom=f"failure in {primary}",
+    )
+    assert str(primary) not in packet
+    assert "<primary checkout>" in packet
+
+
+@pytest.mark.unit
 def test_review_boundaries_include_every_worktree_and_git_common_dir(tmp_path):
     primary = tmp_path / "primary"
     linked = tmp_path / "linked"

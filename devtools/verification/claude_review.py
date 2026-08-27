@@ -197,9 +197,15 @@ def build_review_packet(
     original_symptom: str,
 ) -> str:
     """Build a bounded, secret-free independent-review prompt."""
-    del repo
+    primary_paths = sorted({str(repo), str(repo.resolve())}, key=len, reverse=True)
+
+    def redact_primary_path(value: str) -> str:
+        for primary_path in primary_paths:
+            value = value.replace(primary_path, "<primary checkout>")
+        return value
+
     schema = json.dumps(ClaudeJudgment.model_json_schema(), indent=2, sort_keys=True)
-    paths = "\n".join(f"- {path}" for path in changed_files) or "- (none)"
+    paths = "\n".join(f"- {redact_primary_path(path)}" for path in changed_files) or "- (none)"
     completed_steps: list[str] = []
     for line in layer1_result.splitlines():
         if line.startswith("==> "):
@@ -232,21 +238,21 @@ against those sources of truth.
 {paths}
 
 ## Requested behavior and acceptance criteria
-{acceptance}
+{redact_primary_path(acceptance)}
 
 ## Risk classification and known limitations
-{risk}
+{redact_primary_path(risk)}
 
 ## Layer 1 deterministic commands and result
 The exact head checkout was checked with pytest, ruff, and git diff --check.
 {layer1_summary}
 
 ## Original symptom and regression-test context
-{original_symptom}
+{redact_primary_path(original_symptom)}
 
 ## Review diff
 ```diff
-{diff}
+{redact_primary_path(diff)}
 ```
 
 ## Permission boundaries
