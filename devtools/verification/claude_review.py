@@ -469,6 +469,9 @@ def _claude_argv(boundaries: Sequence[Path]) -> list[str]:
         "text",
         "--safe-mode",
         "--no-session-persistence",
+        "--strict-mcp-config",
+        "--mcp-config",
+        '{"mcpServers":{}}',
         "--permission-mode",
         "dontAsk",
         "--setting-sources",
@@ -592,7 +595,8 @@ def _persist_report(report: ReviewReport, report_dir: Path) -> ReviewOutcome:
     paths = (json_path, markdown_path)
     replaced = [False, False]
     try:
-        staged = [_stage_text(json_path, json_text), _stage_text(markdown_path, markdown_text)]
+        staged[0] = _stage_text(json_path, json_text)
+        staged[1] = _stage_text(markdown_path, markdown_text)
         for index, path in enumerate(paths):
             if path.exists():
                 backups[index] = _stage_text(path, path.read_text(encoding="utf-8"))

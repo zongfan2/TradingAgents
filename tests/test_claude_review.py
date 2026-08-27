@@ -1203,6 +1203,8 @@ def test_claude_argv_is_read_only_and_denies_preexisting_boundaries():
     assert argv[argv.index("--disallowedTools") + 1] == "Bash,Grep,Glob,Write,Edit,NotebookEdit"
     assert "--safe-mode" in argv
     assert "--no-session-persistence" in argv
+    assert "--strict-mcp-config" in argv
+    assert json.loads(argv[argv.index("--mcp-config") + 1]) == {"mcpServers": {}}
     assert argv[argv.index("--permission-mode") + 1] == "dontAsk"
     assert argv[argv.index("--setting-sources") + 1] == ""
     settings = json.loads(argv[argv.index("--settings") + 1])
@@ -1409,6 +1411,29 @@ def test_persist_report_restores_preexisting_pair_when_markdown_replace_fails(
         review._persist_report(model_report(findings=[model_finding("medium")]), report_dir)
     assert json_path.read_text(encoding="utf-8") == old_json
     assert markdown_path.read_text(encoding="utf-8") == old_markdown
+
+
+@pytest.mark.unit
+def test_persist_report_cleans_first_staged_file_when_second_stage_fails(
+    tmp_path, monkeypatch
+):
+    report_dir = tmp_path / "reports"
+    orphan = report_dir / ".orphan"
+    calls = 0
+
+    def fail_second_stage(path, content):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            orphan.write_text(content, encoding="utf-8")
+            return orphan
+        raise review.ReviewError("could not stage report markdown")
+
+    monkeypatch.setattr(review, "_stage_text", fail_second_stage)
+    with pytest.raises(review.ReviewError, match="stage report markdown"):
+        review._persist_report(model_report(), report_dir)
+    assert not orphan.exists()
 
 
 @pytest.mark.unit
