@@ -26,6 +26,7 @@ import json
 import math
 import signal
 import subprocess
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -214,6 +215,79 @@ def test_core_all_every_member_runs(tmp_path):
     assert outcome.summary["completed"] == 3
     assert outcome.summary["errors"] == 0
     assert len(emitted) == 3
+
+
+@pytest.mark.unit
+def test_job_concurrency_overlaps_tickers_preserves_pairs_and_summary_order(tmp_path):
+    config = make_config(tmp_path)
+    write_pool(config, "us", SLOT, core=("AAA", "BBB"))
+    settings = ar.RunnerSettings(
+        analysis_job_concurrency=2,
+        ab_pairing="paired",
+        ab_core_pairs_per_slot=2,
+    )
+    first_arms = threading.Barrier(2)
+    bbb_emitted = threading.Event()
+    activity_lock = threading.Lock()
+    active = 0
+    peak = 0
+    arms_by_ticker: dict[str, list[str]] = {}
+
+    class ConcurrentChild(FakeChild):
+        def __call__(self, spec, timeout):
+            nonlocal active, peak
+            with activity_lock:
+                active += 1
+                peak = max(peak, active)
+                arms_by_ticker.setdefault(spec.ticker, []).append(spec.arm)
+            try:
+                if spec.arm == "brief":
+                    first_arms.wait(timeout=2)
+                    if spec.ticker == "AAA":
+                        assert bbb_emitted.wait(timeout=2)
+                return super().__call__(spec, timeout)
+            finally:
+                with activity_lock:
+                    active -= 1
+
+    parent_thread = threading.get_ident()
+    emitted: list[dict] = []
+    emit_threads: list[int] = []
+
+    def emit(line):
+        emit_threads.append(threading.get_ident())
+        emitted.append(line)
+        if line["ticker"] == "BBB":
+            bbb_emitted.set()
+
+    outcome = ar.run_slot(
+        "us",
+        SLOT,
+        config=config,
+        settings=settings,
+        resolvers=make_resolvers(None),
+        child_runner=ConcurrentChild(),
+        ohlcv_fetcher=lambda ticker, on_date: (100.0, 2.0),
+        clock=lambda: NOW,
+        emit=emit,
+    )
+
+    assert peak == 2
+    assert arms_by_ticker == {
+        "AAA": ["brief", "feeds"],
+        "BBB": ["brief", "feeds"],
+    }
+    assert [line["ticker"] for line in emitted] == ["BBB", "BBB", "AAA", "AAA"]
+    assert emit_threads == [parent_thread] * 4
+    expected_ids = [
+        "2026-08-07-us-AAA-brief-1",
+        "2026-08-07-us-AAA-feeds-1",
+        "2026-08-07-us-BBB-brief-1",
+        "2026-08-07-us-BBB-feeds-1",
+    ]
+    assert outcome.summary["planned"] == 4
+    assert outcome.summary["run_ids"] == expected_ids
+    assert [record.run_id for record in outcome.records] == expected_ids
 
 
 @pytest.mark.unit
@@ -535,9 +609,11 @@ def test_paired_core_rotation_and_catalyst_pairing(tmp_path):
     # The other core ticker is a solo brief run.
     assert records[(solo, "brief")].pair_id is None
     assert (solo, "feeds") not in records
-    # Pairs execute back-to-back: brief immediately followed by feeds.
+    # Each pair keeps its own brief → feeds order even when other ticker jobs
+    # run concurrently between those child calls.
     order = [(s.ticker, s.arm) for s in child.specs]
-    assert (rotated, "feeds") == order[order.index((rotated, "brief")) + 1]
+    for ticker in (rotated, "HOT"):
+        assert [arm for symbol, arm in order if symbol == ticker] == ["brief", "feeds"]
 
 
 @pytest.mark.unit
@@ -858,7 +934,13 @@ def test_brief_re_resolved_at_spawn_time_not_planning_time(tmp_path):
                 write_eval(brief_b, "warn")
             return super().__call__(spec, timeout)
 
-    run(config, make_resolvers(macro, {"BBB": brief_b}), RecollectingChild())
+    settings = ar.RunnerSettings(ab_pairing="off", analysis_job_concurrency=1)
+    run(
+        config,
+        make_resolvers(macro, {"BBB": brief_b}),
+        RecollectingChild(),
+        settings=settings,
+    )
     record = by_ticker_arm(read_records(config))[("BBB", "brief")]
     assert record.inputs.ticker_brief.sha256 == sha256_file(brief_b)  # NEW revision
     assert record.inputs.ticker_brief.sha256 != planning_sha
@@ -903,6 +985,7 @@ def test_config_digest_snapshot_written_once_and_resolvable(tmp_path):
     # Content-addressed: the digest re-derives from the snapshot content.
     assert sha256_text(json.dumps(snapshot, sort_keys=True, ensure_ascii=False)) == digest
     assert snapshot["ab_pairing"] == "off"
+    assert snapshot["analysis_job_concurrency"] == 2
     # The snapshot covers the ANALYSIS-side effective configuration: the
     # graph's resolved LLM backend/models and the trader-prompt hashes — not
     # the offline collectors' templates.
@@ -1137,6 +1220,7 @@ def test_position_snapshot_staleness_uses_trading_days():
 def test_load_settings_env_overrides_and_defaults():
     defaults = ar.load_settings(env={})
     assert defaults == ar.RunnerSettings()
+    assert defaults.analysis_job_concurrency == 2
     assert defaults.analysis_trigger_threshold == 7.0
     assert defaults.ab_pairing == "paired"
     assert defaults.ab_core_pairs_per_slot == 3
@@ -1145,6 +1229,7 @@ def test_load_settings_env_overrides_and_defaults():
 
     overridden = ar.load_settings(
         env={
+            ar.ANALYSIS_JOB_CONCURRENCY_ENV: "3",
             ar.TRIGGER_THRESHOLD_ENV: "6.5",
             ar.AB_PAIRING_ENV: "off",
             ar.AB_CORE_PAIRS_ENV: "2",
@@ -1153,6 +1238,7 @@ def test_load_settings_env_overrides_and_defaults():
             ar.PRESET_ENV: "claude-sub",
         }
     )
+    assert overridden.analysis_job_concurrency == 3
     assert overridden.analysis_trigger_threshold == 6.5
     assert overridden.ab_pairing == "off"
     assert overridden.ab_core_pairs_per_slot == 2
@@ -1163,6 +1249,8 @@ def test_load_settings_env_overrides_and_defaults():
     assert ar.load_settings(env={ar.PRESET_ENV: "x"}, preset_override="y").preset == "y"
     with pytest.raises(ValueError, match="ab_pairing"):
         ar.load_settings(env={ar.AB_PAIRING_ENV: "sometimes"})
+    with pytest.raises(ValueError, match="analysis_job_concurrency"):
+        ar.load_settings(env={ar.ANALYSIS_JOB_CONCURRENCY_ENV: "0"})
 
 
 @pytest.mark.unit
