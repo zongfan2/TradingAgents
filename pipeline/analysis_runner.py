@@ -1127,6 +1127,50 @@ class JobOutcome:
     run_lines: list[dict] = field(default_factory=list)
 
 
+def _error_run_line(
+    job: RunJob,
+    arm: Arm,
+    error: str,
+    *,
+    record: DecisionRecord | None = None,
+    pair_id: str | None = None,
+) -> dict:
+    """Build truthful R4 progress for an arm that could not finish cleanly."""
+    return {
+        "run_id": record.run_id if record else None,
+        "pair_id": record.pair_id if record else pair_id,
+        "ticker": job.ticker,
+        "arm": arm,
+        "trigger": job.trigger,
+        "decision": record.decision if record else "ERROR",
+        "plan_valid": record.plan_valid if record else False,
+        "violations": None,
+        "repair_used": False,
+        "flags": list(job.flags) or None,
+        "execute_eligible": False,
+        "error": error,
+    }
+
+
+def _complete_failed_outcome(job: RunJob, outcome: JobOutcome, error: str) -> JobOutcome:
+    """Preserve committed progress and mark every unreported arm as failed."""
+    reported = {line["arm"] for line in outcome.run_lines}
+    records = {record.arm: record for record in outcome.records}
+    pair_id = next((record.pair_id for record in outcome.records if record.pair_id), None)
+    for arm in job.arms:
+        if arm not in reported:
+            outcome.run_lines.append(
+                _error_run_line(
+                    job,
+                    arm,
+                    error,
+                    record=records.get(arm),
+                    pair_id=pair_id,
+                )
+            )
+    return outcome
+
+
 def _run_job(
     job: RunJob,
     *,
@@ -1144,9 +1188,53 @@ def _run_job(
     positions: PositionsSnapshot | None,
     log_path: Path,
 ) -> JobOutcome:
+    """Run one complete ticker job without letting one worker abort the slot."""
+    outcome = JobOutcome()
+    try:
+        return _run_job_impl(
+            job,
+            session=session,
+            slot_date=slot_date,
+            date_iso=date_iso,
+            config=config,
+            settings=settings,
+            resolvers=resolvers,
+            child_runner=child_runner,
+            ohlcv_fetcher=ohlcv_fetcher,
+            clock=clock,
+            pool_ref=pool_ref,
+            digest=digest,
+            positions=positions,
+            log_path=log_path,
+            outcome=outcome,
+        )
+    except Exception as exc:
+        error = f"job worker raised: {_one_line(exc)}"
+        logger.exception("%s: %s", job.ticker, error)
+        return _complete_failed_outcome(job, outcome, error)
+
+
+def _run_job_impl(
+    job: RunJob,
+    *,
+    session: str,
+    slot_date: date,
+    date_iso: str,
+    config: PipelineConfig,
+    settings: RunnerSettings,
+    resolvers: Resolvers,
+    child_runner: ChildRunner,
+    ohlcv_fetcher: OhlcvFetcher,
+    clock: Callable[[], datetime],
+    pool_ref: dict | None,
+    digest: str,
+    positions: PositionsSnapshot | None,
+    log_path: Path,
+    outcome: JobOutcome,
+) -> JobOutcome:
     """Run one ticker's arms sequentially and append each row immediately."""
-    records: list[DecisionRecord] = []
-    run_lines: list[dict] = []
+    records = outcome.records
+    run_lines = outcome.run_lines
     # Consumption-time resolution (ledger contract: "the hashes describe
     # what the run actually saw"): triggers and arms were decided from the
     # planning-time inspection, but the briefs are re-resolved HERE,
@@ -1154,8 +1242,11 @@ def _run_job(
     # is served and recorded as the new revision instead of keeping a hash
     # minted hours earlier. The pair's two runs execute back-to-back and share
     # this one resolution by design.
-    fresh_macro = inspect_macro_brief(resolvers, date_iso, session)
-    fresh_ticker = inspect_ticker_brief(resolvers, job.ticker, date_iso)
+    try:
+        fresh_macro = inspect_macro_brief(resolvers, date_iso, session)
+        fresh_ticker = inspect_ticker_brief(resolvers, job.ticker, date_iso)
+    except Exception as exc:
+        raise RuntimeError(f"brief revision resolution failed: {_one_line(exc)}") from exc
     # A brief whose eval went to ``fail`` mid-slot is withheld too — the
     # contaminated-input rule follows the fresh verdict, never a stale one.
     withhold = job.withhold_ticker_brief or (
@@ -1166,7 +1257,7 @@ def _run_job(
         job_flags.append("ticker-eval-fail-withheld")
     context = position_context_for(positions, job.ticker, slot_date)
     pair_id: str | None = None  # minted under flock with the pair's first row
-    for arm in job.arms:
+    for arm_index, arm in enumerate(job.arms):
         spec = ChildSpec(
             ticker=job.ticker,
             date=date_iso,
@@ -1188,7 +1279,10 @@ def _run_job(
         except Exception as exc:  # R3: the slot never aborts on one ticker
             result = ChildResult(-1, None, f"child runner raised: {exc}")
 
-        decided_at = to_utc_iso(clock())
+        try:
+            decided_at = to_utc_iso(clock())
+        except Exception as exc:
+            raise RuntimeError(f"completion clock failed: {_one_line(exc)}") from exc
         plan_dict: dict | None = None
         plan_valid = False
         violations: list[str] = []
@@ -1209,7 +1303,12 @@ def _run_job(
                 if plan_obj is not None:
                     last_close = atr14 = None
                     if plan_obj.action == "BUY":
-                        last_close, atr14 = ohlcv_fetcher(job.ticker, slot_date)
+                        try:
+                            last_close, atr14 = ohlcv_fetcher(job.ticker, slot_date)
+                        except Exception as exc:
+                            raise RuntimeError(
+                                f"OHLCV reference fetch failed: {_one_line(exc)}"
+                            ) from exc
                     violations = validate_trade_plan(plan_obj, last_close, atr14)
                     plan_dict = plan_obj.model_dump(mode="json")
                     plan_valid = not violations
@@ -1270,30 +1369,35 @@ def _run_job(
                 arm,
                 "; ".join(violations),
             )
-        locked_append(
-            log_path,
-            LOG_FIELD_SEPARATOR.join(
-                str(part)
-                for part in (
-                    date_iso,
-                    session,
-                    job.ticker,
-                    arm,
-                    job.trigger,
-                    record.run_id if record else "append-failed",
-                    decision,
-                    plan_valid,
-                )
-            ),
-        )
+        line_decision = decision if record is not None else "ERROR"
+        line_plan_valid = plan_valid if record is not None else False
+        try:
+            locked_append(
+                log_path,
+                LOG_FIELD_SEPARATOR.join(
+                    str(part)
+                    for part in (
+                        date_iso,
+                        session,
+                        job.ticker,
+                        arm,
+                        job.trigger,
+                        record.run_id if record else "append-failed",
+                        line_decision,
+                        line_plan_valid,
+                    )
+                ),
+            )
+        except Exception as exc:
+            raise RuntimeError(f"runner log append failed: {_one_line(exc)}") from exc
         line = {
             "run_id": record.run_id if record else None,
             "pair_id": record.pair_id if record else pair_id,
             "ticker": job.ticker,
             "arm": arm,
             "trigger": job.trigger,
-            "decision": decision,
-            "plan_valid": plan_valid,
+            "decision": line_decision,
+            "plan_valid": line_plan_valid,
             "violations": violations or None,
             "repair_used": repair_used,
             "flags": run_flags or None,
@@ -1308,7 +1412,12 @@ def _run_job(
             "error": error,
         }
         run_lines.append(line)
-    return JobOutcome(records=records, run_lines=run_lines)
+        if job.paired and pair_id is None:
+            pair_error = f"pair aborted after {arm} ledger append failed"
+            for remaining_arm in job.arms[arm_index + 1:]:
+                run_lines.append(_error_run_line(job, remaining_arm, pair_error))
+            break
+    return outcome
 
 
 def run_slot(
@@ -1388,7 +1497,7 @@ def run_slot(
     if jobs:
         max_workers = min(settings.analysis_job_concurrency, len(jobs))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_indexes = {
+            future_jobs = {
                 executor.submit(
                     _run_job,
                     job,
@@ -1405,12 +1514,17 @@ def run_slot(
                     digest=digest,
                     positions=positions,
                     log_path=log_path,
-                ): index
+                ): (index, job)
                 for index, job in enumerate(jobs)
             }
-            for future in as_completed(future_indexes):
-                index = future_indexes[future]
-                outcome = future.result()
+            for future in as_completed(future_jobs):
+                index, job = future_jobs[future]
+                try:
+                    outcome = future.result()
+                except Exception as exc:
+                    error = f"worker raised: {_one_line(exc)}"
+                    logger.exception("%s: %s", job.ticker, error)
+                    outcome = _complete_failed_outcome(job, JobOutcome(), error)
                 outcomes_by_index[index] = outcome
                 if emit is not None:
                     for line in outcome.run_lines:
