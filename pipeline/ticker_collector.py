@@ -42,6 +42,7 @@ import math
 import os
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -109,36 +110,25 @@ BACKEND_COMMANDS = {
     "codex": ("codex", "exec", "-c", "tools.web_search=true", "--skip-git-repo-check", "-"),
 }
 
-#: Worst-case backend calls per ticker: initial attempt + one errors-appended
-#: validation retry (R4).
-BACKEND_ATTEMPTS = 2
 #: Per-attempt ceiling (the macro collector's precedent); the fan-out budget
 #: maths below only ever shrink it.
 BACKEND_TIMEOUT_SECONDS = 1800.0
-#: Never squeeze a deep-search attempt below this — past this point the
-#: aggregate-budget guarantee degrades gracefully instead of making every
-#: search impossible on very large pools.
-MIN_BACKEND_TIMEOUT_SECONDS = 300.0
 #: Share of the component budget reserved for pool reading, validation, and
 #: the atomic writes around the backend calls.
 FANOUT_HEADROOM_SECONDS = 120.0
 
 
 def fanout_backend_timeout(n_jobs: int, concurrency: int, component_budget: float) -> float:
-    """Per-attempt deep-search timeout for the fan-out's default runner.
+    """Per-job window for the fan-out's default runner.
 
-    Sized so the worst case — every ticker exhausting ``BACKEND_ATTEMPTS``
-    attempts across ``ceil(n_jobs / concurrency)`` waves — fits inside the
-    orchestrator's ``ticker_collectors`` aggregate budget (default 2700s, env
-    ``TRADINGAGENTS_TIMEOUT_TICKER_COLLECTORS``). With the flat 1800s inner
-    timeout, even a single wave of three hung backends (2 × 1800s) would
-    overrun the 2700s budget, so the orchestrator would SIGKILL the fan-out
-    mid-flight and the R6 JSON summary line — the informative per-ticker
-    outcome report — would be lost to a bare component ``timeout``.
+    The window is split across concurrency waves, not speculative attempts:
+    a validation retry shares its job's absolute deadline and consumes only
+    the remainder. The aggregate fan-out deadline reserves headroom for
+    summary handling and writes.
     """
     waves = max(1, math.ceil(n_jobs / max(1, concurrency)))
-    share = (component_budget - FANOUT_HEADROOM_SECONDS) / (BACKEND_ATTEMPTS * waves)
-    return min(BACKEND_TIMEOUT_SECONDS, max(MIN_BACKEND_TIMEOUT_SECONDS, share))
+    share = (component_budget - FANOUT_HEADROOM_SECONDS) / waves
+    return min(BACKEND_TIMEOUT_SECONDS, max(1.0, share))
 
 
 #: Injectable subprocess boundary (tests fake this).
@@ -235,14 +225,22 @@ def _first_line(text: str) -> str:
 
 
 def default_runner(
-    backend: str, prompt: str, timeout: float = BACKEND_TIMEOUT_SECONDS
+    backend: str,
+    prompt: str,
+    timeout: float = BACKEND_TIMEOUT_SECONDS,
+    *,
+    deadline: float | None = None,
 ) -> str:
     """Run the deep-search CLI for ``backend`` with the prompt on stdin.
 
-    ``timeout`` is per attempt; the fan-out passes a budget-derived value
-    (:func:`fanout_backend_timeout`) so the whole run fits its component
-    budget."""
+    ``timeout`` is the per-job window ceiling; each call is also capped by
+    the optional absolute deadline shared with that job's retry."""
     command = list(BACKEND_COMMANDS[backend])
+    if deadline is not None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise CollectorError(f"backend '{backend}' deadline exhausted before launch")
+        timeout = min(timeout, remaining)
     try:
         proc = subprocess.run(
             command,
@@ -532,6 +530,8 @@ def collect_one(
     runner: Runner,
     brief_dir: Path,
     log_path: Path,
+    job_window: float | None = None,
+    aggregate_deadline: float | None = None,
 ) -> TickerOutcome:
     """Collect one ticker's brief; never raises (R3: per-ticker isolation —
     any failure becomes a ``failed`` outcome in the summary)."""
@@ -543,6 +543,12 @@ def collect_one(
             logger.info("%s already exists — skipping (use --force to re-collect)", target)
             _log(log_path, as_of, session, job.ticker, "-", "-", "skipped")
             return TickerOutcome(job.ticker, "skipped", path=target)
+
+        if job_window is not None and aggregate_deadline is not None:
+            job_deadline = min(aggregate_deadline, time.monotonic() + job_window)
+            runner = functools.partial(
+                runner, timeout=job_window, deadline=job_deadline
+            )
 
         prompt = render_ticker_prompt(as_of, job.ticker, session, generator,
                                       render_seed_block(job))
@@ -667,12 +673,13 @@ def collect_all(
     outcomes: list[TickerOutcome] = []
     if jobs:
         run = runner
+        job_window: float | None = None
+        aggregate_deadline: float | None = None
         if run is None:
             budget = float(config.component_timeouts.get("ticker_collectors", 2700))
-            run = functools.partial(
-                default_runner,
-                timeout=fanout_backend_timeout(len(jobs), max_workers, budget),
-            )
+            aggregate_deadline = time.monotonic() + budget - FANOUT_HEADROOM_SECONDS
+            job_window = fanout_backend_timeout(len(jobs), max_workers, budget)
+            run = default_runner
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = [
                 pool.submit(
@@ -685,6 +692,8 @@ def collect_all(
                     runner=run,
                     brief_dir=brief_dir,
                     log_path=log_path,
+                    job_window=job_window,
+                    aggregate_deadline=aggregate_deadline,
                 )
                 for job in jobs
             ]
