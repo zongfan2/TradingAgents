@@ -133,6 +133,7 @@ webui reads both.
   adapter/settle 15 min. Timeouts are per step invocation (the fan-out steps
   get one aggregate budget each); a timeout counts as `timeout` and the slot
   continues per the table.
+
 - **R2**: slot mutual exclusion via an `O_CREAT|O_EXCL` lockfile
   `~/.tradingagents/locks/<session>-<date>.lock` (stale locks older than 12h
   are broken with a warning) — atomic, no status-file TOCTOU. Concurrent
@@ -145,6 +146,14 @@ webui reads both.
   per slot (machine-parseable prefix + human tail); size-based rotation (keep
   the last 5 × 10 MB). Logs and status files never contain secrets (adapter
   S7 applies system-wide).
+
+### Runtime concurrency policy (P0)
+
+The analysis runner uses `analysis_job_concurrency`, default 2, overridden by
+`TRADINGAGENTS_ANALYSIS_JOB_CONCURRENCY`. Jobs are the concurrency unit; the
+arms within each job run sequentially. Ledger writes are immediate and
+flock-protected. The parent thread emits completed-job lines, while the final
+summary is assembled in planned-job order.
 
 ## Non-goals
 

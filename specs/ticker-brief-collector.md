@@ -40,6 +40,14 @@ state is created or deleted anywhere.
 - **R7 — Log**: one line per ticker (date, session, ticker, sources_count,
   catalyst_score, outcome) to `ticker_briefs/collector.log`.
 
+### Runtime deadline policy (P0)
+
+The fan-out aggregate deadline reserves 120 seconds of headroom. For `jobs`
+tickers and concurrency `concurrency`, each job window is
+`(component_budget - headroom) / ceil(jobs / concurrency)`; the calculation
+does not divide by a hypothetical retry. Each job's retry consumes only that
+job window's remainder, capped by the aggregate deadline.
+
 ## Non-goals
 
 - No pool mutation (the builder owns the pool; the collector only reads it).

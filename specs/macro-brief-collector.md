@@ -68,6 +68,13 @@ The robust version below replaces this one-liner.
   it once per session slot (see [orchestrator.md](orchestrator.md)); `--date`
   backfill remains available for catch-up.
 
+### Runtime deadline policy (P0)
+
+The first attempt receives the component budget minus headroom (the current
+headroom is 120 seconds). Retry does not receive a speculative half-budget:
+it may consume only the remaining time before the same absolute component
+deadline. A retry that has no positive remainder fails immediately.
+
 ## Non-goals
 
 - No reading of TradingAgents state, results, pools, or presets.

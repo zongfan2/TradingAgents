@@ -101,6 +101,13 @@ so the hashes describe what the run actually saw, not what is on disk later.
 
 ## Requirements
 
+- **Runtime concurrency policy (P0)**: `analysis_job_concurrency` defaults to
+  2 and is overridden by `TRADINGAGENTS_ANALYSIS_JOB_CONCURRENCY`. A job is
+  one ticker's complete execution; its `brief` and `feeds` arms remain
+  sequential inside that job. Separate ticker jobs may run concurrently up to
+  the configured limit. Every ledger row is written immediately through the
+  existing flock-protected append. Child completion is reported by the
+  parent thread, and the final summary is assembled in planned-job order.
 - **R1**: runs execute through the existing `TradingAgentsGraph` propagation
   (same code path as `compare/run.py`) with per-arm env/config injection;
   results/memory isolation per arm follows the compare-harness pattern so
