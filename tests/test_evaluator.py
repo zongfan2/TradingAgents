@@ -570,8 +570,60 @@ def test_claude_runner_error_paths_raise_backend_error(monkeypatch):
             ),
             None,
         ),
+        (
+            json.dumps(
+                {
+                    "subtype": "success",
+                    "is_error": False,
+                    "structured_output": json.loads(judgment()),
+                }
+            ),
+            None,
+        ),
+        (
+            json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "structured_output": json.loads(judgment()),
+                }
+            ),
+            None,
+        ),
+        (
+            json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": "false",
+                    "structured_output": json.loads(judgment()),
+                }
+            ),
+            None,
+        ),
+        (
+            json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "complete",
+                    "is_error": False,
+                    "structured_output": json.loads(judgment()),
+                }
+            ),
+            None,
+        ),
+        (json.dumps([json.loads(judgment())]), None),
     ],
-    ids=["is_error", "invalid_json", "missing_structured_output"],
+    ids=[
+        "is_error",
+        "invalid_json",
+        "missing_structured_output",
+        "missing_type",
+        "missing_is_error",
+        "nonboolean_is_error",
+        "invalid_subtype",
+        "nonmapping_envelope",
+    ],
 )
 def test_claude_runner_rejects_unusable_result_envelopes(monkeypatch, stdout, message):
     def fake_run(cmd, **kwargs):

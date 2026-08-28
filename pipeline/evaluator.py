@@ -209,10 +209,17 @@ def claude_runner(prompt: str) -> str:
         raise BackendError("claude -p returned invalid JSON envelope") from exc
     if not isinstance(envelope, dict):
         raise BackendError("claude -p returned malformed result envelope")
-    if envelope.get("is_error") is True:
+    if envelope.get("type") != "result":
+        raise BackendError("claude -p returned malformed result envelope")
+    is_error = envelope.get("is_error")
+    if not isinstance(is_error, bool):
+        raise BackendError("claude -p returned malformed result envelope")
+    if is_error:
         result = envelope.get("result", "")
         detail = " ".join(str(result).split())
         raise BackendError(f"claude -p returned error result: {detail}")
+    if envelope.get("subtype") != "success":
+        raise BackendError("claude -p returned malformed result envelope")
     structured_output = envelope.get("structured_output")
     if not isinstance(structured_output, dict):
         raise BackendError("claude -p result missing structured_output object")
