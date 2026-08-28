@@ -394,33 +394,22 @@ def test_default_runner_timeout_raises_collector_error(monkeypatch):
         raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
 
     monkeypatch.setattr(macro_collector.subprocess, "run", fake_run)
-    with pytest.raises(CollectorError, match="timed out after 840s"):
+    with pytest.raises(CollectorError, match="timed out after 1680s"):
         macro_collector.default_runner("claude", "PROMPT")
 
 
 @pytest.mark.unit
-def test_backend_timeout_fits_inside_the_component_budget(monkeypatch):
+def test_backend_timeout_reserves_only_component_headroom(monkeypatch):
     monkeypatch.delenv("TRADINGAGENTS_TIMEOUT_MACRO_COLLECTOR", raising=False)
     timeout = macro_collector.backend_timeout_seconds()
-    assert timeout == 840.0  # (1800 - 120) / 2
-    # The R3 worst case (attempt + errors-appended retry) plus the
-    # render/validate/write headroom fits the orchestrator's 1800s
-    # macro_collector budget — a hung first backend can no longer eat the
-    # whole outer budget and get the process group SIGKILLed before the R6
-    # one-line stderr reason (or the retry) happens.
-    assert (
-        macro_collector.BACKEND_ATTEMPTS * timeout + macro_collector.HEADROOM_SECONDS
-        <= 1800.0
-    )
-    # The env override that resizes the outer budget resizes the inner share.
+    assert timeout == 1680.0  # 1800 - 120 headroom
+    # The component budget override changes the ceiling, while retries consume
+    # the shared absolute deadline's remainder.
     monkeypatch.setenv("TRADINGAGENTS_TIMEOUT_MACRO_COLLECTOR", "2520")
-    assert macro_collector.backend_timeout_seconds() == 1200.0  # (2520 - 120) / 2
-    # A pathologically small budget still leaves a usable attempt (floor).
+    assert macro_collector.backend_timeout_seconds() == 2400.0
+    # A pathologically small budget still leaves a positive subprocess timeout.
     monkeypatch.setenv("TRADINGAGENTS_TIMEOUT_MACRO_COLLECTOR", "120")
-    assert (
-        macro_collector.backend_timeout_seconds()
-        == macro_collector.MIN_BACKEND_TIMEOUT_SECONDS
-    )
+    assert macro_collector.backend_timeout_seconds() == 1.0
 
 
 @pytest.mark.unit
@@ -434,7 +423,61 @@ def test_default_runner_uses_the_budget_sized_timeout(monkeypatch):
 
     monkeypatch.setattr(macro_collector.subprocess, "run", fake_run)
     macro_collector.default_runner("claude", "PROMPT")
-    assert seen["timeout"] == 840.0  # budget-derived, not the outer 1800s
+    assert seen["timeout"] == 1680.0  # budget-derived, not the outer 1800s
+
+
+@pytest.mark.unit
+def test_default_runner_uses_shared_deadline_remainder_for_each_attempt(monkeypatch):
+    timeouts = []
+    clock = iter((100.0, 400.0))
+
+    def fake_run(cmd, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        return subprocess.CompletedProcess(cmd, 0, stdout="BRIEF", stderr="")
+
+    monkeypatch.setattr(macro_collector.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(macro_collector.subprocess, "run", fake_run)
+
+    macro_collector.default_runner("claude", "FIRST", deadline=700.0)
+    macro_collector.default_runner("claude", "RETRY", deadline=700.0)
+
+    assert timeouts == [600.0, 300.0]
+
+
+@pytest.mark.unit
+def test_collect_production_runner_shares_its_deadline_with_retry(brief_dir, monkeypatch):
+    timeouts = []
+    clock = iter((100.0, 100.0, 400.0))  # bind deadline, attempt, retry
+
+    def fake_run(cmd, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        text = missing_section_brief() if len(timeouts) == 1 else make_brief()
+        return subprocess.CompletedProcess(cmd, 0, stdout=text, stderr="")
+
+    monkeypatch.setattr(macro_collector.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(macro_collector.subprocess, "run", fake_run)
+
+    result = collect("us", as_of=AS_OF)  # production runner path, not injected
+
+    assert result.attempts == 2
+    assert timeouts == [1680.0, 1380.0]
+
+
+@pytest.mark.unit
+def test_default_runner_rejects_an_exhausted_deadline_before_subprocess(monkeypatch):
+    called = False
+
+    def fake_run(cmd, **kwargs):
+        nonlocal called
+        called = True
+        return subprocess.CompletedProcess(cmd, 0, stdout="BRIEF", stderr="")
+
+    monkeypatch.setattr(macro_collector.time, "monotonic", lambda: 700.0)
+    monkeypatch.setattr(macro_collector.subprocess, "run", fake_run)
+
+    with pytest.raises(CollectorError, match="deadline exhausted"):
+        macro_collector.default_runner("claude", "PROMPT", deadline=700.0)
+    assert not called
 
 
 # ---------------------------------------------------------------------------

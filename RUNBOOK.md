@@ -201,7 +201,11 @@ runner, env-overridable): `ab_pairing=paired` (`TRADINGAGENTS_AB_PAIRING`,
 (`TRADINGAGENTS_AB_CORE_PAIRS_PER_SLOT`) + every catalyst-triggered ticker,
 budget `max_runs_per_slot=30` (`TRADINGAGENTS_MAX_RUNS_PER_SLOT`), preset
 recorded per row (`--preset` / `TRADINGAGENTS_ANALYSIS_PRESET`). Only the
-brief arm executes; feeds is shadow.
+brief arm executes; feeds is shadow. Analysis jobs default to
+`analysis_job_concurrency=2` (`TRADINGAGENTS_ANALYSIS_JOB_CONCURRENCY`): this
+changes peak analysis load from one to two children, but does not change the
+selected runs or theoretical total model spend. Arms within one ticker job
+remain sequential, and ledger rows are written immediately.
 
 Campaign discipline (design-doc A/B protocol + ledger contract caveats):
 
@@ -260,6 +264,7 @@ slot lock (`~/.tradingagents/locks/<session>-<date>.lock`) makes double fires
 exit 0 — normal; locks older than 12 h are auto-broken with a warning. To
 recover a missed slot: `orchestrator run --session <s> --date <d>` (or
 `--from N` if it died mid-slot — the status file names the failed step).
+No catch-up slot is run without explicit authorization.
 
 **Component failure ≠ slot failure.** Every component failure/timeout is
 recorded in the status file and the slot continues, degrading per D12:

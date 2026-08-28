@@ -491,17 +491,28 @@ def test_codex_runner_nonzero_exit_raises_backend_error_with_detail(monkeypatch)
 def test_claude_runner_command_construction_and_stdin(monkeypatch):
     monkeypatch.delenv("TRADINGAGENTS_TIMEOUT_MACRO_EVALUATOR", raising=False)
     seen = {}
+    envelope = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "result": "",
+        "structured_output": json.loads(judgment()),
+    }
 
     def fake_run(cmd, **kwargs):
         seen["cmd"] = cmd
         seen["input"] = kwargs.get("input")
         seen["timeout"] = kwargs.get("timeout")
-        return subprocess.CompletedProcess(cmd, 0, stdout="MODEL OUTPUT", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(envelope), stderr="")
 
     monkeypatch.setattr(evaluator_module.subprocess, "run", fake_run)
-    assert claude_runner("EVAL PROMPT") == "MODEL OUTPUT"
+    assert json.loads(claude_runner("EVAL PROMPT")) == envelope["structured_output"]
     # D19 claude backend: fresh `claude -p` with web search tools allowed.
-    assert seen["cmd"] == ["claude", "-p", "--allowedTools", "WebSearch,WebFetch"]
+    assert "--output-format" in seen["cmd"]
+    assert "json" in seen["cmd"]
+    assert "--json-schema" in seen["cmd"]
+    schema = json.loads(seen["cmd"][seen["cmd"].index("--json-schema") + 1])
+    assert "scores" in schema["required"]
     assert seen["input"] == "EVAL PROMPT"  # prompt over stdin, never argv
     assert seen["timeout"] == 540.0  # same budget-derived timeout as the codex backend
 
@@ -533,6 +544,99 @@ def test_claude_runner_error_paths_raise_backend_error(monkeypatch):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("stdout", "message"),
+    [
+        (
+            json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "error",
+                    "is_error": True,
+                    "result": "quota exceeded\nretry later",
+                }
+            ),
+            "quota exceeded retry later",
+        ),
+        ("not valid JSON", None),
+        (
+            json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "result": "",
+                }
+            ),
+            None,
+        ),
+        (
+            json.dumps(
+                {
+                    "subtype": "success",
+                    "is_error": False,
+                    "structured_output": json.loads(judgment()),
+                }
+            ),
+            None,
+        ),
+        (
+            json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "structured_output": json.loads(judgment()),
+                }
+            ),
+            None,
+        ),
+        (
+            json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": "false",
+                    "structured_output": json.loads(judgment()),
+                }
+            ),
+            None,
+        ),
+        (
+            json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "complete",
+                    "is_error": False,
+                    "structured_output": json.loads(judgment()),
+                }
+            ),
+            None,
+        ),
+        (json.dumps([json.loads(judgment())]), None),
+    ],
+    ids=[
+        "is_error",
+        "invalid_json",
+        "missing_structured_output",
+        "missing_type",
+        "missing_is_error",
+        "nonboolean_is_error",
+        "invalid_subtype",
+        "nonmapping_envelope",
+    ],
+)
+def test_claude_runner_rejects_unusable_result_envelopes(monkeypatch, stdout, message):
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(evaluator_module.subprocess, "run", fake_run)
+    with pytest.raises(BackendError) as exc_info:
+        claude_runner("PROMPT")
+    if message:
+        assert message in str(exc_info.value)
+
+
+@pytest.mark.unit
 def test_default_backend_is_claude_and_flag_selects_codex(macro_dir, monkeypatch):
     # No injected runner: the production runner selection itself is under
     # test, with subprocess.run faked so both paths stay offline.
@@ -540,7 +644,18 @@ def test_default_backend_is_claude_and_flag_selects_codex(macro_dir, monkeypatch
 
     def fake_run(cmd, **kwargs):
         seen["cmd"] = cmd
-        return subprocess.CompletedProcess(cmd, 0, stdout=judgment(), stderr="")
+        stdout = judgment()
+        if cmd[0] == "claude":
+            stdout = json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "result": "",
+                    "structured_output": json.loads(stdout),
+                }
+            )
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
 
     monkeypatch.setattr(evaluator_module.subprocess, "run", fake_run)
 

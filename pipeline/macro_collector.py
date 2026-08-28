@@ -25,10 +25,12 @@ callables) so tests run fully offline.
 from __future__ import annotations
 
 import argparse
+import functools
 import logging
 import os
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -82,13 +84,9 @@ BACKEND_COMMANDS = {
     "codex": ("codex", "exec", "-c", "tools.web_search=true", "--skip-git-repo-check", "-"),
 }
 
-#: R3 worst case: the initial deep search plus one errors-appended retry.
-BACKEND_ATTEMPTS = 2
 #: Share of the component budget reserved for everything that is not a
 #: backend call: prompt render, validation, archive + atomic write, S3 sync.
 HEADROOM_SECONDS = 120.0
-#: Never squeeze a deep-search attempt below this, however small the budget.
-MIN_BACKEND_TIMEOUT_SECONDS = 300.0
 
 S3_TIMEOUT_SECONDS = 300.0
 
@@ -96,19 +94,12 @@ S3_TIMEOUT_SECONDS = 300.0
 def backend_timeout_seconds() -> float:
     """Per-attempt deep-search timeout for :func:`default_runner`.
 
-    Sized so the R3 worst case (``BACKEND_ATTEMPTS`` backend calls) plus the
-    non-backend tail fit inside the orchestrator's ``macro_collector``
-    component budget (config ``component_timeouts``, default 1800s, env
-    ``TRADINGAGENTS_TIMEOUT_MACRO_COLLECTOR``). An inner timeout equal to the
-    outer budget would let the orchestrator SIGKILL the process group at the
-    very moment a hung first backend times out — the run would end as a bare
-    component ``timeout`` with the R6 one-line stderr reason (and the R3
-    retry) lost. Same derivation as ``pool_builder.backend_timeout_seconds``
-    and ``ticker_collector.fanout_backend_timeout``.
+    The first attempt receives the component budget minus non-backend
+    headroom. A validation retry shares the resulting absolute deadline and
+    therefore receives only its remaining time.
     """
     budget = float(load_config().component_timeouts.get("macro_collector", 1800))
-    share = (budget - HEADROOM_SECONDS) / BACKEND_ATTEMPTS
-    return max(MIN_BACKEND_TIMEOUT_SECONDS, share)
+    return max(1.0, budget - HEADROOM_SECONDS)
 
 #: Injectable subprocess boundaries (tests fake these).
 Runner = Callable[[str, str], str]  # (backend, prompt) -> brief text
@@ -150,10 +141,17 @@ def _first_line(text: str) -> str:
     return ""
 
 
-def default_runner(backend: str, prompt: str) -> str:
+def default_runner(
+    backend: str, prompt: str, *, deadline: float | None = None
+) -> str:
     """Run the deep-search CLI for ``backend`` with the prompt on stdin."""
     command = list(BACKEND_COMMANDS[backend])
     timeout = backend_timeout_seconds()
+    if deadline is not None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise CollectorError(f"backend '{backend}' deadline exhausted before launch")
+        timeout = min(timeout, remaining)
     try:
         proc = subprocess.run(
             command,
@@ -329,9 +327,13 @@ def collect(
         return CollectResult(path=target, outcome="skipped", sources_count=None, attempts=0)
 
     try:
+        run = runner
+        if run is None:
+            deadline = time.monotonic() + backend_timeout_seconds()
+            run = functools.partial(default_runner, deadline=deadline)
         prompt = render_macro_prompt(as_of, session, generator)
         text, meta, attempts = _generate_validated(
-            runner or default_runner, backend, prompt, target, generator
+            run, backend, prompt, target, generator
         )
     except Exception:
         append_log_line(log_path, as_of.isoformat(), session, backend, "-", "failed")

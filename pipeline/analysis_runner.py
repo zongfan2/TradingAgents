@@ -44,6 +44,7 @@ import signal
 import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -94,6 +95,7 @@ RUNNER_LOG_NAME = "analysis_runner.log"
 # ---------------------------------------------------------------------------
 
 TRIGGER_THRESHOLD_ENV = "TRADINGAGENTS_TRIGGER_THRESHOLD"
+ANALYSIS_JOB_CONCURRENCY_ENV = "TRADINGAGENTS_ANALYSIS_JOB_CONCURRENCY"
 AB_PAIRING_ENV = "TRADINGAGENTS_AB_PAIRING"
 AB_CORE_PAIRS_ENV = "TRADINGAGENTS_AB_CORE_PAIRS_PER_SLOT"
 MAX_RUNS_ENV = "TRADINGAGENTS_MAX_RUNS_PER_SLOT"
@@ -115,8 +117,11 @@ class RunnerSettings:
     execute_on_missing_eval: bool = False
     run_timeout_seconds: float = 1800.0
     preset: str = "default"
+    analysis_job_concurrency: int = 2
 
     def __post_init__(self) -> None:
+        if self.analysis_job_concurrency <= 0:
+            raise ValueError("analysis_job_concurrency must be greater than zero")
         if self.ab_pairing not in _AB_PAIRING_CHOICES:
             raise ValueError(
                 f"ab_pairing {self.ab_pairing!r} — expected one of {_AB_PAIRING_CHOICES}"
@@ -135,6 +140,9 @@ def load_settings(
         return (env.get(key) or "").strip()
 
     return RunnerSettings(
+        analysis_job_concurrency=int(
+            raw(ANALYSIS_JOB_CONCURRENCY_ENV) or defaults.analysis_job_concurrency
+        ),
         analysis_trigger_threshold=float(
             raw(TRIGGER_THRESHOLD_ENV) or defaults.analysis_trigger_threshold
         ),
@@ -740,6 +748,7 @@ def write_config_digest(
     """
     snapshot = {
         "preset": settings.preset,
+        "analysis_job_concurrency": settings.analysis_job_concurrency,
         "analysis_trigger_threshold": settings.analysis_trigger_threshold,
         "ab_pairing": settings.ab_pairing,
         "ab_core_pairs_per_slot": settings.ab_core_pairs_per_slot,
@@ -1110,6 +1119,307 @@ def _revision_drift_flags(macro: BriefInfo, ticker_brief: BriefInfo | None) -> l
     return flags
 
 
+@dataclass
+class JobOutcome:
+    """The ledger records and R4 lines produced by one complete ticker job."""
+
+    records: list[DecisionRecord] = field(default_factory=list)
+    run_lines: list[dict] = field(default_factory=list)
+
+
+def _error_run_line(
+    job: RunJob,
+    arm: Arm,
+    error: str,
+    *,
+    record: DecisionRecord | None = None,
+    pair_id: str | None = None,
+) -> dict:
+    """Build truthful R4 progress for an arm that could not finish cleanly."""
+    return {
+        "run_id": record.run_id if record else None,
+        "pair_id": record.pair_id if record else pair_id,
+        "ticker": job.ticker,
+        "arm": arm,
+        "trigger": job.trigger,
+        "decision": record.decision if record else "ERROR",
+        "plan_valid": record.plan_valid if record else False,
+        "violations": None,
+        "repair_used": False,
+        "flags": list(job.flags) or None,
+        "execute_eligible": False,
+        "error": error,
+    }
+
+
+def _complete_failed_outcome(job: RunJob, outcome: JobOutcome, error: str) -> JobOutcome:
+    """Preserve committed progress and mark every unreported arm as failed."""
+    reported = {line["arm"] for line in outcome.run_lines}
+    records = {record.arm: record for record in outcome.records}
+    pair_id = next((record.pair_id for record in outcome.records if record.pair_id), None)
+    for arm in job.arms:
+        if arm not in reported:
+            outcome.run_lines.append(
+                _error_run_line(
+                    job,
+                    arm,
+                    error,
+                    record=records.get(arm),
+                    pair_id=pair_id,
+                )
+            )
+    return outcome
+
+
+def _run_job(
+    job: RunJob,
+    *,
+    session: str,
+    slot_date: date,
+    date_iso: str,
+    config: PipelineConfig,
+    settings: RunnerSettings,
+    resolvers: Resolvers,
+    child_runner: ChildRunner,
+    ohlcv_fetcher: OhlcvFetcher,
+    clock: Callable[[], datetime],
+    pool_ref: dict | None,
+    digest: str,
+    positions: PositionsSnapshot | None,
+    log_path: Path,
+) -> JobOutcome:
+    """Run one complete ticker job without letting one worker abort the slot."""
+    outcome = JobOutcome()
+    try:
+        return _run_job_impl(
+            job,
+            session=session,
+            slot_date=slot_date,
+            date_iso=date_iso,
+            config=config,
+            settings=settings,
+            resolvers=resolvers,
+            child_runner=child_runner,
+            ohlcv_fetcher=ohlcv_fetcher,
+            clock=clock,
+            pool_ref=pool_ref,
+            digest=digest,
+            positions=positions,
+            log_path=log_path,
+            outcome=outcome,
+        )
+    except Exception as exc:
+        error = f"job worker raised: {_one_line(exc)}"
+        logger.exception("%s: %s", job.ticker, error)
+        return _complete_failed_outcome(job, outcome, error)
+
+
+def _run_job_impl(
+    job: RunJob,
+    *,
+    session: str,
+    slot_date: date,
+    date_iso: str,
+    config: PipelineConfig,
+    settings: RunnerSettings,
+    resolvers: Resolvers,
+    child_runner: ChildRunner,
+    ohlcv_fetcher: OhlcvFetcher,
+    clock: Callable[[], datetime],
+    pool_ref: dict | None,
+    digest: str,
+    positions: PositionsSnapshot | None,
+    log_path: Path,
+    outcome: JobOutcome,
+) -> JobOutcome:
+    """Run one ticker's arms sequentially and append each row immediately."""
+    records = outcome.records
+    run_lines = outcome.run_lines
+    # Consumption-time resolution (ledger contract: "the hashes describe
+    # what the run actually saw"): triggers and arms were decided from the
+    # planning-time inspection, but the briefs are re-resolved HERE,
+    # immediately before the job's children spawn — a mid-slot re-collection
+    # is served and recorded as the new revision instead of keeping a hash
+    # minted hours earlier. The pair's two runs execute back-to-back and share
+    # this one resolution by design.
+    try:
+        fresh_macro = inspect_macro_brief(resolvers, date_iso, session)
+        fresh_ticker = inspect_ticker_brief(resolvers, job.ticker, date_iso)
+    except Exception as exc:
+        raise RuntimeError(f"brief revision resolution failed: {_one_line(exc)}") from exc
+    # A brief whose eval went to ``fail`` mid-slot is withheld too — the
+    # contaminated-input rule follows the fresh verdict, never a stale one.
+    withhold = job.withhold_ticker_brief or (
+        fresh_ticker.verdict == "fail" and fresh_macro.verdict != "fail"
+    )
+    job_flags = list(job.flags)
+    if withhold and "ticker-eval-fail-withheld" not in job_flags:
+        job_flags.append("ticker-eval-fail-withheld")
+    context = position_context_for(positions, job.ticker, slot_date)
+    pair_id: str | None = None  # minted under flock with the pair's first row
+    for arm_index, arm in enumerate(job.arms):
+        spec = ChildSpec(
+            ticker=job.ticker,
+            date=date_iso,
+            session=session,
+            arm=arm,
+            withhold_ticker_brief=withhold and arm == "brief",
+            position_context=context,
+        )
+        logger.info(
+            "run %s %s arm=%s trigger=%s%s",
+            job.ticker,
+            date_iso,
+            arm,
+            job.trigger,
+            f" flags={','.join(job.flags)}" if job.flags else "",
+        )
+        try:
+            result = child_runner(spec, settings.run_timeout_seconds)
+        except Exception as exc:  # R3: the slot never aborts on one ticker
+            result = ChildResult(-1, None, f"child runner raised: {exc}")
+
+        try:
+            decided_at = to_utc_iso(clock())
+        except Exception as exc:
+            raise RuntimeError(f"completion clock failed: {_one_line(exc)}") from exc
+        plan_dict: dict | None = None
+        plan_valid = False
+        violations: list[str] = []
+        repair_used = False
+        error = None
+        if result.returncode == 0 and isinstance(result.payload, dict):
+            payload = result.payload
+            raw_decision = payload.get("decision")
+            decision = raw_decision if raw_decision in ("BUY", "SELL", "HOLD") else "HOLD"
+            repair_used = bool(payload.get("repair_used"))
+            raw_plan = payload.get("plan")
+            if raw_plan is not None:
+                plan_obj: TradePlan | None = None
+                try:
+                    plan_obj = TradePlan.model_validate(raw_plan)
+                except ValidationError as exc:
+                    violations = [f"plan shape invalid: {exc}"]
+                if plan_obj is not None:
+                    last_close = atr14 = None
+                    if plan_obj.action == "BUY":
+                        try:
+                            last_close, atr14 = ohlcv_fetcher(job.ticker, slot_date)
+                        except Exception as exc:
+                            raise RuntimeError(
+                                f"OHLCV reference fetch failed: {_one_line(exc)}"
+                            ) from exc
+                    violations = validate_trade_plan(plan_obj, last_close, atr14)
+                    plan_dict = plan_obj.model_dump(mode="json")
+                    plan_valid = not violations
+            elif decision == "HOLD":
+                plan_valid = True  # HOLD-without-plan is trivially valid
+            else:
+                violations = [payload.get("plan_error") or "no TradePlan block extracted"]
+        else:
+            decision = "ERROR"
+            error = result.error or f"child exit {result.returncode}"
+            logger.warning("run failed for %s (%s arm): %s", job.ticker, arm, error)
+
+        run_flags = list(job_flags)
+        if arm == "brief":
+            run_flags += _revision_drift_flags(fresh_macro, None if withhold else fresh_ticker)
+        fields = {
+            "pair_id": pair_id,
+            "date": date_iso,
+            "session": session,
+            "ticker": job.ticker,
+            "arm": arm,
+            "preset": settings.preset,
+            "trigger": job.trigger,
+            "catalyst_score": job.catalyst_score,
+            "macro_eval_verdict": fresh_macro.verdict,
+            "ticker_eval_verdict": fresh_ticker.verdict,
+            "inputs": {
+                "macro_brief": fresh_macro.ref if arm == "brief" else None,
+                "ticker_brief": (
+                    fresh_ticker.ref if arm == "brief" and not withhold else None
+                ),
+                "pool": pool_ref,
+                "config_digest": digest,
+            },
+            "decided_at": decided_at,
+            "decision": decision,
+            "plan": plan_dict,
+            "plan_valid": plan_valid,
+        }
+        record: DecisionRecord | None = None
+        try:
+            record = mint_and_append_decision(
+                config.ledger_dir,
+                fields,
+                mint_pair_attempt=job.paired and pair_id is None,
+            )
+        except Exception as exc:  # R3: an unwritable row must not abort the slot
+            error = f"ledger append failed: {_one_line(exc)}"
+            logger.error("%s (%s arm): %s", job.ticker, arm, error)
+        if record is not None:
+            records.append(record)
+            if job.paired:
+                pair_id = record.pair_id
+        if violations:
+            logger.warning(
+                "plan invalid for %s (%s): %s",
+                record.run_id if record else job.ticker,
+                arm,
+                "; ".join(violations),
+            )
+        line_decision = decision if record is not None else "ERROR"
+        line_plan_valid = plan_valid if record is not None else False
+        try:
+            locked_append(
+                log_path,
+                LOG_FIELD_SEPARATOR.join(
+                    str(part)
+                    for part in (
+                        date_iso,
+                        session,
+                        job.ticker,
+                        arm,
+                        job.trigger,
+                        record.run_id if record else "append-failed",
+                        line_decision,
+                        line_plan_valid,
+                    )
+                ),
+            )
+        except Exception as exc:
+            raise RuntimeError(f"runner log append failed: {_one_line(exc)}") from exc
+        line = {
+            "run_id": record.run_id if record else None,
+            "pair_id": record.pair_id if record else pair_id,
+            "ticker": job.ticker,
+            "arm": arm,
+            "trigger": job.trigger,
+            "decision": line_decision,
+            "plan_valid": line_plan_valid,
+            "violations": violations or None,
+            "repair_used": repair_used,
+            "flags": run_flags or None,
+            "execute_eligible": (
+                record is not None  # no ledger row ⇒ nothing to join/execute
+                and decision in ("BUY", "SELL")
+                and plan_valid
+                and execution_eligible(
+                    arm, job.trigger, fresh_macro.verdict, fresh_ticker.verdict, settings
+                )
+            ),
+            "error": error,
+        }
+        run_lines.append(line)
+        if job.paired and pair_id is None:
+            pair_error = f"pair aborted after {arm} ledger append failed"
+            for remaining_arm in job.arms[arm_index + 1:]:
+                run_lines.append(_error_run_line(job, remaining_arm, pair_error))
+            break
+    return outcome
+
+
 def run_slot(
     session: str,
     slot_date: date,
@@ -1183,174 +1493,46 @@ def run_slot(
     positions = load_positions(config.ledger_dir)
     log_path = config.state_dir / RUNNER_LOG_NAME
 
-    records: list[DecisionRecord] = []
-    run_lines: list[dict] = []
-    for job in jobs:
-        # Consumption-time resolution (ledger contract: "the hashes describe
-        # what the run actually saw"): triggers and arms were decided from the
-        # planning-time inspection, but the briefs are re-resolved HERE,
-        # immediately before the job's children spawn — a mid-slot
-        # re-collection is served and recorded as the new revision instead of
-        # keeping a hash minted hours earlier. The pair's two runs execute
-        # back-to-back and share this one resolution by design.
-        fresh_macro = inspect_macro_brief(resolvers, date_iso, session)
-        fresh_ticker = inspect_ticker_brief(resolvers, job.ticker, date_iso)
-        # A brief whose eval went to ``fail`` mid-slot is withheld too — the
-        # contaminated-input rule follows the fresh verdict, never a stale one.
-        withhold = job.withhold_ticker_brief or (
-            fresh_ticker.verdict == "fail" and fresh_macro.verdict != "fail"
-        )
-        job_flags = list(job.flags)
-        if withhold and "ticker-eval-fail-withheld" not in job_flags:
-            job_flags.append("ticker-eval-fail-withheld")
-        context = position_context_for(positions, job.ticker, slot_date)
-        pair_id: str | None = None  # minted under flock with the pair's first row
-        for arm in job.arms:
-            spec = ChildSpec(
-                ticker=job.ticker,
-                date=date_iso,
-                session=session,
-                arm=arm,
-                withhold_ticker_brief=withhold and arm == "brief",
-                position_context=context,
-            )
-            logger.info(
-                "run %s %s arm=%s trigger=%s%s",
-                job.ticker,
-                date_iso,
-                arm,
-                job.trigger,
-                f" flags={','.join(job.flags)}" if job.flags else "",
-            )
-            try:
-                result = child_runner(spec, settings.run_timeout_seconds)
-            except Exception as exc:  # R3: the slot never aborts on one ticker
-                result = ChildResult(-1, None, f"child runner raised: {exc}")
-
-            decided_at = to_utc_iso(clock())
-            plan_dict: dict | None = None
-            plan_valid = False
-            violations: list[str] = []
-            repair_used = False
-            error = None
-            if result.returncode == 0 and isinstance(result.payload, dict):
-                payload = result.payload
-                raw_decision = payload.get("decision")
-                decision = raw_decision if raw_decision in ("BUY", "SELL", "HOLD") else "HOLD"
-                repair_used = bool(payload.get("repair_used"))
-                raw_plan = payload.get("plan")
-                if raw_plan is not None:
-                    plan_obj: TradePlan | None = None
-                    try:
-                        plan_obj = TradePlan.model_validate(raw_plan)
-                    except ValidationError as exc:
-                        violations = [f"plan shape invalid: {exc}"]
-                    if plan_obj is not None:
-                        last_close = atr14 = None
-                        if plan_obj.action == "BUY":
-                            last_close, atr14 = ohlcv_fetcher(job.ticker, slot_date)
-                        violations = validate_trade_plan(plan_obj, last_close, atr14)
-                        plan_dict = plan_obj.model_dump(mode="json")
-                        plan_valid = not violations
-                elif decision == "HOLD":
-                    plan_valid = True  # HOLD-without-plan is trivially valid
-                else:
-                    violations = [payload.get("plan_error") or "no TradePlan block extracted"]
-            else:
-                decision = "ERROR"
-                error = result.error or f"child exit {result.returncode}"
-                logger.warning("run failed for %s (%s arm): %s", job.ticker, arm, error)
-
-            run_flags = list(job_flags)
-            if arm == "brief":
-                run_flags += _revision_drift_flags(
-                    fresh_macro, None if withhold else fresh_ticker
-                )
-            fields = {
-                "pair_id": pair_id,
-                "date": date_iso,
-                "session": session,
-                "ticker": job.ticker,
-                "arm": arm,
-                "preset": settings.preset,
-                "trigger": job.trigger,
-                "catalyst_score": job.catalyst_score,
-                "macro_eval_verdict": fresh_macro.verdict,
-                "ticker_eval_verdict": fresh_ticker.verdict,
-                "inputs": {
-                    "macro_brief": fresh_macro.ref if arm == "brief" else None,
-                    "ticker_brief": (
-                        fresh_ticker.ref if arm == "brief" and not withhold else None
-                    ),
-                    "pool": pool_ref,
-                    "config_digest": digest,
-                },
-                "decided_at": decided_at,
-                "decision": decision,
-                "plan": plan_dict,
-                "plan_valid": plan_valid,
+    outcomes_by_index: dict[int, JobOutcome] = {}
+    if jobs:
+        max_workers = min(settings.analysis_job_concurrency, len(jobs))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_jobs = {
+                executor.submit(
+                    _run_job,
+                    job,
+                    session=session,
+                    slot_date=slot_date,
+                    date_iso=date_iso,
+                    config=config,
+                    settings=settings,
+                    resolvers=resolvers,
+                    child_runner=child_runner,
+                    ohlcv_fetcher=ohlcv_fetcher,
+                    clock=clock,
+                    pool_ref=pool_ref,
+                    digest=digest,
+                    positions=positions,
+                    log_path=log_path,
+                ): (index, job)
+                for index, job in enumerate(jobs)
             }
-            record: DecisionRecord | None = None
-            try:
-                record = mint_and_append_decision(
-                    config.ledger_dir,
-                    fields,
-                    mint_pair_attempt=job.paired and pair_id is None,
-                )
-            except Exception as exc:  # R3: an unwritable row must not abort the slot
-                error = f"ledger append failed: {_one_line(exc)}"
-                logger.error("%s (%s arm): %s", job.ticker, arm, error)
-            if record is not None:
-                records.append(record)
-                if job.paired:
-                    pair_id = record.pair_id
-            if violations:
-                logger.warning(
-                    "plan invalid for %s (%s): %s",
-                    record.run_id if record else job.ticker,
-                    arm,
-                    "; ".join(violations),
-                )
-            locked_append(
-                log_path,
-                LOG_FIELD_SEPARATOR.join(
-                    str(part)
-                    for part in (
-                        date_iso,
-                        session,
-                        job.ticker,
-                        arm,
-                        job.trigger,
-                        record.run_id if record else "append-failed",
-                        decision,
-                        plan_valid,
-                    )
-                ),
-            )
-            line = {
-                "run_id": record.run_id if record else None,
-                "pair_id": record.pair_id if record else pair_id,
-                "ticker": job.ticker,
-                "arm": arm,
-                "trigger": job.trigger,
-                "decision": decision,
-                "plan_valid": plan_valid,
-                "violations": violations or None,
-                "repair_used": repair_used,
-                "flags": run_flags or None,
-                "execute_eligible": (
-                    record is not None  # no ledger row ⇒ nothing to join/execute
-                    and decision in ("BUY", "SELL")
-                    and plan_valid
-                    and execution_eligible(
-                        arm, job.trigger, fresh_macro.verdict, fresh_ticker.verdict, settings
-                    )
-                ),
-                "error": error,
-            }
-            run_lines.append(line)
-            if emit is not None:
-                emit(line)
+            for future in as_completed(future_jobs):
+                index, job = future_jobs[future]
+                try:
+                    outcome = future.result()
+                except Exception as exc:
+                    error = f"worker raised: {_one_line(exc)}"
+                    logger.exception("%s: %s", job.ticker, error)
+                    outcome = _complete_failed_outcome(job, JobOutcome(), error)
+                outcomes_by_index[index] = outcome
+                if emit is not None:
+                    for line in outcome.run_lines:
+                        emit(line)
+
+    ordered_outcomes = [outcomes_by_index[index] for index in range(len(jobs))]
+    records = [record for outcome in ordered_outcomes for record in outcome.records]
+    run_lines = [line for outcome in ordered_outcomes for line in outcome.run_lines]
 
     errors = sum(1 for line in run_lines if line["error"] is not None)
     completed = len(run_lines) - errors

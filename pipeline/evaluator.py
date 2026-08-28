@@ -173,9 +173,20 @@ def claude_runner(prompt: str) -> str:
 
     Same contract as :func:`codex_runner`: a new subprocess per evaluation
     (independence from the collector's backend session), prompt over stdin,
-    same timeout class, strict-JSON output parsed by the shared judgment path.
+    same timeout class. Claude's result envelope is unwrapped here; the shared
+    judgment path remains backend-neutral and parses only the judgment object.
     """
-    command = ["claude", "-p", "--allowedTools", "WebSearch,WebFetch"]
+    schema = json.dumps(_ModelJudgment.model_json_schema(), separators=(",", ":"))
+    command = [
+        "claude",
+        "-p",
+        "--allowedTools",
+        "WebSearch,WebFetch",
+        "--output-format",
+        "json",
+        "--json-schema",
+        schema,
+    ]
     timeout = backend_timeout_seconds()
     try:
         proc = subprocess.run(
@@ -192,7 +203,27 @@ def claude_runner(prompt: str) -> str:
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout or "").strip()[:500]
         raise BackendError(f"claude -p failed (exit {proc.returncode}): {detail}")
-    return proc.stdout
+    try:
+        envelope = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise BackendError("claude -p returned invalid JSON envelope") from exc
+    if not isinstance(envelope, dict):
+        raise BackendError("claude -p returned malformed result envelope")
+    if envelope.get("type") != "result":
+        raise BackendError("claude -p returned malformed result envelope")
+    is_error = envelope.get("is_error")
+    if not isinstance(is_error, bool):
+        raise BackendError("claude -p returned malformed result envelope")
+    if is_error:
+        result = envelope.get("result", "")
+        detail = " ".join(str(result).split())
+        raise BackendError(f"claude -p returned error result: {detail}")
+    if envelope.get("subtype") != "success":
+        raise BackendError("claude -p returned malformed result envelope")
+    structured_output = envelope.get("structured_output")
+    if not isinstance(structured_output, dict):
+        raise BackendError("claude -p result missing structured_output object")
+    return json.dumps(structured_output)
 
 
 #: Production runner per backend; tests inject fakes through ``runner=``.

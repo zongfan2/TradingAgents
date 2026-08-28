@@ -46,9 +46,13 @@ opportunity brief whose `catalyst_score` ≥ the analysis trigger threshold.
   distinctly).
 - **R2**: backend selectable — `--backend claude|codex`, default from config
   `eval_backend` (env `TRADINGAGENTS_EVAL_BACKEND`), `claude` per D19. The
-  `claude` backend runs `claude -p` with WebSearch/WebFetch (evaluator
-  identity `claude-eval`); the `codex` backend runs model `gpt-5.6-terra`
-  through `codex exec` with web search enabled (identity `gpt-5.6-terra`).
+  Claude backend invokes `claude -p --output-format json --json-schema
+  <schema>` with WebSearch/WebFetch (evaluator identity `claude-eval`) and
+  consumes only the envelope's `structured_output` object. A non-zero exit,
+  `is_error`, malformed envelope, or missing structured output is a backend
+  failure. Schema retry remains only for an actual `_ModelJudgment` contract
+  failure. The `codex` backend runs model `gpt-5.6-terra` through `codex exec`
+  with web search enabled (identity `gpt-5.6-terra`).
   Independence: the evaluator must NOT reuse the collector's backend session
   or context, and the eval backend must differ from `collect_backend` — a
   match is a loud stderr warning (never a failure).

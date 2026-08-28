@@ -590,37 +590,84 @@ def test_explicit_backend_beats_the_env_default(dirs):
 @pytest.mark.unit
 def test_fanout_backend_timeout_fits_the_component_budget():
     f = ticker_collector.fanout_backend_timeout
-    # Single wave (2 jobs, concurrency 3): (2700 - 120) / 2 = 1290s/attempt —
-    # worst case 2 x 1290 + 120 headroom lands exactly on the 2700s budget,
-    # so a wave of hung backends can no longer force the orchestrator to
-    # SIGKILL the fan-out and lose the R6 summary line.
-    assert f(2, 3, 2700.0) == 1290.0
-    assert ticker_collector.BACKEND_ATTEMPTS * f(3, 3, 2700.0) + 120.0 <= 2700.0
-    # Five waves (15 jobs / 3): the raw share (258s) dips below the floor —
-    # the guarantee degrades gracefully instead of strangling every search.
-    assert f(15, 3, 2700.0) == ticker_collector.MIN_BACKEND_TIMEOUT_SECONDS
-    # A generous budget is capped at the macro-collector-precedent ceiling.
-    assert f(1, 3, 100_000.0) == ticker_collector.BACKEND_TIMEOUT_SECONDS
-    # Degenerate inputs stay sane.
-    assert f(0, 3, 2700.0) == 1290.0
-    assert f(4, 0, 2700.0) == 322.5  # concurrency clamped to 1 -> 4 waves
+    assert f(2, 3, 2700.0) == 1800.0  # ceiling
+    assert f(15, 3, 2700.0) == 516.0  # 2580 / 5 waves
+    assert f(4, 1, 2700.0) == 645.0   # 2580 / 4 waves
 
 
 @pytest.mark.unit
-def test_fanout_passes_budget_sized_timeout_to_default_runner(dirs, monkeypatch):
+def test_fanout_passes_job_window_and_deadline_to_default_runner(dirs, monkeypatch):
     _brief_dir, pool_dir = dirs
     write_pool(pool_dir, core=("NVDA",), opportunity=())
     monkeypatch.delenv("TRADINGAGENTS_TIMEOUT_TICKER_COLLECTORS", raising=False)
     seen = {}
 
-    def fake_default_runner(backend, prompt, timeout=None):
+    def fake_default_runner(backend, prompt, timeout=None, deadline=None):
         seen["timeout"] = timeout
+        seen["deadline"] = deadline
         return make_ticker_brief()
 
     monkeypatch.setattr(ticker_collector, "default_runner", fake_default_runner)
+    clock = iter((100.0, 100.0))  # aggregate start, then the worker begins
+    monkeypatch.setattr(ticker_collector.time, "monotonic", lambda: next(clock))
     summary = collect_all("us", as_of=AS_OF)  # no injected runner: default path
     assert summary.written == 1
-    assert seen["timeout"] == 1290.0  # 1 job, 1 wave: (2700 - 120) / 2
+    assert seen == {"timeout": 1800.0, "deadline": 1900.0}
+
+
+@pytest.mark.unit
+def test_ticker_retry_uses_the_remaining_job_deadline(dirs, monkeypatch):
+    _brief_dir, pool_dir = dirs
+    write_pool(pool_dir, core=("NVDA",), opportunity=())
+    timeouts = []
+    clock = iter((100.0, 100.0, 100.0, 400.0))
+
+    def fake_run(cmd, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        text = (
+            make_ticker_brief(titles=tuple(briefs.TICKER_SECTIONS[:-1]))
+            if len(timeouts) == 1
+            else make_ticker_brief()
+        )
+        return subprocess.CompletedProcess(cmd, 0, stdout=text, stderr="")
+
+    monkeypatch.setattr(ticker_collector.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(ticker_collector.subprocess, "run", fake_run)
+    summary = collect_all("us", as_of=AS_OF)
+
+    assert summary.written == 1
+    assert timeouts == [1800.0, 1500.0]
+
+
+@pytest.mark.unit
+def test_queued_ticker_cannot_start_after_the_aggregate_deadline(dirs, monkeypatch):
+    _brief_dir, pool_dir = dirs
+    write_pool(pool_dir, core=("NVDA", "AVGO"), opportunity=())
+    launched = []
+    # Aggregate deadline: 100 + (121 - 120) = 101. NVDA starts at 100;
+    # constrained concurrency queues AVGO until monotonic time 102.
+    clock = iter((100.0, 100.0, 100.0, 102.0, 102.0))
+
+    def fake_run(cmd, **kwargs):
+        prompt = kwargs["input"]
+        ticker = re.search(r"^ticker: (\S+)$", prompt, re.MULTILINE).group(1)
+        launched.append((ticker, kwargs["timeout"]))
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout=make_ticker_brief(ticker=ticker), stderr=""
+        )
+
+    monkeypatch.setenv("TRADINGAGENTS_TIMEOUT_TICKER_COLLECTORS", "121")
+    monkeypatch.setattr(ticker_collector.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(ticker_collector.subprocess, "run", fake_run)
+
+    summary = collect_all("us", as_of=AS_OF, concurrency=1)
+
+    assert summary.written == 1
+    assert [(outcome.ticker, outcome.outcome) for outcome in summary.outcomes] == [
+        ("NVDA", "written"),
+        ("AVGO", "failed"),
+    ]
+    assert launched == [("NVDA", 1.0)]
 
 
 @pytest.mark.unit
