@@ -9,6 +9,7 @@ import json
 import plistlib
 import re
 from datetime import date, datetime, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -380,7 +381,9 @@ def test_plists_set_working_directory_to_repo_root(tmp_path):
     from pipeline.config import load_config
     cfg = load_config()
     repo_root = str(mod.REPO_ROOT)
-    assert repo_root.endswith("TradingAgents")
+    # A linked worktree legitimately has a different checkout-directory name;
+    # the invariant is that launchd starts at this checkout's package root.
+    assert Path(mod.__file__).resolve().parent.parent == mod.REPO_ROOT
     session_plist = mod.build_session_plist(cfg, "us", [(8, 30)])
     watchdog_plist = mod.build_watchdog_plist(cfg)
     assert session_plist["WorkingDirectory"] == repo_root

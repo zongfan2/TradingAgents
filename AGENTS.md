@@ -22,8 +22,12 @@ source of truth for cross-agent work: see [`specs/README.md`](specs/README.md).*
 ## Build & test
 
 ```bash
-.venv/bin/python -m pytest tests/ -q          # full suite (offline, ~90s)
-.venv/bin/python -m ruff check tradingagents tests compare
+.venv/bin/python -m devtools.verification.offline --only all  # required deterministic gate
+
+# Troubleshooting individual deterministic checks
+.venv/bin/python -m pytest tests/ -q -m "not integration"
+.venv/bin/python -m ruff check .
+git diff --check
 ```
 
 Environment lives in `.venv` (Python 3.14, `pip install -e .`). API keys are in
@@ -44,9 +48,54 @@ Environment lives in `.venv` (Python 3.14, `pip install -e .`). API keys are in
   `yf.Search` pattern). Run `ruff` before finishing.
 - Upstream behavior is not changed unless a spec says so.
 
-## Division of labor (current)
+## Codex-Claude hybrid workflow
 
-- **Pipeline side** (macro-brief consumption in TradingAgents): built by Claude Code — see `specs/macro-brief-pipeline.md`.
-- **Collector** (daily deep-search job producing briefs): to be built by Codex — see `specs/macro-brief-collector.md`.
-- **Evaluator** (Claude-backed accuracy scoring by default; GPT-5.6 Terra selectable): to be built by Claude Code — see `specs/macro-brief-evaluator.md`.
-- The shared interface between all three is `specs/macro-brief-data-contract.md`. **Change the contract first, then the components.**
+- **Codex — primary builder** owns production edits, tests, specs, contract-first
+  changes, deterministic verification, and final integration.
+- **Claude Code — independent verifier** reviews coherent risky changes from an
+  isolated worktree and returns reports for Codex to assess; it does not edit
+  the primary worktree. Claude receives only Read capability; it does not run shell commands
+  or inspect the primary checkout.
+
+Run the deterministic gate for every completed change and before handoff:
+
+```bash
+.venv/bin/python -m devtools.verification.offline --only all
+```
+
+Claude review is an additional required gate whenever a change involves any of:
+
+- contracts, interfaces, schemas, `pipeline/contracts/`, or shared data-contract specs;
+- trading or portfolio safety, including orders, positions, quote freshness, or market state;
+- data integrity, storage, replay, migration, retention, data loss, duplicate writes, overwrites, revision binding, or audit chains;
+- concurrency, idempotency, scheduling, locks, retries, timeouts, session dates, timezone, or DST behavior;
+- a nondeterministic, recurring, or flaky bug;
+- silent-bad-data risk: an apparent success while bad data proceeds downstream;
+- a new component or end-to-end feature; or
+- the final material merge/PR checkpoint.
+
+A complex bug requires Claude review when any mandatory trigger applies or when
+**two or more** scored factors apply: its root cause crosses two or more
+components or processes; it changes three or more logic files; unit tests alone
+cannot establish the fix; fallback, retry, gating, or exit-code semantics
+change; it depends on an external CLI, network, model, or third-party service;
+the root cause remains unclear after roughly 30 minutes; multiple plausible
+fixes have architectural trade-offs; or it can affect normal paths that did not
+show the original symptom.
+
+After the deterministic gate passes, run and then check the report bound to
+the reviewed head SHA (reports live under `~/.tradingagents/verification/`):
+
+```bash
+.venv/bin/python -m devtools.verification.claude_review run --base HEAD~1 --head HEAD --acceptance "describe the accepted behavior" --risk "state the mandatory trigger or score" --original-symptom "describe the bug, or none"
+.venv/bin/python -m devtools.verification.claude_review check --head HEAD
+```
+
+Only the user may authorize a waiver, explicitly for the exact bound revision.
+Use `claude_review waive` only with that authorization; its report remains
+visibly `waived`, never `pass`, and becomes stale if the revision changes.
+
+This development-review policy is separate from runtime D19: Codex performs
+collection and Claude performs evaluation. Do not rewrite historical `Builder`
+fields in component specs; those record existing delivery ownership, while this
+guide governs future work.

@@ -4,7 +4,7 @@
 
 **Goal:** Add a deterministic offline verification command and a local, revision-bound Claude review gate that lets Codex lead development while Claude independently verifies risky changes from an isolated worktree.
 
-**Architecture:** A small `devtools.verification` package owns two independent command-line entry points: `offline` composes pytest, Ruff, and diff checks; `claude_review` preflights local Claude authentication, checks out the reviewed commit in a temporary detached worktree, invokes read/test-only Claude, validates its structured judgment, and writes SHA-bound reports outside the repository. GitHub Actions runs the same deterministic command set but never receives local Claude credentials.
+**Architecture:** A small `devtools.verification` package owns two independent command-line entry points: `offline` composes pytest, Ruff, and diff checks; `claude_review` preflights local Claude authentication, checks out the reviewed commit in a temporary detached worktree, invokes read-only Claude, validates its structured judgment, and writes SHA-bound reports outside the repository. Claude has only Read capability; it does not run shell commands. GitHub Actions runs the same deterministic command set but never receives local Claude credentials.
 
 **Tech Stack:** Python 3.10+, Pydantic, `subprocess`, `tempfile`, Git worktrees, pytest, Ruff, GitHub Actions, Claude Code CLI.
 
@@ -47,7 +47,7 @@
 
 **Interfaces:**
 - Produces from `devtools.verification.models`: `Severity`, `ReviewVerdict`, `Reviewer`, `TestStatus`, `TestRun`, `Finding`, `ClaudeJudgment`, `Waiver`, `ReviewReport`.
-- Produces: `compute_verdict(findings: Sequence[Finding], limitations: Sequence[str]) -> ReviewVerdict`.
+- Produces: `compute_verdict(tests_run: Sequence[TestRun], findings: Sequence[Finding], limitations: Sequence[str]) -> ReviewVerdict`.
 - Produces: `build_report(judgment: ClaudeJudgment, *, base_sha: str, head_sha: str, reviewed_at: datetime) -> ReviewReport`.
 - Produces: `build_waiver_report(*, base_sha: str, head_sha: str, waiver: Waiver) -> ReviewReport`.
 - Later tasks rely on strict `extra="forbid"`, lower-case enum values, and 40–64 character lowercase hexadecimal commit SHAs.
@@ -67,6 +67,7 @@ from devtools.verification.models import (
     Finding,
     ReviewReport,
     ReviewVerdict,
+    TestRun,
     Waiver,
     build_report,
     build_waiver_report,
@@ -88,20 +89,27 @@ def finding(severity: str) -> Finding:
     )
 
 
+def model_test_run(status: str) -> TestRun:
+    return TestRun(command="pytest -q", status=status, summary="controlled result")
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("findings", "limitations", "expected"),
+    ("tests_run", "findings", "limitations", "expected"),
     [
-        ([], [], ReviewVerdict.PASS),
-        ([finding("low")], [], ReviewVerdict.WARN),
-        ([finding("medium")], [], ReviewVerdict.WARN),
-        ([finding("high")], [], ReviewVerdict.FAIL),
-        ([finding("critical")], [], ReviewVerdict.FAIL),
-        ([], ["live boundary not exercised"], ReviewVerdict.WARN),
+        ([], [], [], ReviewVerdict.PASS),
+        ([model_test_run("pass")], [], [], ReviewVerdict.PASS),
+        ([model_test_run("fail")], [], [], ReviewVerdict.FAIL),
+        ([model_test_run("not_run")], [], [], ReviewVerdict.WARN),
+        ([], [finding("low")], [], ReviewVerdict.WARN),
+        ([], [finding("medium")], [], ReviewVerdict.WARN),
+        ([], [finding("high")], [], ReviewVerdict.FAIL),
+        ([], [finding("critical")], [], ReviewVerdict.FAIL),
+        ([], [], ["live boundary not exercised"], ReviewVerdict.WARN),
     ],
 )
-def test_compute_verdict(findings, limitations, expected):
-    assert compute_verdict(findings, limitations) is expected
+def test_compute_verdict(tests_run, findings, limitations, expected):
+    assert compute_verdict(tests_run, findings, limitations) is expected
 
 
 @pytest.mark.unit
@@ -284,8 +292,14 @@ class ReviewReport(StrictModel):
 
     @model_validator(mode="after")
     def validate_reviewer_shape(self):
-        if self.reviewer is Reviewer.CLAUDE and self.waiver is not None:
-            raise ValueError("claude report cannot carry a waiver")
+        if self.reviewer is Reviewer.CLAUDE:
+            if self.waiver is not None:
+                raise ValueError("claude report cannot carry a waiver")
+            expected = compute_verdict(
+                self.tests_run, self.findings, self.limitations
+            )
+            if self.verdict is not expected:
+                raise ValueError("claude report verdict contradicts review evidence")
         if self.reviewer is Reviewer.USER_WAIVER:
             if self.waiver is None or self.verdict is not ReviewVerdict.WARN:
                 raise ValueError("user-waiver report requires waiver and warn verdict")
@@ -295,12 +309,18 @@ class ReviewReport(StrictModel):
 
 
 def compute_verdict(
-    findings: Sequence[Finding], limitations: Sequence[str]
+    tests_run: Sequence[TestRun],
+    findings: Sequence[Finding],
+    limitations: Sequence[str],
 ) -> ReviewVerdict:
+    statuses = {item.status for item in tests_run}
     severities = {item.severity for item in findings}
-    if severities & {Severity.CRITICAL, Severity.HIGH}:
+    if TestStatus.FAIL in statuses or severities & {
+        Severity.CRITICAL,
+        Severity.HIGH,
+    }:
         return ReviewVerdict.FAIL
-    if severities or limitations:
+    if TestStatus.NOT_RUN in statuses or severities or limitations:
         return ReviewVerdict.WARN
     return ReviewVerdict.PASS
 
@@ -316,7 +336,9 @@ def build_report(
         base_sha=base_sha,
         head_sha=head_sha,
         reviewed_at=reviewed_at,
-        verdict=compute_verdict(judgment.findings, judgment.limitations),
+        verdict=compute_verdict(
+            judgment.tests_run, judgment.findings, judgment.limitations
+        ),
         tests_run=judgment.tests_run,
         findings=judgment.findings,
         limitations=judgment.limitations,
@@ -456,7 +478,7 @@ def build_steps(repo_root: Path, python_executable: Path, only: str = "all") -> 
 
 `run_gate` must invoke each command with `cwd=repo_root`, never `shell=True`, print `==> <name>: <argv>` before execution, stop on the first non-zero return code, and return zero only after every selected step succeeds.
 
-The CLI resolves the repository from `Path(__file__).resolve().parents[2]`, accepts an internal/public `--repo` override used by isolated review worktrees, uses `--python` when supplied, otherwise `<repo>/.venv/bin/python`, and fails with one-line stderr if the repository or Python executable is absent. `python -m devtools.verification.offline --only all` is the canonical local command.
+The CLI resolves the repository from `Path(__file__).resolve().parents[2]`, accepts an internal/public `--repo` override used by isolated review worktrees, uses `--python` when supplied, otherwise the invoking `sys.executable`, and fails with one-line stderr if the repository or Python executable is absent. `python -m devtools.verification.offline --only all` is the canonical local command.
 
 - [ ] **Step 4: Run focused tests and the real deterministic gate**
 
@@ -613,7 +635,7 @@ def default_runner(argv, *, cwd=None, input=None, timeout=120):
 
 `parse_judgment` strips one optional Markdown JSON fence, parses exactly one JSON object, validates `ClaudeJudgment`, and translates JSON/Pydantic errors to `ReviewError` without dumping the whole model output.
 
-`build_review_packet` renders the approved roles, base/head, changed files, diff, acceptance criteria, risk classification, Layer 1 result, original symptom, allowed commands, no-primary-edit rule, no-external-integration rule, and the exact `ClaudeJudgment` JSON schema. It must not read `.env` or serialize `os.environ`.
+`build_review_packet` renders the approved roles, base/head, changed files, diff, acceptance criteria, risk classification, Layer 1 result, original symptom, read-only permission boundaries, no-primary-access rule, no-external-integration rule, and the exact `ClaudeJudgment` JSON schema. It must not read `.env` or serialize `os.environ`.
 
 - [ ] **Step 4: Add a real temporary-worktree isolation test**
 
@@ -684,6 +706,11 @@ git commit -m "feat(devtools): add isolated Claude review preflights"
 - Produces: `run_review(...) -> ReviewOutcome | None`, `write_user_waiver(...) -> ReviewOutcome`, `load_current_report(...) -> ReviewReport`, `render_markdown(report) -> str`, and `main(argv=None) -> int`.
 - CLI subcommands: `run --base <ref> [--head <ref>] [--optional]`, `check [--head <ref>]`, and `waive --base <ref> --reason <text> --unverified-risk <text> --user-approved`.
 - Exit codes: `0=pass, explicit user waiver, or explicitly optional unavailable`, `1=operational/validation error`, `3=warn`, `4=fail`.
+- `required=False` suppresses only `AuthUnavailable` from Layer 2. Before it may
+  return `None`, `run_review` still requires tracked cleanliness, exact base/head
+  resolution, a detached exact-head worktree, and successful Layer 1 there. It
+  never invokes Claude or writes a report on this path. Invalid refs, Layer 1
+  failures, and every non-auth `ReviewError` propagate.
 
 - [ ] **Step 1: Write failing orchestration tests**
 
@@ -793,7 +820,9 @@ def test_run_review_stamps_identity_and_writes_both_reports(tmp_path, monkeypatc
 
 
 @pytest.mark.unit
-def test_required_missing_auth_raises_but_optional_returns_none(tmp_path, monkeypatch):
+def test_required_missing_auth_raises_but_optional_runs_layer1_then_returns_none(
+    tmp_path, monkeypatch
+):
     def unavailable(**kwargs):
         raise review.AuthUnavailable("not logged in")
     monkeypatch.setattr(review, "check_claude_auth", unavailable)
@@ -806,14 +835,34 @@ def test_required_missing_auth_raises_but_optional_returns_none(tmp_path, monkey
             original_symptom="none",
             required=True,
         )
+    monkeypatch.setattr(review, "ensure_tracked_clean", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        review,
+        "resolve_commit",
+        lambda repo, ref, **kwargs: {"HEAD~1": "a" * 40, "HEAD": "b" * 40}[ref],
+    )
+    monkeypatch.setattr(
+        review,
+        "detached_worktree",
+        lambda *args, **kwargs: fake_worktree(tmp_path / "isolated"),
+    )
+    layer1_calls = []
+    monkeypatch.setattr(
+        review,
+        "run_layer1",
+        lambda *args, **kwargs: layer1_calls.append(args) or "gate passed",
+    )
     assert review.run_review(
         repo=tmp_path,
         base_ref="HEAD~1",
+        report_dir=tmp_path / "reports",
         acceptance="test the gate",
         risk="optional review",
         original_symptom="none",
         required=False,
     ) is None
+    assert layer1_calls and layer1_calls[0][0] == tmp_path / "isolated"
+    assert not list((tmp_path / "reports").glob("*"))
 
 
 @pytest.mark.unit
@@ -981,14 +1030,15 @@ The Claude argv must be a list and include:
 ```python
 [
     "claude", "-p", "--output-format", "text",
-    "--allowedTools",
-    f"Read,Grep,Glob,Bash(git diff:*),Bash(git status:*),"
-    f"Bash({python_executable} -m pytest:*),Bash({python_executable} -m ruff:*)",
-    "--disallowedTools", "Write,Edit,NotebookEdit",
+    "--safe-mode", "--no-session-persistence",
+    "--permission-mode", "dontAsk", "--setting-sources", "",
+    "--tools", "Read", "--allowedTools", "Read",
+    "--disallowedTools", "Bash,Grep,Glob,Write,Edit,NotebookEdit",
+    "--settings", '{"permissions":{"deny":["Read(<pre-existing-worktree>/**)"]}}',
 ]
 ```
 
-Pass the packet on stdin, set `cwd` to the isolated worktree, use the CLI timeout (default 1200 seconds), and convert missing binary, timeout, non-zero exit, invalid judgment, and schema failure to concise `ReviewError` messages.
+Pass the packet on stdin, set `cwd` to the isolated worktree, use the CLI timeout (default 1200 seconds), and convert missing binary, timeout, non-zero exit, invalid judgment, and schema failure to concise `ReviewError` messages. The deny settings enumerate every pre-existing worktree and the Git-common path before the isolated checkout is added, using canonical `Read(//absolute/**)` patterns, so only the isolated source tree remains readable.
 
 Immediately after creating the isolated worktree and before invoking Claude, `run_review` calls `run_layer1` with the exact head checkout. A non-zero Layer 1 result raises `ReviewError` and prevents the Claude model call. The captured Layer 1 stdout/stderr summary is inserted into the review packet, proving the deterministic result belongs to the reviewed revision.
 

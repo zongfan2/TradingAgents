@@ -67,7 +67,7 @@ execution = [
 tradingagents = "cli.main:app"
 
 [tool.setuptools.packages.find]
-include = ["tradingagents*", "cli*"]
+include = ["tradingagents*", "cli*", "devtools*"]
 
 [tool.setuptools.package-data]
 cli = ["static/*"]

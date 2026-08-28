@@ -32,8 +32,9 @@ investigate, not an instruction to accept blindly.
 ### Claude Code — independent verifier
 
 Claude receives a bounded review packet after Codex has a coherent change. It
-checks the governing specs and contracts, reviews the diff, runs targeted tests,
-adds adversarial test ideas, and reports findings. The runner always checks out
+checks the governing specs and contracts, reviews the diff and deterministic
+Layer 1 evidence, adds adversarial test ideas, and reports findings. Claude has
+only Read capability; it does not run shell commands. The runner always checks out
 the head revision into an isolated temporary worktree and starts Claude there;
 the primary worktree is never exposed as Claude's writable working directory.
 Any experiment stays in the temporary worktree, which is removed after the
@@ -81,6 +82,12 @@ Claude gets the review packet defined below and returns the structured report.
 A required Claude verdict of `fail`, an invalid report, a timeout, or missing
 authentication blocks merge until Claude passes or the user records a waiver.
 A `warn` verdict requires Codex to disposition every finding before completion.
+When Layer 2 is explicitly optional and Claude authentication is unavailable,
+only the Claude invocation is suppressed: tracked cleanliness, exact base/head
+resolution, detached exact-head creation, and Layer 1 in that checkout must
+still succeed before the command may continue with no report. Invalid refs and
+Layer 1 failures remain blocking, and this path never invokes Claude or writes
+a review report.
 
 ### Layer 3 — live integration
 
@@ -140,19 +147,19 @@ escalate any change to Claude when uncertainty remains.
 
 Codex provides Claude with a bounded packet so the review is reproducible:
 
-- repository path, base SHA, and head SHA;
+- detached-checkout identity, base SHA, and head SHA;
 - changed-file list and diff;
 - governing component specs and data contracts;
 - requested behavior and acceptance criteria;
 - Codex's risk classification and known limitations;
 - exact Layer 1 commands and results;
 - the original symptom and regression test for a bug fix;
-- explicit permission boundaries, including no primary-worktree edits and no
+- explicit permission boundaries, including no primary-worktree access and no
   external integration calls unless Layer 3 was requested. The Claude model
   call required by Layer 2 is not itself a Layer 3 test.
 
-The packet excludes `.env`, credentials, unrelated untracked files, generated
-runtime data, and prior model reasoning.
+The packet excludes primary-worktree paths, `.env`, credentials, unrelated
+untracked files, generated runtime data, and prior model reasoning.
 
 ## Claude Report Contract
 
@@ -194,9 +201,17 @@ The JSON report is authoritative for automation:
 Allowed verdicts are `pass`, `warn`, and `fail`; severities are `critical`,
 `high`, `medium`, and `low`; reviewer is `claude` or `user-waiver`. A user-waiver
 report always has verdict `warn`, a non-null waiver object, and no fabricated
-Claude tests or findings. A report is valid only when `head_sha` equals the
-revision being handed off. Re-reviewing a changed revision creates a new report.
-The Markdown companion is for humans and must not contradict the JSON verdict.
+Claude tests or findings. Claude report verdicts are deterministic: any failed
+test produces `fail`; otherwise any `not_run` test produces at least `warn`;
+passing tests are neutral; critical/high findings produce `fail`; other
+findings or limitations produce at least `warn`; only evidence with none of
+those conditions produces `pass`. Every Claude report must store exactly the
+verdict recomputed from its tests, findings, and limitations, so contradictory
+persisted JSON is schema-invalid. The user-waiver shape is the sole explicit
+exception: it stores `warn`, no tests or findings, and its waiver limitation.
+A report is valid only when `head_sha` equals the revision being handed off.
+Re-reviewing a changed revision creates a new report. The Markdown companion is
+for humans and must not contradict the JSON verdict.
 
 ## End-to-End Development Flow
 
@@ -251,7 +266,9 @@ review, and its output remains governed by the brief evaluation contracts.
 
 - Layer 1 failure: block immediately and report the failing command.
 - Required Layer 2 unavailable or invalid: block merge; do not silently downgrade.
-- Optional Layer 2 unavailable: record a warning and continue only after Layer 1.
+- Optional Layer 2 authentication unavailable: suppress only Layer 2 and
+  continue without a report only after tracked-clean/ref preflights and Layer 1
+  pass in a detached exact-head checkout; invalid refs and Layer 1 failures block.
 - Claude `fail`: block until corrected and re-reviewed, or explicitly waived.
 - Claude `warn`: Codex dispositions are mandatory; unresolved critical/high
   findings block completion.
