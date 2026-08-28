@@ -640,6 +640,37 @@ def test_ticker_retry_uses_the_remaining_job_deadline(dirs, monkeypatch):
 
 
 @pytest.mark.unit
+def test_queued_ticker_cannot_start_after_the_aggregate_deadline(dirs, monkeypatch):
+    _brief_dir, pool_dir = dirs
+    write_pool(pool_dir, core=("NVDA", "AVGO"), opportunity=())
+    launched = []
+    # Aggregate deadline: 100 + (121 - 120) = 101. NVDA starts at 100;
+    # constrained concurrency queues AVGO until monotonic time 102.
+    clock = iter((100.0, 100.0, 100.0, 102.0, 102.0))
+
+    def fake_run(cmd, **kwargs):
+        prompt = kwargs["input"]
+        ticker = re.search(r"^ticker: (\S+)$", prompt, re.MULTILINE).group(1)
+        launched.append((ticker, kwargs["timeout"]))
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout=make_ticker_brief(ticker=ticker), stderr=""
+        )
+
+    monkeypatch.setenv("TRADINGAGENTS_TIMEOUT_TICKER_COLLECTORS", "121")
+    monkeypatch.setattr(ticker_collector.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(ticker_collector.subprocess, "run", fake_run)
+
+    summary = collect_all("us", as_of=AS_OF, concurrency=1)
+
+    assert summary.written == 1
+    assert [(outcome.ticker, outcome.outcome) for outcome in summary.outcomes] == [
+        ("NVDA", "written"),
+        ("AVGO", "failed"),
+    ]
+    assert launched == [("NVDA", 1.0)]
+
+
+@pytest.mark.unit
 def test_default_runner_nonzero_exit_raises_one_line_reason(monkeypatch):
     def fake_run(cmd, **kwargs):
         return subprocess.CompletedProcess(cmd, 2, stdout="", stderr="not logged in\nmore detail")

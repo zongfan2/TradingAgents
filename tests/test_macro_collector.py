@@ -445,6 +445,25 @@ def test_default_runner_uses_shared_deadline_remainder_for_each_attempt(monkeypa
 
 
 @pytest.mark.unit
+def test_collect_production_runner_shares_its_deadline_with_retry(brief_dir, monkeypatch):
+    timeouts = []
+    clock = iter((100.0, 100.0, 400.0))  # bind deadline, attempt, retry
+
+    def fake_run(cmd, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        text = missing_section_brief() if len(timeouts) == 1 else make_brief()
+        return subprocess.CompletedProcess(cmd, 0, stdout=text, stderr="")
+
+    monkeypatch.setattr(macro_collector.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(macro_collector.subprocess, "run", fake_run)
+
+    result = collect("us", as_of=AS_OF)  # production runner path, not injected
+
+    assert result.attempts == 2
+    assert timeouts == [1680.0, 1380.0]
+
+
+@pytest.mark.unit
 def test_default_runner_rejects_an_exhausted_deadline_before_subprocess(monkeypatch):
     called = False
 
