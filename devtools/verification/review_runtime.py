@@ -28,6 +28,7 @@ def reason_code(error: BaseException) -> str:
         "layer1-timeout", "claude-timeout", "claude-exit", "cli-not-found",
         "claude-start-failed", "test-evidence-conflict", "invalid-context",
         "layer1-definition-mismatch",
+        "invalid-report-text",
     }
     if code in allowed:
         return code

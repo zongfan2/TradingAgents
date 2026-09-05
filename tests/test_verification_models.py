@@ -84,6 +84,61 @@ def test_report_rejects_bad_sha_and_unknown_fields():
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(("section", "field"), [
+    ("findings", "file"),
+    ("findings", "title"),
+    ("findings", "evidence"),
+    ("findings", "suggested_test"),
+    ("findings", "severity"),
+    ("tests_run", "command"),
+    ("tests_run", "summary"),
+    ("tests_run", "status"),
+    ("limitations", None),
+    ("review_notes", None),
+])
+@pytest.mark.parametrize("invalid_text", ["before\ud800after", "before\udfffafter"])
+def test_judgment_rejects_invalid_utf8_in_every_model_text_field(section, field, invalid_text):
+    payload = {
+        "tests_run": [model_test_run("pass").model_dump(mode="python")],
+        "findings": [finding("low").model_dump(mode="python")],
+        "limitations": [],
+        "review_notes": [],
+    }
+    if field is None:
+        payload[section] = [invalid_text]
+    else:
+        payload[section][0][field] = invalid_text
+
+    with pytest.raises(ValidationError):
+        ClaudeJudgment.model_validate(payload)
+
+
+@pytest.mark.unit
+def test_judgment_preserves_valid_multilingual_text_and_full_note_budget():
+    text = "验证通过 🚀"
+    judgment = ClaudeJudgment(
+        tests_run=[ReviewTestRun(command=text, status="pass", summary=text)],
+        findings=[Finding(
+            severity="low", file=text, line=1, title=text,
+            evidence=text, suggested_test=text,
+        )],
+        limitations=[text],
+        review_notes=["字" * 4000] * 32,
+    )
+    assert judgment.findings[0].evidence == text
+    assert judgment.tests_run[0].summary == text
+    assert judgment.limitations == [text]
+    assert judgment.review_notes == ["字" * 4000] * 32
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("notes", [["x"] * 33, ["x" * 4001]])
+def test_judgment_keeps_existing_note_size_limits(notes):
+    with pytest.raises(ValidationError):
+        ClaudeJudgment(tests_run=[], findings=[], limitations=[], review_notes=notes)
+
+
+@pytest.mark.unit
 def test_finding_line_must_be_positive_when_present():
     with pytest.raises(ValidationError):
         Finding(

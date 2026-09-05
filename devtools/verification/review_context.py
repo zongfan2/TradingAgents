@@ -35,6 +35,11 @@ def harness_test_evidence(output: str) -> list[TestRun]:
     ]
 
 
+def gate_step_names() -> set[str]:
+    """Trusted step labels for safe progress/failure attribution."""
+    return {step.name for step in offline.build_steps(Path("."), Path("python"), only="all")}
+
+
 def _safe_source(root: Path, value: str) -> Path:
     path = PurePosixPath(value)
     if (

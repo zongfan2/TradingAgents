@@ -233,6 +233,8 @@ Claude with GPT, loosen Read-only permissions, or change `compute_verdict`.
   the invoking harness's definition byte-for-byte. A historical `--head` with a
   different gate definition fails before subprocess/model execution; use that
   revision's matching harness rather than falsely attesting current commands.
+  Packet summaries and failure-step attribution use the same authoritative
+  step names rather than maintaining a separate tests/lint/diff list.
 - Claude may return `review_notes` for informational scope/permission statements
   and positive confirmations. These notes go to the per-run diagnostic archive,
   not the v1 report's `limitations`. `limitations` continues to mean material
@@ -241,6 +243,9 @@ Claude with GPT, loosen Read-only permissions, or change `compute_verdict`.
   reports are never normalized or rewritten to remove warnings.
   Notes are bounded to 32 entries of 4000 characters each and must encode as
   UTF-8; invalid notes fail schema validation before any report publication.
+  The UTF-8 requirement also covers every textual field of a new Claude
+  judgment, including findings and limitations. The staging layer validates
+  text before creating a temporary file as a second line of defense.
 - The packet contains an exact-head file/heading/function navigation index.
   Explicit repeatable `--context-file` paths must be safe repository-relative,
   non-secret source/spec/test files present in that detached checkout; symlinks,
@@ -272,6 +277,10 @@ Claude with GPT, loosen Read-only permissions, or change `compute_verdict`.
   so prior reports and benchmark findings are not review context. These explicit
   denials supplement the instruction to read only the isolated checkout; they
   are not a claim of a complete host-filesystem sandbox.
+  Rollback backups use bytes, preserving CRLF and non-UTF-8 legacy Markdown.
+  Existing Markdown has no authoritative schema: it is preserved verbatim;
+  malformed authoritative JSON still blocks replacement. Replacing an orphan
+  non-UTF-8 Markdown artifact is permitted only after its bytes are archived.
 - The human report starts with a numbered findings index linking each item to its
   structured location. Full evidence remains below; Codex dispositions are not
   invented by the renderer. This supports targeted parallel checks and avoids

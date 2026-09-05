@@ -586,6 +586,30 @@ def test_runner_rejects_invalid_or_unbounded_notes_safely(tmp_path, monkeypatch,
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("field", ["evidence", "limitations"])
+def test_runner_rejects_invalid_report_text_before_staging(tmp_path, monkeypatch, field):
+    prepare_review_preflights(monkeypatch, tmp_path)
+    payload = {"tests_run": [], "findings": [], "limitations": []}
+    if field == "evidence":
+        finding = model_finding("low").model_dump(mode="json")
+        finding["evidence"] = "\ud800"
+        payload["findings"] = [finding]
+    else:
+        payload["limitations"] = ["\ud800"]
+    report_dir = tmp_path / "reports"
+    with pytest.raises(review.ReviewError, match="schema validation"):
+        review.run_review(
+            repo=tmp_path, base_ref="base", acceptance="works", risk="mandatory",
+            original_symptom="none", report_dir=report_dir,
+            runner=lambda argv, **kwargs: completed(argv, stdout=json.dumps(payload)),
+        )
+    diagnostic = next(report_dir.glob("runs/*/*/run.json"))
+    assert set(diagnostic.parent.iterdir()) == {diagnostic}
+    assert json.loads(diagnostic.read_text())["reason_code"] == "invalid-schema"
+    assert not list(report_dir.glob("*.claude.*"))
+
+
+@pytest.mark.unit
 def test_runner_rejects_model_test_attestations_instead_of_overriding_them(tmp_path, monkeypatch):
     prepare_review_preflights(monkeypatch, tmp_path)
     with pytest.raises(review.ReviewError, match="harness-owned"):
@@ -723,12 +747,13 @@ def test_invalid_previous_evidence_blocks_replacement_without_touching_bytes(tmp
 
 
 @pytest.mark.unit
-def test_orphaned_previous_markdown_is_preserved_before_publication(tmp_path, monkeypatch):
+@pytest.mark.parametrize("old_bytes", [b"original markdown\r\n", b"\xff\r\n"])
+def test_orphaned_previous_markdown_is_preserved_before_publication(tmp_path, monkeypatch, old_bytes):
     prepare_review_preflights(monkeypatch, tmp_path)
     report_dir = tmp_path / "reports"
     report_dir.mkdir()
     markdown = report_dir / f"{'b' * 40}.claude.md"
-    markdown.write_bytes(b"original markdown\r\n")
+    markdown.write_bytes(old_bytes)
     outcome = review.run_review(
         repo=tmp_path, base_ref="base", acceptance="works", risk="mandatory",
         original_symptom="none", report_dir=report_dir,
@@ -739,7 +764,7 @@ def test_orphaned_previous_markdown_is_preserved_before_publication(tmp_path, mo
     assert outcome.json_path.exists()
     previous = list(report_dir.glob("runs/*/*/previous/*.md"))
     assert len(previous) == 1
-    assert previous[0].read_bytes() == b"original markdown\r\n"
+    assert previous[0].read_bytes() == old_bytes
     assert not list(report_dir.glob("runs/*/*/previous/*.json"))
 
 
@@ -1012,6 +1037,28 @@ def test_layer1_failure_has_bounded_sanitized_step_summary(tmp_path):
 
 
 @pytest.mark.unit
+def test_packet_and_failure_attribution_follow_authoritative_step_names(tmp_path, monkeypatch):
+    source = tmp_path / "devtools" / "verification" / "offline.py"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(Path(offline.__file__).read_bytes())
+    build_steps = offline.build_steps
+    monkeypatch.setattr(offline, "build_steps", lambda *args, **kwargs: (
+        *build_steps(*args, **kwargs), offline.GateStep("audit", ("python", "-m", "audit")),
+    ))
+    packet = review.build_review_packet(
+        repo=tmp_path, base_sha="a" * 40, head_sha="b" * 40, diff="diff",
+        changed_files=[], acceptance="works", risk="mandatory", original_symptom="none",
+        layer1_result="==> audit: private invocation details",
+    )
+    assert "Layer 1 completed: audit." in packet
+    assert "private invocation details" not in packet
+    with pytest.raises(review.ReviewError, match=r"exited 7 \(audit\)"):
+        review.run_layer1(tmp_path, Path("python"), runner=lambda argv, **kwargs: completed(
+            argv, code=7, stdout="==> audit: private invocation details",
+        ))
+
+
+@pytest.mark.unit
 def test_target_gate_definition_mismatch_stops_before_subprocess_or_model(tmp_path, monkeypatch):
     real_layer1 = review.run_layer1
     prepare_review_preflights(monkeypatch, tmp_path)
@@ -1217,6 +1264,13 @@ def test_atomic_write_failure_leaves_no_final_or_temp_file(tmp_path, monkeypatch
         review.atomic_write_text(target, "{}\n")
     assert not target.exists()
     assert not list(tmp_path.glob(f".{target.name}.*"))
+
+
+@pytest.mark.unit
+def test_invalid_text_does_not_create_a_staged_file(tmp_path):
+    with pytest.raises(review.ReviewError, match="text encoding"):
+        review._stage_text(tmp_path / "report.md", "\ud800")
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.unit
@@ -1502,6 +1556,8 @@ def test_review_settings_deny_preexisting_paths_but_not_isolated_checkout(
     common = tmp_path / "git-common"
     isolated = tmp_path / "isolated"
     report_dir = tmp_path / "reports"
+    configured = tmp_path / "configured-verification"
+    monkeypatch.setenv("TRADINGAGENTS_VERIFICATION_DIR", str(configured))
     prepare_review_preflights(monkeypatch, tmp_path)
     monkeypatch.setattr(review, "review_boundaries", lambda *args, **kwargs: (repo, common))
     seen = {}
@@ -1523,7 +1579,7 @@ def test_review_settings_deny_preexisting_paths_but_not_isolated_checkout(
     denied = json.loads(seen["argv"][seen["argv"].index("--settings") + 1])["permissions"][
         "deny"
     ]
-    for path in (repo, common, report_dir, Path.home() / ".tradingagents" / "verification"):
+    for path in (repo, common, report_dir, configured, Path.home() / ".tradingagents" / "verification"):
         assert f"Read(/{path}/**)" in denied
     assert f"Read(/{isolated}/**)" not in denied
 
@@ -1664,8 +1720,9 @@ def test_check_cli_rejects_relative_report_directory(monkeypatch, capsys):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("old_md", [b"old markdown\r\n", b"\xff\r\n"])
 def test_persist_report_restores_preexisting_pair_when_markdown_replace_fails(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, old_md,
 ):
     report_dir = tmp_path / "reports"
     old = model_report(head_sha="b" * 40)
@@ -1673,9 +1730,8 @@ def test_persist_report_restores_preexisting_pair_when_markdown_replace_fails(
     markdown_path = report_dir / f"{old.head_sha}.claude.md"
     report_dir.mkdir()
     old_json = old.model_dump_json() + "\n"
-    old_markdown = "# previously valid evidence\n"
     json_path.write_text(old_json, encoding="utf-8")
-    markdown_path.write_text(old_markdown, encoding="utf-8")
+    markdown_path.write_bytes(old_md)
     replacements = []
     real_replace = review.os.replace
 
@@ -1689,7 +1745,8 @@ def test_persist_report_restores_preexisting_pair_when_markdown_replace_fails(
     with pytest.raises(review.ReviewError, match="write report"):
         review._persist_report(model_report(findings=[model_finding("medium")]), report_dir)
     assert json_path.read_text(encoding="utf-8") == old_json
-    assert markdown_path.read_text(encoding="utf-8") == old_markdown
+    assert markdown_path.read_bytes() == old_md
+    assert set(report_dir.iterdir()) == {json_path, markdown_path}
 
 
 @pytest.mark.unit

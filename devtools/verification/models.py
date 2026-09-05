@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 SHA_PATTERN = r"^[0-9a-f]{40,64}$"
 
@@ -65,15 +65,21 @@ class ClaudeJudgment(StrictModel):
         default_factory=list, max_length=32,
     )
 
-    @field_validator("review_notes")
-    @classmethod
-    def notes_are_utf8(cls, notes: list[str]) -> list[str]:
-        for note in notes:
-            try:
-                note.encode("utf-8")
-            except UnicodeEncodeError as exc:
-                raise ValueError("review notes must be valid UTF-8 text") from exc
-        return notes
+    @model_validator(mode="after")
+    def text_is_utf8(self) -> ClaudeJudgment:
+        values: list[object] = [self.model_dump(mode="python")]
+        while values:
+            value = values.pop()
+            if isinstance(value, str):
+                try:
+                    value.encode("utf-8")
+                except UnicodeEncodeError as exc:
+                    raise ValueError("review text must be valid UTF-8 text") from exc
+            elif isinstance(value, dict):
+                values.extend(value.values())
+            elif isinstance(value, list):
+                values.extend(value)
+        return self
 
 
 class Waiver(StrictModel):

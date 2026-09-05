@@ -29,6 +29,7 @@ from devtools.verification.models import (
     build_waiver_report,
 )
 from devtools.verification.review_context import (
+    gate_step_names,
     harness_test_evidence,
     navigation_index,
     validate_gate_definition,
@@ -221,7 +222,7 @@ def build_review_packet(
     for line in layer1_result.splitlines():
         if line.startswith("==> "):
             step = line.removeprefix("==> ").partition(":")[0]
-            if step in {"tests", "lint", "diff"} and step not in completed_steps:
+            if step in gate_step_names() and step not in completed_steps:
                 completed_steps.append(step)
     layer1_summary = (
         f"Layer 1 completed: {', '.join(completed_steps)}."
@@ -263,7 +264,7 @@ This is a reading aid, not an exhaustive dependency map or proof of coverage.
 {redact_primary_path(risk)}
 
 ## Layer 1 deterministic commands and result
-The exact head checkout was checked with pytest, ruff, and git diff --check.
+The exact head checkout was checked with the authoritative offline commands below.
 {layer1_summary}
 Normalized command/evidence records (executable paths redacted):
 {evidence}
@@ -487,7 +488,7 @@ def run_layer1(
             for line in output.splitlines():
                 if line.startswith("==> "):
                     candidate = line.removeprefix("==> ").partition(":")[0]
-                    if candidate in {"tests", "lint", "diff"}:
+                    if candidate in gate_step_names():
                         step = candidate
                         break
             if step != "unknown step":
@@ -531,13 +532,21 @@ def _claude_argv(boundaries: Sequence[Path]) -> list[str]:
 
 
 def _stage_text(path: Path, content: str) -> Path:
-    """Write and fsync a report artifact without replacing its destination."""
+    """Validate encoding before creating any staged artifact."""
+    try:
+        encoded = content.encode("utf-8")
+    except UnicodeError as exc:
+        raise ReviewError("invalid report text encoding", code="invalid-report-text") from exc
+    return _stage_bytes(path, encoded)
+
+
+def _stage_bytes(path: Path, content: bytes) -> Path:
+    """Write and fsync exact bytes without replacing their destination."""
     temporary: Path | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
+            mode="wb",
             dir=path.parent,
             prefix=f".{path.name}.",
             delete=False,
@@ -649,7 +658,7 @@ def _persist_report(report: ReviewReport, report_dir: Path) -> ReviewOutcome:
         staged[1] = _stage_text(markdown_path, markdown_text)
         for index, path in enumerate(paths):
             if path.exists():
-                backups[index] = _stage_text(path, path.read_text(encoding="utf-8"))
+                backups[index] = _stage_bytes(path, path.read_bytes())
         for index, path in enumerate(paths):
             os.replace(staged[index], path)
             staged[index] = None
