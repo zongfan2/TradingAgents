@@ -215,6 +215,80 @@ for humans and must not contradict the JSON verdict.
 
 ## End-to-End Development Flow
 
+### 2026-09-05 efficiency revision (user-approved scope)
+
+The four approved improvements are evidence handoff, navigable review context,
+stage timing, and a concise finding-disposition handoff. They do not replace
+Claude with GPT, loosen Read-only permissions, or change `compute_verdict`.
+
+- Layer 1 remains mandatory in the detached exact-head checkout. The harness
+  supplies the three successful normalized commands in persisted `tests_run`;
+  their summaries explicitly identify harness execution. Only allowlisted pytest
+  counts are extracted from captured output, never arbitrary stdout/stderr.
+  Claude returns `tests_run: []`; an attempted model-authored test attestation is
+  rejected rather than silently trusted, removed, or converted to pass.
+- Claude may return `review_notes` for informational scope/permission statements
+  and positive confirmations. These notes go to the per-run diagnostic archive,
+  not the v1 report's `limitations`. `limitations` continues to mean material
+  missing verification; every actual finding/limitation retains its old verdict
+  effect. Existing v1 reports and user-waiver behavior remain unchanged. Historical
+  reports are never normalized or rewritten to remove warnings.
+- The packet contains an exact-head file/heading/function navigation index.
+  Explicit repeatable `--context-file` paths must be safe repository-relative,
+  non-secret source/spec/test files present in that detached checkout; symlinks,
+  hidden paths, traversal and missing files are rejected. Navigation is a reading
+  aid, not a substitute for independent source inspection. Findings must provide
+  structured file and positive line fields, or explain why location is unknown.
+  The packet distinguishes approved tradeoffs from defects and docs-only scope
+  from unimplemented requirements; it must not instruct the reviewer to pass.
+- Each authenticated review run has a random run ID and a diagnostic JSON under
+  `verification/runs/<head-sha>/<run-id>/`. It records exact identity, stage
+  start/end and monotonic durations, packet byte count/hash, safe failure category,
+  and informational notes. Stage transitions are emitted to stderr; stdout keeps
+  its existing final-result contract. Raw subprocess output, secrets, primary
+  paths and model reasoning are not diagnostic artifacts. An unfinished archive
+  means interrupted/unknown, not a successful review. Timings measure the whole
+  Claude CLI boundary, not unobserved provider reasoning time.
+- Completed per-run archives retain the validated JSON/Markdown report before
+  updating the existing `<head>.claude.*` convenience paths. Repeated reviews of
+  the same head therefore retain prior attempts. Before replacement, any existing
+  pair (including pre-upgrade evidence) is validated and preserved byte-for-byte
+  under the new run's `previous/` directory; invalid or symlinked prior evidence
+  blocks replacement. Diagnostic or archive write
+  failure blocks success; failure recording must not mask the original error.
+  Optional missing-auth behavior still runs Layer 1 without creating a report.
+- The human report starts with a numbered findings index linking each item to its
+  structured location. Full evidence remains below; Codex dispositions are not
+  invented by the renderer. This supports targeted parallel checks and avoids
+  reading both JSON and Markdown to discover the same findings.
+
+The explicitly requested GPT comparison is a separate, bounded live experiment:
+use existing authenticated CLI subscriptions, identical frozen source material,
+no tools or external integration access, fixed parameters and reported limits.
+Archive results under `verification/benchmarks/`, never as a Claude gate report.
+Measure wall time and review quality separately; unsupported models, timeouts,
+single-sample uncertainty and unequal provider internals remain visible.
+If the Codex CLI cannot hide `apply_patch`, retain read-only sandboxing with all
+other external tools disabled; only samples with zero observed tool invocations
+qualify as packet-only. Record the tool-visibility difference, reject tool-using
+samples, and never loosen the sandbox to complete a benchmark.
+
+Example explicit reading navigation for a workflow review:
+
+```bash
+.venv/bin/python -m devtools.verification.claude_review run --base HEAD~1 --head HEAD \
+  --acceptance "Verify the committed workflow change and its regression tests" \
+  --risk "mandatory: verification interface and evidence integrity" \
+  --original-symptom "Reviewer test attribution and timing were ambiguous" \
+  --context-file devtools/verification/models.py \
+  --context-file tests/test_claude_review.py
+```
+
+Stage progress appears on stderr during the run. After completion, use the normal
+`check --head HEAD` command; inspect `runs/<head>/<run-id>/run.json` for timings and
+safe reason codes, and the Markdown finding index for targeted disposition. A
+diagnostic artifact is not an acceptance report and does not override `check`.
+
 1. Codex reads the contract and component spec before changing a shared interface.
 2. Feature work uses design and implementation planning; bug work uses systematic
    diagnosis. Behavior changes are developed with a failing regression test first.

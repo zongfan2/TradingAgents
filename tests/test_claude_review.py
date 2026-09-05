@@ -549,6 +549,176 @@ def test_run_review_stamps_identity_and_writes_both_reports(tmp_path, monkeypatc
 
 
 @pytest.mark.unit
+def test_runner_owns_test_evidence_and_keeps_notes_out_of_real_limitations(tmp_path, monkeypatch):
+    prepare_review_preflights(monkeypatch, tmp_path)
+    outcome = review.run_review(
+        repo=tmp_path, base_ref="base", acceptance="works", risk="mandatory",
+        original_symptom="none", report_dir=tmp_path / "reports",
+        runner=lambda argv, **kwargs: completed(argv, stdout=json.dumps({
+            "tests_run": [], "findings": [], "limitations": [],
+            "review_notes": ["Read-only reviewer; harness executed the tests."],
+        })),
+    )
+    assert outcome.report.verdict.value == "pass"
+    assert len(outcome.report.tests_run) == 3
+    assert all(item.status.value == "pass" and "harness" in item.summary for item in outcome.report.tests_run)
+    assert outcome.report.limitations == []
+
+
+@pytest.mark.unit
+def test_runner_rejects_model_test_attestations_instead_of_overriding_them(tmp_path, monkeypatch):
+    prepare_review_preflights(monkeypatch, tmp_path)
+    with pytest.raises(review.ReviewError, match="harness-owned"):
+        review.run_review(
+            repo=tmp_path, base_ref="base", acceptance="works", risk="mandatory",
+            original_symptom="none", report_dir=tmp_path / "reports",
+            runner=lambda argv, **kwargs: completed(argv, stdout=json.dumps({
+                "tests_run": [{"command": "pytest", "status": "not_run", "summary": "Read only"}],
+                "findings": [], "limitations": [],
+            })),
+        )
+    assert not (tmp_path / "reports" / f"{'b' * 40}.claude.json").exists()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("findings", "limitations", "verdict"), [
+    ([], ["Required regression behavior was not verified"], "warn"),
+    ([model_finding("high").model_dump(mode="json")], [], "fail"),
+])
+def test_harness_pass_and_informational_notes_never_clear_real_review_risk(
+    tmp_path, monkeypatch, findings, limitations, verdict,
+):
+    prepare_review_preflights(monkeypatch, tmp_path)
+    outcome = review.run_review(
+        repo=tmp_path, base_ref="base", acceptance="works", risk="mandatory",
+        original_symptom="none", report_dir=tmp_path / "reports",
+        runner=lambda argv, **kwargs: completed(argv, stdout=json.dumps({
+            "tests_run": [], "findings": findings, "limitations": limitations,
+            "review_notes": ["Read only by policy"],
+        })),
+    )
+    assert outcome.report.verdict.value == verdict
+    assert outcome.report.limitations == limitations
+
+
+@pytest.mark.unit
+def test_diagnostic_completion_failure_does_not_publish_current_report(tmp_path, monkeypatch):
+    prepare_review_preflights(monkeypatch, tmp_path)
+    original = review.ReviewRuntime.finish
+
+    def fail_completion(self, status):
+        if status == "complete":
+            raise OSError("disk full")
+        return original(self, status)
+
+    monkeypatch.setattr(review.ReviewRuntime, "finish", fail_completion)
+    with pytest.raises(review.ReviewError, match="diagnostics"):
+        review.run_review(
+            repo=tmp_path, base_ref="base", acceptance="works", risk="mandatory",
+            original_symptom="none", report_dir=tmp_path / "reports",
+            runner=lambda argv, **kwargs: completed(argv, stdout=json.dumps({
+                "tests_run": [], "findings": [], "limitations": [],
+            })),
+        )
+    assert not list((tmp_path / "reports").glob("*.claude.*"))
+
+
+@pytest.mark.unit
+def test_same_head_reviews_retain_each_archive_and_phase_timings(tmp_path, monkeypatch):
+    prepare_review_preflights(monkeypatch, tmp_path)
+    for _ in range(2):
+        review.run_review(
+            repo=tmp_path, base_ref="base", acceptance="works", risk="mandatory",
+            original_symptom="none", report_dir=tmp_path / "reports",
+            runner=lambda argv, **kwargs: completed(argv, stdout=json.dumps({
+                "tests_run": [], "findings": [], "limitations": [], "review_notes": ["scope note"],
+            })),
+        )
+    archives = list((tmp_path / "reports" / "runs" / ("b" * 40)).iterdir())
+    assert len(archives) == 2
+    for archive in archives:
+        data = json.loads((archive / "run.json").read_text())
+        assert data["status"] == "complete"
+        assert data["review_notes"] == ["scope note"]
+        assert {stage["name"] for stage in data["stages"]} >= {"layer1", "packet", "claude", "validation", "persistence"}
+        assert (archive / f"{'b' * 40}.claude.json").exists()
+        assert (archive / f"{'b' * 40}.claude.md").exists()
+
+
+@pytest.mark.unit
+def test_upgrading_runner_preserves_exact_legacy_report_bytes(tmp_path, monkeypatch):
+    prepare_review_preflights(monkeypatch, tmp_path)
+    report_dir = tmp_path / "reports"
+    old = model_report(findings=[model_finding("medium")])
+    review._persist_report(old, report_dir)
+    json_path = report_dir / f"{old.head_sha}.claude.json"
+    markdown_path = json_path.with_suffix(".md")
+    old_json = json_path.read_bytes()
+    old_md = markdown_path.read_bytes()
+    outcome = review.run_review(
+        repo=tmp_path, base_ref="base", acceptance="works", risk="mandatory",
+        original_symptom="none", report_dir=report_dir,
+        runner=lambda argv, **kwargs: completed(argv, stdout=json.dumps({
+            "tests_run": [], "findings": [], "limitations": [],
+        })),
+    )
+    assert outcome.report.verdict.value == "pass"
+    preserved = list(report_dir.glob("runs/*/*/previous/*.json"))
+    assert len(preserved) == 1 and preserved[0].read_bytes() == old_json
+    assert preserved[0].with_suffix(".md").read_bytes() == old_md
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("output", "reason"), [
+    ("not JSON", "invalid-json"), ("{}", "invalid-schema"),
+])
+def test_diagnostics_distinguish_response_failures_without_raw_output(tmp_path, monkeypatch, output, reason):
+    prepare_review_preflights(monkeypatch, tmp_path)
+    with pytest.raises(review.ReviewError):
+        review.run_review(
+            repo=tmp_path, base_ref="base", acceptance="works", risk="mandatory",
+            original_symptom="none", report_dir=tmp_path / "reports",
+            runner=lambda argv, **kwargs: completed(argv, stdout=output),
+        )
+    diagnostic = next((tmp_path / "reports").glob("runs/*/*/run.json"))
+    data = json.loads(diagnostic.read_text())
+    assert data["reason_code"] == reason
+    assert data["stages"][-1]["reason_code"] == reason
+
+
+@pytest.mark.unit
+def test_failed_checkout_is_a_categorized_stage_and_never_calls_model(tmp_path, monkeypatch):
+    prepare_review_preflights(monkeypatch, tmp_path)
+
+    @contextmanager
+    def unavailable(*args, **kwargs):
+        raise review.ReviewError("could not create detached review worktree", code="checkout-failed")
+        yield
+
+    monkeypatch.setattr(review, "detached_worktree", unavailable)
+    with pytest.raises(review.ReviewError, match="worktree"):
+        review.run_review(
+            repo=tmp_path, base_ref="base", acceptance="works", risk="mandatory",
+            original_symptom="none", report_dir=tmp_path / "reports",
+            runner=lambda *args, **kwargs: pytest.fail("model must not run"),
+        )
+    diagnostic = next((tmp_path / "reports").glob("runs/*/*/run.json"))
+    data = json.loads(diagnostic.read_text())
+    assert data["reason_code"] == "checkout-failed"
+    assert data["stages"][0]["name"] == "checkout"
+    assert data["stages"][0]["status"] == "error"
+
+
+@pytest.mark.unit
+def test_report_index_locates_findings_without_hiding_evidence():
+    report = model_report(findings=[model_finding("medium")])
+    rendered = review.render_markdown(report)
+    assert "## Finding index" in rendered
+    assert "F1" in rendered and "pipeline/x.py:10" in rendered
+    assert "Evidence: evidence" in rendered
+
+
+@pytest.mark.unit
 def test_required_missing_auth_raises_immediately(tmp_path, monkeypatch):
     def unavailable(**kwargs):
         raise review.AuthUnavailable("not logged in")
@@ -899,7 +1069,13 @@ def test_invalid_claude_json_writes_no_partial_report(tmp_path, monkeypatch):
             original_symptom="none",
             runner=lambda argv, **kwargs: completed(argv, stdout="not json"),
         )
-    assert not list((tmp_path / "reports").glob("*"))
+    assert not list((tmp_path / "reports").glob("*.claude.*"))
+    diagnostics = list((tmp_path / "reports").glob("runs/*/*/run.json"))
+    assert len(diagnostics) == 1
+    data = json.loads(diagnostics[0].read_text())
+    assert data["status"] == "error"
+    assert data["stages"][-1]["name"] == "validation"
+    assert data["stages"][-1]["status"] == "error"
 
 
 @pytest.mark.unit
@@ -1526,4 +1702,7 @@ def test_second_artifact_replacement_failure_leaves_no_new_report_pair(tmp_path,
                 stdout='{"tests_run": [], "findings": [], "limitations": []}',
             ),
         )
-    assert not list(report_dir.glob("*"))
+    assert not list(report_dir.glob("*.claude.*"))
+    diagnostics = list(report_dir.glob("runs/*/*/run.json"))
+    assert len(diagnostics) == 1
+    assert json.loads(diagnostics[0].read_text())["status"] == "error"

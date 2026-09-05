@@ -61,6 +61,7 @@ class ClaudeJudgment(StrictModel):
     tests_run: list[TestRun]
     findings: list[Finding]
     limitations: list[str]
+    review_notes: list[str] = Field(default_factory=list)
 
 
 class Waiver(StrictModel):
@@ -123,15 +124,17 @@ def build_report(
     base_sha: str,
     head_sha: str,
     reviewed_at: datetime,
+    harness_tests: Sequence[TestRun] | None = None,
 ) -> ReviewReport:
+    tests = list(harness_tests) if harness_tests is not None else judgment.tests_run
     return ReviewReport(
         base_sha=base_sha,
         head_sha=head_sha,
         reviewed_at=reviewed_at,
         verdict=compute_verdict(
-            judgment.tests_run, judgment.findings, judgment.limitations
+            tests, judgment.findings, judgment.limitations
         ),
-        tests_run=judgment.tests_run,
+        tests_run=tests,
         findings=judgment.findings,
         limitations=judgment.limitations,
     )

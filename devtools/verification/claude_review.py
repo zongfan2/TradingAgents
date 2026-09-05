@@ -11,7 +11,7 @@ import sys
 import tempfile
 import warnings
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,10 +28,16 @@ from devtools.verification.models import (
     build_report,
     build_waiver_report,
 )
+from devtools.verification.review_context import harness_test_evidence, navigation_index
+from devtools.verification.review_runtime import ReviewRuntime, reason_code
 
 
 class ReviewError(RuntimeError):
     """A review preflight or validation failed."""
+
+    def __init__(self, message: str, *, code: str = "review-error") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class AuthUnavailable(ReviewError):
@@ -170,18 +176,18 @@ def parse_judgment(output: str) -> ClaudeJudgment:
     if stripped.startswith("```"):
         fence = _JSON_FENCE_RE.fullmatch(stripped)
         if fence is None:
-            raise ReviewError("Claude did not return valid judgment JSON")
+            raise ReviewError("Claude did not return valid judgment JSON", code="invalid-json")
         stripped = fence.group("body")
     try:
         payload = json.loads(stripped)
     except (json.JSONDecodeError, TypeError) as exc:
-        raise ReviewError("Claude did not return valid judgment JSON") from exc
+        raise ReviewError("Claude did not return valid judgment JSON", code="invalid-json") from exc
     if not isinstance(payload, dict):
-        raise ReviewError("Claude did not return valid judgment JSON object")
+        raise ReviewError("Claude did not return valid judgment JSON object", code="invalid-json")
     try:
         return ClaudeJudgment.model_validate(payload)
     except ValidationError as exc:
-        raise ReviewError("Claude judgment failed schema validation") from exc
+        raise ReviewError("Claude judgment failed schema validation", code="invalid-schema") from exc
 
 
 def build_review_packet(
@@ -195,6 +201,7 @@ def build_review_packet(
     risk: str,
     layer1_result: str,
     original_symptom: str,
+    navigation: str = "",
 ) -> str:
     """Build a bounded, secret-free independent-review prompt."""
     primary_paths = sorted({str(repo), str(repo.resolve())}, key=len, reverse=True)
@@ -217,6 +224,10 @@ def build_review_packet(
         if completed_steps
         else "Layer 1 deterministic gate completed."
     )
+    evidence = json.dumps(
+        [item.model_dump(mode="json") for item in harness_test_evidence(layer1_result)],
+        ensure_ascii=False,
+    )
     return f"""# Independent Claude Code review packet
 
 ## Roles and authority
@@ -234,6 +245,10 @@ Read AGENTS.md plus applicable governing component specs and data contracts in t
 repository. Check the requested behavior, committed regression tests, and diff
 against those sources of truth.
 
+## Exact-head reading navigation
+{redact_primary_path(navigation)}
+This is a reading aid, not an exhaustive dependency map or proof of coverage.
+
 ## Changed files
 {paths}
 
@@ -246,6 +261,11 @@ against those sources of truth.
 ## Layer 1 deterministic commands and result
 The exact head checkout was checked with pytest, ruff, and git diff --check.
 {layer1_summary}
+Normalized command/evidence records (executable paths redacted):
+{evidence}
+The harness owns these test attestations. Return tests_run: []; do not claim
+to have executed tests, and do not reclassify harness tests as not_run because
+your role is Read-only. Report an actually missing required validation in limitations.
 
 ## Original symptom and regression-test context
 {redact_primary_path(original_symptom)}
@@ -265,6 +285,17 @@ additional model/API quota. Layer 3 has not been requested.
 Return JSON only: exactly one object matching the schema below. Do not add prose,
 Markdown fences, identity fields, a verdict, or unknown fields. The harness derives
 the verdict and stamps immutable review identity.
+Use review_notes for informational scope boundaries and positive confirmations.
+Use limitations only for material gaps in required verification, not the intentional
+Read-only role or unrequested external tests. Never move material uncertainty or
+findings into review_notes.
+For every finding, populate file with a repository-relative source path and line
+with the specific positive line number; if location cannot be identified, explain
+why in evidence. Distinguish demonstrated defects from optional improvements and
+explicitly approved tradeoffs. For docs-only changes, inspect design consistency;
+do not report the absence of its future implementation as a defect by itself.
+Keep each finding concise: concrete failure, evidence, and a test; avoid repeating
+the packet. Independently verify all claims and broaden inspection when necessary.
 
 ```json
 {schema}
@@ -292,9 +323,9 @@ def detached_worktree(
             try:
                 result = runner(argv, cwd=repo, timeout=120, shell=False)
             except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-                raise ReviewError("could not create detached review worktree") from exc
+                raise ReviewError("could not create detached review worktree", code="checkout-failed") from exc
             if result.returncode:
-                raise ReviewError("could not create detached review worktree")
+                raise ReviewError("could not create detached review worktree", code="checkout-failed")
             yield target
         finally:
             cleanup_commands = (
@@ -433,7 +464,7 @@ def run_layer1(
     except FileNotFoundError as exc:
         raise ReviewError("Layer 1 Python executable not found") from exc
     except subprocess.TimeoutExpired as exc:
-        raise ReviewError("Layer 1 verification timed out") from exc
+        raise ReviewError("Layer 1 verification timed out", code="layer1-timeout") from exc
     except OSError as exc:
         raise ReviewError("Layer 1 verification could not start") from exc
     if result.returncode:
@@ -449,7 +480,7 @@ def run_layer1(
                         break
             if step != "unknown step":
                 break
-        raise ReviewError(f"Layer 1 verification exited {result.returncode} ({step})")
+        raise ReviewError(f"Layer 1 verification exited {result.returncode} ({step})", code="layer1-failed")
     return "\n".join(
         text.strip()
         for text in (result.stdout, result.stderr)
@@ -548,6 +579,13 @@ def render_markdown(report: ReviewReport) -> str:
             )
     else:
         lines.append("No tests reported.")
+    if report.findings:
+        lines.extend(["", "## Finding index", ""])
+        for index, finding in enumerate(report.findings, 1):
+            location = finding.file or "location unexplained"
+            if finding.line is not None:
+                location += f":{finding.line}"
+            lines.append(f"- F{index} [{finding.severity.value}] {location} — {finding.title}")
     lines.extend(["", "## Findings", ""])
     if report.findings:
         for finding in report.findings:
@@ -624,6 +662,26 @@ def _persist_report(report: ReviewReport, report_dir: Path) -> ReviewOutcome:
     return ReviewOutcome(report, json_path, markdown_path)
 
 
+def _preserve_previous_report(report_dir: Path, archive: Path, head_sha: str) -> None:
+    """Retain exact old bytes, including pre-upgrade reports, before replacement."""
+    json_path = report_dir / f"{head_sha}.claude.json"
+    markdown_path = report_dir / f"{head_sha}.claude.md"
+    for path in (json_path, markdown_path):
+        if path.is_symlink():
+            raise ReviewError("previous report must not be symlinked")
+    if json_path.exists():
+        load_current_report(json_path, expected_head=head_sha)
+    for path in (json_path, markdown_path):
+        if path.exists():
+            # Read and write bytes so CRLF and original formatting are preserved.
+            previous = archive / "previous" / path.name
+            previous.parent.mkdir(exist_ok=True)
+            with previous.open("xb") as stream:
+                stream.write(path.read_bytes())
+                stream.flush()
+                os.fsync(stream.fileno())
+
+
 def load_current_report(path: Path, *, expected_head: str) -> ReviewReport:
     """Load authoritative JSON and require an exact resolved-head binding."""
     try:
@@ -663,6 +721,7 @@ def run_review(
     required: bool = True,
     runner: Runner = default_runner,
     clock: Clock = _utc_now,
+    context_files: Sequence[str] = (),
 ) -> ReviewOutcome | None:
     """Run an independent review against an immutable isolated revision."""
     _required_text(acceptance, "acceptance")
@@ -692,47 +751,80 @@ def run_review(
         diff = git_diff(repo, base_sha, head_sha, runner=runner)
         paths = changed_files(repo, base_sha, head_sha, runner=runner)
 
-    with detached_worktree(repo, head_sha, runner=runner) as isolated:
-        layer1_result = run_layer1(isolated, python, runner=runner)
-        if not auth_available:
-            return None
-        packet = build_review_packet(
-            repo=repo,
-            base_sha=base_sha,
-            head_sha=head_sha,
-            diff=diff,
-            changed_files=paths,
-            acceptance=acceptance,
-            risk=risk,
-            layer1_result=layer1_result,
-            original_symptom=original_symptom,
-        )
-        argv = _claude_argv(boundaries)
-        try:
-            result = runner(
-                argv,
-                cwd=isolated,
-                input=packet,
-                timeout=timeout,
-                shell=False,
-            )
-        except FileNotFoundError as exc:
-            raise ReviewError("Claude CLI not found") from exc
-        except subprocess.TimeoutExpired as exc:
-            raise ReviewError("Claude review timed out") from exc
-        except OSError as exc:
-            raise ReviewError("Claude review could not start") from exc
-        if result.returncode:
-            raise ReviewError(f"Claude review exited {result.returncode}")
-        judgment = parse_judgment(result.stdout)
+    if not auth_available:
+        with detached_worktree(repo, head_sha, runner=runner) as isolated:
+            run_layer1(isolated, python, runner=runner)
+        return None
 
-    report = build_report(
-        judgment,
-        base_sha=base_sha,
-        head_sha=head_sha,
-        reviewed_at=_clock_utc(clock),
-    )
-    return _persist_report(report, persisted_report_dir)
+    try:
+        runtime = ReviewRuntime(persisted_report_dir, base_sha, head_sha, clock=clock)
+    except (OSError, ValueError) as exc:
+        raise ReviewError("could not initialize review diagnostics") from exc
+    try:
+        with ExitStack() as stack:
+            with runtime.stage("checkout"):
+                isolated = stack.enter_context(detached_worktree(repo, head_sha, runner=runner))
+            with runtime.stage("layer1"):
+                layer1_result = run_layer1(isolated, python, runner=runner)
+            with runtime.stage("packet"):
+                try:
+                    navigation = navigation_index(
+                        isolated, ["AGENTS.md", "specs/README.md", *paths],
+                        explicit=context_files,
+                    )
+                except (ValueError, OSError) as exc:
+                    raise ReviewError("invalid review context file", code="invalid-context") from exc
+                packet = build_review_packet(
+                    repo=repo, base_sha=base_sha, head_sha=head_sha, diff=diff,
+                    changed_files=paths, acceptance=acceptance, risk=risk,
+                    layer1_result=layer1_result, original_symptom=original_symptom,
+                    navigation=navigation,
+                )
+                runtime.packet(packet)
+            with runtime.stage("claude"):
+                try:
+                    result = runner(
+                        _claude_argv(boundaries), cwd=isolated, input=packet,
+                        timeout=timeout, shell=False,
+                    )
+                except FileNotFoundError as exc:
+                    raise ReviewError("Claude CLI not found", code="cli-not-found") from exc
+                except subprocess.TimeoutExpired as exc:
+                    raise ReviewError("Claude review timed out", code="claude-timeout") from exc
+                except OSError as exc:
+                    raise ReviewError("Claude review could not start", code="claude-start-failed") from exc
+                if result.returncode:
+                    raise ReviewError(f"Claude review exited {result.returncode}", code="claude-exit")
+            with runtime.stage("validation"):
+                judgment = parse_judgment(result.stdout)
+                if judgment.tests_run:
+                    raise ReviewError("Claude supplied harness-owned test evidence", code="test-evidence-conflict")
+                report = build_report(
+                    judgment, base_sha=base_sha, head_sha=head_sha,
+                    reviewed_at=_clock_utc(clock),
+                    harness_tests=harness_test_evidence(layer1_result),
+                )
+                notes = []
+                for note in judgment.review_notes:
+                    for boundary in sorted({repo, repo.resolve(), *boundaries}, key=lambda p: len(str(p)), reverse=True):
+                        note = note.replace(str(boundary), "<checkout>")
+                    notes.append(note)
+                runtime.data["review_notes"] = notes
+
+        with runtime.stage("persistence"):
+            _preserve_previous_report(persisted_report_dir, runtime.directory, head_sha)
+            _persist_report(report, runtime.directory)
+        # Required diagnostic/archive writes precede publication of the current
+        # report pair. A diagnostic failure cannot publish new passing evidence.
+        runtime.finish("complete")
+        return _persist_report(report, persisted_report_dir)
+    except BaseException as exc:
+        runtime.data["reason_code"] = reason_code(exc)
+        with suppress(OSError):
+            runtime.finish("error")
+        if isinstance(exc, OSError):
+            raise ReviewError("could not persist review diagnostics") from exc
+        raise
 
 
 def write_user_waiver(
@@ -786,6 +878,7 @@ def _parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--report-dir", type=Path)
     run_parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     run_parser.add_argument("--optional", action="store_true")
+    run_parser.add_argument("--context-file", action="append", default=[])
 
     check_parser = subparsers.add_parser(
         "check", help="validate the report bound to an exact head"
@@ -832,6 +925,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 original_symptom=args.original_symptom,
                 timeout=args.timeout,
                 required=not args.optional,
+                context_files=args.context_file,
             )
             if outcome is None:
                 print("optional Claude review unavailable")
