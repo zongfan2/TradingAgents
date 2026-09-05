@@ -490,7 +490,7 @@ def run_layer1(
                     candidate = line.removeprefix("==> ").partition(":")[0]
                     if candidate in gate_step_names():
                         step = candidate
-                        break
+                        # The gate stops on failure: its last started step failed.
             if step != "unknown step":
                 break
         raise ReviewError(f"Layer 1 verification exited {result.returncode} ({step})", code="layer1-failed")

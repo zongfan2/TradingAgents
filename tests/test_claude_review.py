@@ -1037,6 +1037,22 @@ def test_layer1_failure_has_bounded_sanitized_step_summary(tmp_path):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("failed_step", ["lint", "diff"])
+def test_layer1_failure_names_last_started_step(tmp_path, failed_step):
+    source = tmp_path / "devtools" / "verification" / "offline.py"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(Path(offline.__file__).read_bytes())
+    steps = ["tests", "lint"] + (["diff"] if failed_step == "diff" else [])
+    output = "\n".join(f"==> {step}: private command details\nstep output" for step in steps)
+    with pytest.raises(review.ReviewError, match=rf"exited 7 \({failed_step}\)") as error:
+        review.run_layer1(tmp_path, Path("python"), runner=lambda argv, **kwargs: completed(
+            argv, code=7, stdout=output, stderr="private failure details",
+        ))
+    assert "private" not in str(error.value)
+    assert error.value.code == "layer1-failed"
+
+
+@pytest.mark.unit
 def test_packet_and_failure_attribution_follow_authoritative_step_names(tmp_path, monkeypatch):
     source = tmp_path / "devtools" / "verification" / "offline.py"
     source.parent.mkdir(parents=True)
