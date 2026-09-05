@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from devtools.verification import review_context
+from devtools.verification import offline, review_context
 
 
 @pytest.mark.unit
@@ -24,9 +24,90 @@ def test_harness_evidence_retains_counts_without_raw_output():
 
 
 @pytest.mark.unit
+def test_harness_evidence_tracks_authoritative_gate_changes(monkeypatch):
+    original_build_steps = offline.build_steps
+
+    def revised_steps(repo_root, python_executable, only="all"):
+        tests, lint, diff = original_build_steps(repo_root, python_executable, only)
+        return (
+            diff,
+            offline.GateStep(tests.name, (*tests.argv, "--strict-markers")),
+            lint,
+        )
+
+    monkeypatch.setattr(offline, "build_steps", revised_steps)
+    summary = "7 passed in 0.01s"
+    evidence = review_context.harness_test_evidence(summary)
+
+    assert [item.command for item in evidence] == [
+        "git diff --check",
+        "python -m pytest tests/ -q -m 'not integration' --strict-markers",
+        "python -m ruff check .",
+    ]
+    assert summary in evidence[1].summary
+    assert all(summary not in evidence[index].summary for index in (0, 2))
+
+
+@pytest.mark.unit
 def test_harness_evidence_accepts_real_pytest_subtest_and_duration_summary():
     summary = "1612 passed, 1 skipped, 1 deselected, 18 warnings, 85 subtests passed in 93.48s (0:01:33)"
     assert summary in review_context.harness_test_evidence(summary)[0].summary
+
+
+@pytest.mark.unit
+def test_gate_definition_accepts_exact_imported_source(tmp_path):
+    target = tmp_path / "devtools/verification/offline.py"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(Path(offline.__file__).read_bytes())
+
+    assert review_context.validate_gate_definition(tmp_path) is None
+
+
+@pytest.mark.unit
+def test_gate_definition_rejects_different_target_steps_without_source_disclosure(tmp_path):
+    target = tmp_path / "devtools/verification/offline.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("def build_steps(*args):\n    return ()  # private target detail\n")
+
+    with pytest.raises(ValueError, match="gate definition") as error:
+        review_context.validate_gate_definition(tmp_path)
+    assert str(tmp_path) not in str(error.value)
+    assert "private target detail" not in str(error.value)
+
+
+@pytest.mark.unit
+def test_gate_definition_rejects_symlink_even_to_matching_source(tmp_path):
+    target = tmp_path / "devtools/verification/offline.py"
+    target.parent.mkdir(parents=True)
+    target.symlink_to(Path(offline.__file__))
+
+    with pytest.raises(ValueError, match="gate definition"):
+        review_context.validate_gate_definition(tmp_path)
+
+
+@pytest.mark.unit
+def test_gate_definition_rejects_missing_target(tmp_path):
+    with pytest.raises(ValueError, match="gate definition"):
+        review_context.validate_gate_definition(tmp_path)
+
+
+@pytest.mark.unit
+def test_gate_definition_rejects_unreadable_target_without_path_disclosure(tmp_path, monkeypatch):
+    target = tmp_path / "devtools/verification/offline.py"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(Path(offline.__file__).read_bytes())
+    original_read_bytes = Path.read_bytes
+
+    def unreadable(path):
+        if path == target:
+            raise PermissionError("private filesystem detail")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", unreadable)
+    with pytest.raises(ValueError, match="gate definition") as error:
+        review_context.validate_gate_definition(tmp_path)
+    assert str(tmp_path) not in str(error.value)
+    assert "private filesystem detail" not in str(error.value)
 
 
 @pytest.mark.unit

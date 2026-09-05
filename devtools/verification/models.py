@@ -5,9 +5,9 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import datetime
 from enum import Enum
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 SHA_PATTERN = r"^[0-9a-f]{40,64}$"
 
@@ -61,7 +61,19 @@ class ClaudeJudgment(StrictModel):
     tests_run: list[TestRun]
     findings: list[Finding]
     limitations: list[str]
-    review_notes: list[str] = Field(default_factory=list)
+    review_notes: list[Annotated[str, Field(max_length=4000)]] = Field(
+        default_factory=list, max_length=32,
+    )
+
+    @field_validator("review_notes")
+    @classmethod
+    def notes_are_utf8(cls, notes: list[str]) -> list[str]:
+        for note in notes:
+            try:
+                note.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise ValueError("review notes must be valid UTF-8 text") from exc
+        return notes
 
 
 class Waiver(StrictModel):

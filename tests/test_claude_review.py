@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from devtools.verification import claude_review as review
+from devtools.verification import claude_review as review, offline
 from devtools.verification.models import (
     ClaudeJudgment,
     Finding,
@@ -566,6 +566,26 @@ def test_runner_owns_test_evidence_and_keeps_notes_out_of_real_limitations(tmp_p
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("notes", [["\ud800"], ["x" * 4001], ["note"] * 33])
+def test_runner_rejects_invalid_or_unbounded_notes_safely(tmp_path, monkeypatch, notes):
+    prepare_review_preflights(monkeypatch, tmp_path)
+    report_dir = tmp_path / "reports"
+    with pytest.raises(review.ReviewError, match="schema validation"):
+        review.run_review(
+            repo=tmp_path, base_ref="base", acceptance="works", risk="mandatory",
+            original_symptom="none", report_dir=report_dir,
+            runner=lambda argv, **kwargs: completed(argv, stdout=json.dumps({
+                "tests_run": [], "findings": [], "limitations": [], "review_notes": notes,
+            })),
+        )
+    assert not list(report_dir.glob("*.claude.*"))
+    data = json.loads(next(report_dir.glob("runs/*/*/run.json")).read_text())
+    assert data["status"] == "error"
+    assert data["reason_code"] == "invalid-schema"
+    assert data["review_notes"] == []
+
+
+@pytest.mark.unit
 def test_runner_rejects_model_test_attestations_instead_of_overriding_them(tmp_path, monkeypatch):
     prepare_review_preflights(monkeypatch, tmp_path)
     with pytest.raises(review.ReviewError, match="harness-owned"):
@@ -666,6 +686,61 @@ def test_upgrading_runner_preserves_exact_legacy_report_bytes(tmp_path, monkeypa
     preserved = list(report_dir.glob("runs/*/*/previous/*.json"))
     assert len(preserved) == 1 and preserved[0].read_bytes() == old_json
     assert preserved[0].with_suffix(".md").read_bytes() == old_md
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("kind", ["json-symlink", "markdown-symlink", "invalid-json", "invalid-utf8"])
+def test_invalid_previous_evidence_blocks_replacement_without_touching_bytes(tmp_path, monkeypatch, kind):
+    prepare_review_preflights(monkeypatch, tmp_path)
+    report_dir = tmp_path / "reports"
+    old = review._persist_report(model_report(findings=[model_finding("low")]), report_dir)
+    outside = tmp_path / "preserved-evidence"
+    outside.write_bytes(b"external original bytes")
+    if kind.endswith("symlink"):
+        path = old.json_path if kind == "json-symlink" else old.markdown_path
+        path.unlink()
+        path.symlink_to(outside)
+    else:
+        old.json_path.write_bytes(b"not JSON" if kind == "invalid-json" else b"\xff")
+    original_json, original_md = old.json_path.read_bytes(), old.markdown_path.read_bytes()
+    with pytest.raises(review.ReviewError):
+        review.run_review(
+            repo=tmp_path, base_ref="base", acceptance="works", risk="mandatory",
+            original_symptom="none", report_dir=report_dir,
+            runner=lambda argv, **kwargs: completed(argv, stdout=json.dumps({
+                "tests_run": [], "findings": [], "limitations": [],
+            })),
+        )
+    assert old.json_path.read_bytes() == original_json
+    assert old.markdown_path.read_bytes() == original_md
+    assert outside.read_bytes() == b"external original bytes"
+    if kind.endswith("symlink"):
+        assert path.is_symlink()
+    data = json.loads(next(report_dir.glob("runs/*/*/run.json")).read_text())
+    assert data["status"] == "error"
+    assert data["stages"][-1]["name"] == "persistence"
+    assert not list(report_dir.glob("runs/*/*/*.claude.*"))
+
+
+@pytest.mark.unit
+def test_orphaned_previous_markdown_is_preserved_before_publication(tmp_path, monkeypatch):
+    prepare_review_preflights(monkeypatch, tmp_path)
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir()
+    markdown = report_dir / f"{'b' * 40}.claude.md"
+    markdown.write_bytes(b"original markdown\r\n")
+    outcome = review.run_review(
+        repo=tmp_path, base_ref="base", acceptance="works", risk="mandatory",
+        original_symptom="none", report_dir=report_dir,
+        runner=lambda argv, **kwargs: completed(argv, stdout=json.dumps({
+            "tests_run": [], "findings": [], "limitations": [],
+        })),
+    )
+    assert outcome.json_path.exists()
+    previous = list(report_dir.glob("runs/*/*/previous/*.md"))
+    assert len(previous) == 1
+    assert previous[0].read_bytes() == b"original markdown\r\n"
+    assert not list(report_dir.glob("runs/*/*/previous/*.json"))
 
 
 @pytest.mark.unit
@@ -891,6 +966,9 @@ def test_optional_review_propagates_non_auth_review_error(tmp_path, monkeypatch)
 
 @pytest.mark.unit
 def test_layer1_runs_against_isolated_head_before_claude(tmp_path):
+    source = tmp_path / "devtools" / "verification" / "offline.py"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(Path(offline.__file__).read_bytes())
     seen = {}
 
     def runner(argv, **kwargs):
@@ -916,6 +994,9 @@ def test_layer1_runs_against_isolated_head_before_claude(tmp_path):
 
 @pytest.mark.unit
 def test_layer1_failure_has_bounded_sanitized_step_summary(tmp_path):
+    source = tmp_path / "devtools" / "verification" / "offline.py"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(Path(offline.__file__).read_bytes())
     with pytest.raises(review.ReviewError, match=r"exited 7 \(tests\)") as error:
         review.run_layer1(
             tmp_path,
@@ -928,6 +1009,28 @@ def test_layer1_failure_has_bounded_sanitized_step_summary(tmp_path):
         )
     assert "private/secret" not in str(error.value)
     assert "traceback" not in str(error.value)
+
+
+@pytest.mark.unit
+def test_target_gate_definition_mismatch_stops_before_subprocess_or_model(tmp_path, monkeypatch):
+    real_layer1 = review.run_layer1
+    prepare_review_preflights(monkeypatch, tmp_path)
+    monkeypatch.setattr(review, "run_layer1", real_layer1)
+    source = tmp_path / "isolated" / "devtools" / "verification" / "offline.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("# historical gate had a different step definition\n")
+    report_dir = tmp_path / "reports"
+    with pytest.raises(review.ReviewError, match="gate definition"):
+        review.run_review(
+            repo=tmp_path, base_ref="base", acceptance="works", risk="mandatory",
+            original_symptom="none", report_dir=report_dir,
+            runner=lambda *args, **kwargs: pytest.fail("no gate or model should run"),
+        )
+    assert not list(report_dir.glob("*.claude.*"))
+    data = json.loads(next(report_dir.glob("runs/*/*/run.json")).read_text())
+    assert data["status"] == "error"
+    assert data["reason_code"] == "layer1-definition-mismatch"
+    assert data["stages"][-1]["name"] == "layer1"
 
 
 @pytest.mark.unit
@@ -1420,7 +1523,7 @@ def test_review_settings_deny_preexisting_paths_but_not_isolated_checkout(
     denied = json.loads(seen["argv"][seen["argv"].index("--settings") + 1])["permissions"][
         "deny"
     ]
-    for path in (repo, common):
+    for path in (repo, common, report_dir, Path.home() / ".tradingagents" / "verification"):
         assert f"Read(/{path}/**)" in denied
     assert f"Read(/{isolated}/**)" not in denied
 

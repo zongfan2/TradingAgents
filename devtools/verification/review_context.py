@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import ast
 import re
+import shlex
 from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 
+from devtools.verification import offline
 from devtools.verification.models import TestRun
 
 _COUNTS = re.compile(
@@ -20,19 +22,16 @@ def harness_test_evidence(output: str) -> list[TestRun]:
     """Called only after successful exact-head Layer 1, never on model output."""
     summaries = [_COUNTS.fullmatch(line.strip("= \n")) for line in output.splitlines()]
     counts = next((match.group() for match in reversed(summaries) if match), None)
-    commands = (
-        "python -m pytest tests/ -q -m 'not integration'",
-        "python -m ruff check .",
-        "git diff --check",
-    )
+    # Build the actual gate definition with safe display paths, not host paths.
+    steps = offline.build_steps(Path("."), Path("python"), only="all")
     return [
         TestRun(
-            command=command,
+            command=shlex.join(step.argv),
             status="pass",
             summary="Executed by harness in detached exact-head checkout; exit 0."
-            + (f" {counts}" if index == 0 and counts else ""),
+            + (f" {counts}" if step.name == "tests" and counts else ""),
         )
-        for index, command in enumerate(commands)
+        for step in steps
     ]
 
 
@@ -50,6 +49,20 @@ def _safe_source(root: Path, value: str) -> Path:
     if source.resolve() != root.resolve() / path or not source.is_file():
         raise ValueError("missing or symlinked context path")
     return source
+
+
+def validate_gate_definition(root: Path) -> None:
+    """Require exact-head gate source to match the harness issuing attestations.
+
+    Historical gate definitions must use their matching revision's harness.
+    """
+    try:
+        target = _safe_source(root, "devtools/verification/offline.py")
+        matches = target.read_bytes() == Path(offline.__file__).read_bytes()
+    except (OSError, ValueError, TypeError):
+        raise ValueError("review gate definition is unavailable") from None
+    if not matches:
+        raise ValueError("review gate definition does not match harness")
 
 
 def navigation_index(

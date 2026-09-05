@@ -227,12 +227,20 @@ Claude with GPT, loosen Read-only permissions, or change `compute_verdict`.
   counts are extracted from captured output, never arbitrary stdout/stderr.
   Claude returns `tests_run: []`; an attempted model-authored test attestation is
   rejected rather than silently trusted, removed, or converted to pass.
+  Normalized command attestations derive from the offline gate's step builder,
+  with regression coverage for gate argument and ordering changes.
+  Before running Layer 1, the isolated target's offline gate source must match
+  the invoking harness's definition byte-for-byte. A historical `--head` with a
+  different gate definition fails before subprocess/model execution; use that
+  revision's matching harness rather than falsely attesting current commands.
 - Claude may return `review_notes` for informational scope/permission statements
   and positive confirmations. These notes go to the per-run diagnostic archive,
   not the v1 report's `limitations`. `limitations` continues to mean material
   missing verification; every actual finding/limitation retains its old verdict
   effect. Existing v1 reports and user-waiver behavior remain unchanged. Historical
   reports are never normalized or rewritten to remove warnings.
+  Notes are bounded to 32 entries of 4000 characters each and must encode as
+  UTF-8; invalid notes fail schema validation before any report publication.
 - The packet contains an exact-head file/heading/function navigation index.
   Explicit repeatable `--context-file` paths must be safe repository-relative,
   non-secret source/spec/test files present in that detached checkout; symlinks,
@@ -249,6 +257,8 @@ Claude with GPT, loosen Read-only permissions, or change `compute_verdict`.
   paths and model reasoning are not diagnostic artifacts. An unfinished archive
   means interrupted/unknown, not a successful review. Timings measure the whole
   Claude CLI boundary, not unobserved provider reasoning time.
+  Stderr progress is best-effort: a closed progress channel cannot discard an
+  otherwise completed review. Required on-disk diagnostics remain fail-closed.
 - Completed per-run archives retain the validated JSON/Markdown report before
   updating the existing `<head>.claude.*` convenience paths. Repeated reviews of
   the same head therefore retain prior attempts. Before replacement, any existing
@@ -257,6 +267,11 @@ Claude with GPT, loosen Read-only permissions, or change `compute_verdict`.
   blocks replacement. Diagnostic or archive write
   failure blocks success; failure recording must not mask the original error.
   Optional missing-auth behavior still runs Layer 1 without creating a report.
+  Claude Read-deny rules include the selected report root, configured default
+  and standard verification root as well as preexisting repository boundaries,
+  so prior reports and benchmark findings are not review context. These explicit
+  denials supplement the instruction to read only the isolated checkout; they
+  are not a claim of a complete host-filesystem sandbox.
 - The human report starts with a numbered findings index linking each item to its
   structured location. Full evidence remains below; Codex dispositions are not
   invented by the renderer. This supports targeted parallel checks and avoids

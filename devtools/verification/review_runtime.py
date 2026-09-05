@@ -11,7 +11,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -27,6 +27,7 @@ def reason_code(error: BaseException) -> str:
         "invalid-json", "invalid-schema", "checkout-failed", "layer1-failed",
         "layer1-timeout", "claude-timeout", "claude-exit", "cli-not-found",
         "claude-start-failed", "test-evidence-conflict", "invalid-context",
+        "layer1-definition-mismatch",
     }
     if code in allowed:
         return code
@@ -93,7 +94,8 @@ class ReviewRuntime:
         stage = {"name": name, "started_at": self.timestamp(), "status": "running"}
         self.data["stages"].append(stage)
         self.write()
-        self.progress(f"review: {name} started")
+        with suppress(OSError):
+            self.progress(f"review: {name} started")
         error: BaseException | None = None
         try:
             yield
@@ -114,11 +116,8 @@ class ReviewRuntime:
             except OSError:
                 if error is None:
                     raise
-            try:
+            with suppress(OSError):
                 self.progress(f"review: {name} {stage['status']} ({stage['duration_seconds']:.2f}s)")
-            except OSError:
-                if error is None:
-                    raise
 
     def packet(self, text: str) -> None:
         encoded = text.encode("utf-8")

@@ -24,12 +24,12 @@ Files: `devtools/verification/models.py`, `devtools/verification/claude_review.p
 
 Interfaces: `harness_test_evidence(output: str) -> list[TestRun]`; `navigation_index(root: Path, paths: Sequence[str], *, explicit: Sequence[str] = ()) -> str`. `ClaudeJudgment.review_notes` defaults to an empty string list; legacy report fields stay unchanged.
 
-- [ ] Add a runner test asserting three persisted harness-owned passing commands, and a negative test rejecting model-supplied `tests_run`.
-- [ ] Run targeted pytest and observe missing-behavior failures.
-- [ ] Extract only numeric pytest summaries, write explicit harness provenance, and pass these records into `build_report`. Never remove existing real limitations.
-- [ ] Add navigation tests with a real temporary Python/spec file, missing explicit path, traversal, hidden path and symlink; require correct heading/function line references and zero outside reads.
-- [ ] Implement the index and `--context-file` plumbing; add packet instructions for source locations, notes and true validation gaps.
-- [ ] Run all verification-module tests; retain prior report compatibility tests.
+- [x] Add a runner test asserting three persisted harness-owned passing commands, and a negative test rejecting model-supplied `tests_run`.
+- [x] Run targeted pytest and observe missing-behavior failures.
+- [x] Extract only numeric pytest summaries, write explicit harness provenance, and pass these records into `build_report`. Never remove existing real limitations.
+- [x] Add navigation tests with a real temporary Python/spec file, missing explicit path, traversal, hidden path and symlink; require correct heading/function line references and zero outside reads.
+- [x] Implement the index and `--context-file` plumbing; add packet instructions for source locations, notes and true validation gaps.
+- [x] Run all verification-module tests; retain prior report compatibility tests.
 
 ## Task 2: Timing, archive and concise report
 
@@ -37,20 +37,28 @@ Files: new `devtools/verification/review_runtime.py`, `devtools/verification/cla
 
 Interfaces: a per-run recorder provides stage contexts, safe metadata fields, `finish(status)` and a unique archive directory. The runner owns the recorder; subprocess execution and verdict authority remain unchanged.
 
-- [ ] Add tests for success/failure stage durations using injected clocks, secret-free failures, same-head unique runs, symlink rejection, and diagnostic persistence failure.
-- [ ] Observe failures, then implement atomic diagnostic JSON writes and stderr phase updates.
-- [ ] Wrap detached checkout/Layer 1, packet, Claude, validation and persistence stages. Archive validated report pairs before updating the existing convenience paths.
-- [ ] Add runner tests proving failed/invalid responses leave no successful current report and keep categorized run diagnostics; optional missing-auth still writes nothing.
-- [ ] Add numbered Markdown finding index tests without losing full evidence or fabricating dispositions.
-- [ ] Run targeted tests and Ruff.
+- [x] Add tests for success/failure stage durations using injected clocks, secret-free failures, same-head unique runs, symlink rejection, and diagnostic persistence failure.
+- [x] Observe failures, then implement atomic diagnostic JSON writes and stderr phase updates.
+- [x] Wrap detached checkout/Layer 1, packet, Claude, validation and persistence stages. Archive validated report pairs before updating the existing convenience paths.
+- [x] Add runner tests proving failed/invalid responses leave no successful current report and keep categorized run diagnostics; optional missing-auth still writes nothing.
+- [x] Add numbered Markdown finding index tests without losing full evidence or fabricating dispositions.
+- [x] Run targeted tests and Ruff.
 
 ## Task 3: Bounded comparison and final verification
 
 Files: benchmark artifacts only under the configured external verification directory; operational notes in the existing workflow documentation.
 
-- [ ] Freeze the full trade-brief design at `a4f48490f408134f9a7fb73547ff38b599484efe` plus declared source excerpts and hash the common packet.
-- [ ] Run at most one initial sample each for `gpt-5.4-mini`, `gpt-5.6-luna`, `gpt-5.6-sol` at medium reasoning, plus one Claude control, sequentially with a 600-second per-call ceiling. Record unsupported models honestly, do not use API-key fallbacks.
-- [ ] Validate output shape and compare actual findings with source evidence; record sampling and context limits rather than declaring a universal winner.
-- [ ] Run `.venv/bin/python -m devtools.verification.offline --only all`.
+- [x] Freeze the full trade-brief design at `a4f48490f408134f9a7fb73547ff38b599484efe` plus declared source excerpts and hash the common packet.
+- [x] Run at most one initial sample each for `gpt-5.4-mini`, `gpt-5.6-luna`, `gpt-5.6-sol` at medium reasoning, plus one Claude control, sequentially with a 600-second per-call ceiling. Record unsupported models honestly, do not use API-key fallbacks.
+- [x] Validate output shape and compare actual findings with source evidence; record sampling and context limits rather than declaring a universal winner.
+- [x] Run `.venv/bin/python -m devtools.verification.offline --only all`.
 - [ ] Commit only the coherent workflow changes, run the independent Claude review against that exact commit, and check its bound report. Resolve actual findings; no unauthorized waiver.
 - [ ] Hand off implementation evidence and benchmark results separately; do not change the required reviewer based on the experiment.
+
+Execution note: the initial Luna measurement was invalidated by the event guard,
+then one bounded retry was authorized by the coordinating agent and retained as
+a separate attempt. Four valid outputs and all five call records are archived
+externally. The first production workflow review at `d2250c1` returned five low
+findings; follow-up regression tests and fixes address them. The final review
+checkbox remains open until the new bound revision is checked; historical
+`d2250c1` evidence stays `warn` and is never relabelled.

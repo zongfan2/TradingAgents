@@ -74,3 +74,19 @@ def test_failed_progress_callback_cannot_mask_original_failure(tmp_path):
     runtime = review_runtime.ReviewRuntime(tmp_path, "a" * 40, "b" * 40, progress=progress)
     with pytest.raises(RuntimeError, match="original"), runtime.stage("claude"):
         raise RuntimeError("original failure")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("failure_at", ["started", "complete"])
+def test_failed_progress_callback_does_not_abort_success(tmp_path, failure_at):
+    def progress(message):
+        if failure_at in message:
+            raise BrokenPipeError("closed progress channel")
+
+    runtime = review_runtime.ReviewRuntime(tmp_path, "a" * 40, "b" * 40, progress=progress)
+    with runtime.stage("claude"):
+        pass
+    runtime.finish("complete")
+    data = json.loads((runtime.directory / "run.json").read_text())
+    assert data["status"] == "complete"
+    assert data["stages"][0]["status"] == "complete"

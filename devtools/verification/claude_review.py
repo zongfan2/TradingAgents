@@ -28,7 +28,11 @@ from devtools.verification.models import (
     build_report,
     build_waiver_report,
 )
-from devtools.verification.review_context import harness_test_evidence, navigation_index
+from devtools.verification.review_context import (
+    harness_test_evidence,
+    navigation_index,
+    validate_gate_definition,
+)
 from devtools.verification.review_runtime import ReviewRuntime, reason_code
 
 
@@ -285,7 +289,8 @@ additional model/API quota. Layer 3 has not been requested.
 Return JSON only: exactly one object matching the schema below. Do not add prose,
 Markdown fences, identity fields, a verdict, or unknown fields. The harness derives
 the verdict and stamps immutable review identity.
-Use review_notes for informational scope boundaries and positive confirmations.
+Use review_notes for informational scope boundaries and positive confirmations
+(at most 32 notes, each at most 4000 characters of valid UTF-8 text).
 Use limitations only for material gaps in required verification, not the intentional
 Read-only role or unrequested external tests. Never move material uncertainty or
 findings into review_notes.
@@ -443,6 +448,13 @@ def run_layer1(
     worktree: Path, python_executable: Path, runner: Runner = default_runner
 ) -> str:
     """Run the deterministic gate in the exact isolated head checkout."""
+    try:
+        validate_gate_definition(worktree)
+    except (ValueError, OSError) as exc:
+        raise ReviewError(
+            "isolated offline gate definition does not match this harness; use the matching revision's harness",
+            code="layer1-definition-mismatch",
+        ) from exc
     argv = [
         str(python_executable),
         "-m",
@@ -689,7 +701,7 @@ def load_current_report(path: Path, *, expected_head: str) -> ReviewReport:
         report = ReviewReport.model_validate(payload)
     except OSError as exc:
         raise ReviewError(f"could not read report {path}") from exc
-    except (json.JSONDecodeError, ValidationError, TypeError) as exc:
+    except (json.JSONDecodeError, ValidationError, TypeError, UnicodeError) as exc:
         raise ReviewError("report failed schema validation") from exc
     if report.head_sha != expected_head:
         raise ReviewError("stale report does not match requested head")
@@ -783,8 +795,15 @@ def run_review(
                 runtime.packet(packet)
             with runtime.stage("claude"):
                 try:
+                    # Previous verdicts are not independent source material,
+                    # including when this invocation uses a custom report root.
+                    denied_sources = tuple(dict.fromkeys((
+                        *boundaries, persisted_report_dir,
+                        default_report_dir().resolve(),
+                        (Path.home() / ".tradingagents" / "verification").resolve(),
+                    )))
                     result = runner(
-                        _claude_argv(boundaries), cwd=isolated, input=packet,
+                        _claude_argv(denied_sources), cwd=isolated, input=packet,
                         timeout=timeout, shell=False,
                     )
                 except FileNotFoundError as exc:
