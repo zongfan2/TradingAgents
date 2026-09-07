@@ -175,8 +175,10 @@ def test_five_tier_signal_never_falls_back_to_trader_action(rating, expected, pl
 def test_rating_projection_covers_canonical_vocabulary():
     # Keep this import local: the analysis child sets its environment before
     # importing tradingagents. New tiers require an explicit execution policy.
+    from tradingagents.agents.schemas import PortfolioRating
     from tradingagents.agents.utils.rating import RATINGS_5_TIER
 
+    assert tuple(r.value for r in PortfolioRating) == RATINGS_5_TIER
     expected = {
         "Buy": "BUY", "Overweight": "BUY", "Hold": "HOLD",
         "Underweight": "HOLD", "Sell": "SELL",
