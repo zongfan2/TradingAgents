@@ -48,6 +48,7 @@ import os
 import re
 import sys
 from collections.abc import Callable, MutableMapping
+from enum import Enum
 from pathlib import Path
 
 from pipeline.common import SESSIONS
@@ -190,10 +191,21 @@ def extract_with_repair(text: str, llm) -> tuple[dict | None, bool, str | None]:
 def normalize_decision(raw: object, plan: dict | None) -> str:
     """Map the graph's processed signal to ``BUY | SELL | HOLD``.
 
-    Earliest token in the signal text wins; an unrecognizable signal falls
-    back to the plan's action, then HOLD.
+    Recognized five-tier PM ratings take precedence over Trader intent.
+    Underweight cannot authorize a partial trim in v2 (SELL closes the entire
+    position), so it projects to no automated order, not BUY or liquidation.
+    For legacy signals only, earliest BUY/SELL/HOLD token wins; an
+    unrecognizable signal falls back to the plan's action, then HOLD.
     """
+    if isinstance(raw, Enum):
+        raw = raw.value
     text = str(raw or "").upper()
+    rating_actions = {
+        "BUY": "BUY", "OVERWEIGHT": "BUY", "HOLD": "HOLD",
+        "UNDERWEIGHT": "HOLD", "SELL": "SELL",
+    }
+    if text.strip() in rating_actions:
+        return rating_actions[text.strip()]
     hits = [(text.index(token), token) for token in ("BUY", "SELL", "HOLD") if token in text]
     if hits:
         return min(hits)[1]

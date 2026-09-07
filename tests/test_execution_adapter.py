@@ -1075,6 +1075,64 @@ def test_s8_stale_quote_skips_and_fresh_quote_passes(tmp_path):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("plan", [BUY_PLAN, SELL_PLAN], ids=["buy", "sell"])
+@pytest.mark.parametrize("ahead", [timedelta(microseconds=1), timedelta(minutes=5)])
+def test_s8_future_quote_blocks_submit_without_canceling_protection(tmp_path, plan, ahead):
+    config = make_config(tmp_path)
+    write_decision(config, plan=plan)
+    stop_order = broker_order("protective-stop", side="sell", stop=90.0)
+    broker = FakeBroker(
+        quotes={"NVDA": ea.Quote(bid=99.5, ask=100.0, timestamp=NOW + ahead)},
+        positions=[position(qty=50)] if plan["action"] == "SELL" else [],
+        open_orders=[stop_order] if plan["action"] == "SELL" else [],
+    )
+    submit_slot(config, broker, settings=live_settings())
+    assert [(r["kind"], r["reason"]) for r in read_orders(config)] == [("skip", "guard-unavailable")]
+    assert broker.submitted == []
+    assert broker.canceled == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("age_seconds,reason", [(0, None), (900, None), (900.000001, "stale-quote")])
+def test_s8_quote_age_inclusive_boundaries(tmp_path, age_seconds, reason):
+    config = make_config(tmp_path)
+    write_decision(config)
+    broker = FakeBroker(quotes={"NVDA": ea.Quote(
+        bid=99.5, ask=100.0, timestamp=NOW - timedelta(seconds=age_seconds))})
+    submit_slot(config, broker, settings=live_settings())
+    if reason is None:
+        assert [spec.ticker for spec in broker.submitted] == ["NVDA"]
+    else:
+        assert broker.submitted == []
+        assert read_orders(config)[-1]["reason"] == reason
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("timestamp", [
+    NOW.astimezone(timezone(timedelta(hours=-4))),
+    NOW.replace(tzinfo=None),
+])
+def test_s8_equivalent_quote_time_is_not_future(tmp_path, timestamp):
+    config = make_config(tmp_path)
+    write_decision(config)
+    broker = FakeBroker(quotes={"NVDA": ea.Quote(bid=99.5, ask=100.0, timestamp=timestamp)})
+    submit_slot(config, broker, settings=live_settings())
+    assert [spec.ticker for spec in broker.submitted] == ["NVDA"]
+
+
+@pytest.mark.unit
+def test_s8_quote_after_slot_start_but_before_check_is_fresh(tmp_path):
+    config = make_config(tmp_path)
+    write_decision(config, ticker="AAPL")
+    write_decision(config, ticker="NVDA")
+    broker = FakeBroker(quotes={"NVDA": ea.Quote(
+        bid=99.5, ask=100.0, timestamp=NOW + timedelta(minutes=1))})
+    broker.submit_hook = lambda spec: setattr(broker, "now", NOW + timedelta(minutes=2))
+    submit_slot(config, broker, settings=live_settings())
+    assert [spec.ticker for spec in broker.submitted] == ["AAPL", "NVDA"]
+
+
+@pytest.mark.unit
 def test_s8_quote_age_measured_at_check_time_not_slot_start(tmp_path):
     """The quote-age guard is the operational halt proxy: as the queue drags,
     staleness must be measured against the clock at the moment of the check
@@ -1604,6 +1662,27 @@ def test_refresh_close_resubmit_quote_age_uses_check_time_clock(tmp_path):
     assert broker.submitted == []
     assert read_orders(config)[-1]["reason"] == "stale-quote"
     assert summary["skipped"] == 1
+
+
+@pytest.mark.unit
+def test_refresh_future_quote_does_not_spend_close_retry(tmp_path):
+    config = make_config(tmp_path)
+    seed_expired_close(config)
+    broker = FakeBroker(
+        positions=[position(qty=50, avg=90.0)],
+        quotes={"NVDA": ea.Quote(bid=99.5, ask=100.0, timestamp=NOW + timedelta(microseconds=1))},
+    )
+    summary = refresh(config, broker, settings=live_settings())
+    assert summary["skipped"] == 1 and summary["close_resubmitted"] == 0
+    assert broker.submitted == []
+    rows = read_orders(config)
+    assert rows[-1]["reason"] == "guard-unavailable"
+    assert not any(r["kind"] == "intent" and r["client_order_id"].endswith("-close-2") for r in rows)
+
+    broker.quotes["NVDA"] = ea.Quote(bid=99.5, ask=100.0, timestamp=NOW)
+    retried = refresh(config, broker, settings=live_settings())
+    assert retried["close_resubmitted"] == 1
+    assert [spec.client_order_id for spec in broker.submitted] == ["2026-08-06-us-NVDA-close-2"]
 
 
 @pytest.mark.unit

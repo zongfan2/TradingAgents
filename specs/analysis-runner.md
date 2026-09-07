@@ -85,6 +85,23 @@ a re-collected brief with a stale predecessor eval — is `missing`.
 3. `plan_valid: false` ⇒ decision recorded as directional opinion; report
    flagged; never executed. HOLD ⇒ trivially valid, no levels.
 
+### PM rating projection into execution intent
+
+The graph returns the PM's canonical five-tier rating. Before legacy signal
+fallback, project recognized ratings (case-insensitive, with outer whitespace trimmed)
+as follows: Buy / Overweight ⇒ `BUY`; Hold / Underweight ⇒ `HOLD`; Sell ⇒ `SELL`.
+Enum inputs use their string value. Underweight remains a cautious/partial-trim
+research view in the saved PM report: its `HOLD` execution projection means
+**no automated order expressible by v2**, not a neutral investment opinion.
+The adapter supports full-position closes only; never turn Underweight into
+an unintended full liquidation or fall back to a Trader BUY.
+
+Preserve the Trader TradePlan unchanged. Normalized `HOLD` is ineligible;
+BUY/SELL still require agreement with the Trader plan and all adapter gates.
+For unrecognized legacy signals only, retain the existing earliest
+BUY/SELL/HOLD token, then plan-action, then HOLD fallback. This does not rewrite
+historical ledger records or add partial-close execution support.
+
 ## Ledger writes
 
 One `decisions.jsonl` record per run, per the contract, written immediately

@@ -67,6 +67,12 @@ included — constructs a broker client.
   which is why `max_quote_age` must stay small. **Fail-closed**: if any guard
   source (clock, calendar, asset, quote) errors or is unreachable, skip with
   reason `guard-unavailable` — never submit on missing information.
+  A quote timestamp later than the broker clock at the time of its check is
+  inconsistent guard evidence and also skips with `guard-unavailable`, before
+  any submission or SELL protective-order cancellation. Valid quote age is the
+  inclusive interval `[0, max_quote_age]`. Apply the same rule to close
+  re-submission in `refresh`; a guard rejection does not consume its once-only
+  retry. Existing naive timestamps retain their UTC interpretation.
 - **S9 — Portfolio constraints**:
   - A BUY for a held ticker without `add_intent` ⇒ skip (`maintain`) — not an
     error; the plan is a view refresh, not an order.

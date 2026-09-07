@@ -1069,6 +1069,8 @@ class _SubmitRun:
         if check_now.tzinfo is None:
             check_now = check_now.replace(tzinfo=timezone.utc)
         age_seconds = (check_now - timestamp).total_seconds()
+        if age_seconds < 0:
+            return "guard-unavailable", None
         if age_seconds > self.settings.max_quote_age_minutes * 60.0:
             return "stale-quote", quote
         return None, quote
@@ -1675,13 +1677,15 @@ def run_refresh(
             continue
         if check_now.tzinfo is None:
             check_now = check_now.replace(tzinfo=timezone.utc)
-        if (
-            timestamp is None
-            or (check_now - timestamp).total_seconds() > settings.max_quote_age_minutes * 60.0
-        ):
-            _skip_resubmit(
-                sub, new_cid, cid, "stale-quote" if timestamp is not None else "guard-unavailable"
-            )
+        if timestamp is None:
+            _skip_resubmit(sub, new_cid, cid, "guard-unavailable")
+            continue
+        age_seconds = (check_now - timestamp).total_seconds()
+        if age_seconds < 0:
+            _skip_resubmit(sub, new_cid, cid, "guard-unavailable")
+            continue
+        if age_seconds > settings.max_quote_age_minutes * 60.0:
+            _skip_resubmit(sub, new_cid, cid, "stale-quote")
             continue
         remaining = min(
             qty - filled, position.qty, position.qty_available + position.qty_held_for_orders

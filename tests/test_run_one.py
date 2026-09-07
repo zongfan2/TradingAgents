@@ -10,6 +10,7 @@ one-JSON-line stdout discipline, and the crash exit code the parent maps to a
 from __future__ import annotations
 
 import json
+from enum import Enum
 from types import SimpleNamespace
 
 import pytest
@@ -157,6 +158,29 @@ def test_normalize_decision():
     assert run_one.normalize_decision(None, None) == "HOLD"
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize("plan_action", ["BUY", "SELL", "HOLD", None])
+@pytest.mark.parametrize(
+    "rating,expected",
+    [("Buy", "BUY"), ("Overweight", "BUY"), ("Hold", "HOLD"),
+     ("Underweight", "HOLD"), ("Sell", "SELL")],
+)
+def test_five_tier_signal_never_falls_back_to_trader_action(rating, expected, plan_action):
+    """Known PM ratings must control direction, including unsupported partial trims."""
+    plan = {"action": plan_action} if plan_action is not None else None
+    assert run_one.normalize_decision("  " + rating.swapcase() + "  ", plan) == expected
+
+
+@pytest.mark.unit
+def test_five_tier_enum_is_normalized_by_its_value():
+    class Rating(str, Enum):
+        UNDERWEIGHT = "Underweight"
+        OVERWEIGHT = "Overweight"
+
+    assert run_one.normalize_decision(Rating.UNDERWEIGHT, {"action": "BUY"}) == "HOLD"
+    assert run_one.normalize_decision(Rating.OVERWEIGHT, {"action": "SELL"}) == "BUY"
+
+
 # ---------------------------------------------------------------------------
 # argv/env contract
 # ---------------------------------------------------------------------------
@@ -278,6 +302,45 @@ def test_main_emits_exactly_one_json_line(child_env, capsys):
     # The graph factory received the position context; propagate saw the run.
     assert factories == [("- qty: 12", False)]
     assert graph.calls == [("NVDA", "2026-08-07", "stock")]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("rating,trader_action,decision,eligible", [
+    ("Underweight", "BUY", "HOLD", False),
+    ("Underweight", "SELL", "HOLD", False),
+    ("Overweight", "BUY", "BUY", True),
+    ("Overweight", "SELL", "BUY", False),
+    ("Sell", "BUY", "SELL", False),
+    ("Sell", "SELL", "SELL", True),
+])
+def test_child_pm_rating_preserves_plan_and_requires_agreement(
+    child_env, capsys, rating, trader_action, decision, eligible,
+):
+    from pipeline.contracts.ledger import DecisionRecord
+    from pipeline.execution_adapter import is_execution_candidate
+    from tradingagents.graph.signal_processing import SignalProcessor
+
+    plan = {**VALID_PLAN, "action": trader_action}
+    signal = SignalProcessor().process_signal(
+        f"**Rating**: {rating}\nThe earlier Buy thesis was discussed before the final rating."
+    )
+    graph = FakeGraph(fenced(plan), signal=signal)
+    rc = run_one.main(
+        ["--ticker", "NVDA", "--date", "2026-08-07", "--session", "us", "--arm", "brief"],
+        graph_factory=lambda ctx, debug: graph,
+    )
+    result = parse_result_line(capsys.readouterr().out.strip())
+    assert rc == 0
+    assert result["decision"] == decision
+    assert result["plan"] == plan
+    record = DecisionRecord(
+        run_id="2026-08-07-us-NVDA-brief-1", date="2026-08-07", session="us", ticker="NVDA",
+        arm="brief", preset="test", trigger="core", macro_eval_verdict="pass",
+        ticker_eval_verdict="pass", decided_at="2026-08-07T13:00:00Z",
+        inputs={"macro_brief": None, "ticker_brief": None, "pool": None, "config_digest": "test"},
+        decision=result["decision"], plan=result["plan"], plan_valid=True,
+    )
+    assert is_execution_candidate(record) is eligible
 
 
 @pytest.mark.unit
