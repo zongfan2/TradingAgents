@@ -172,6 +172,23 @@ def test_five_tier_signal_never_falls_back_to_trader_action(rating, expected, pl
 
 
 @pytest.mark.unit
+def test_rating_projection_covers_canonical_vocabulary():
+    # Keep this import local: the analysis child sets its environment before
+    # importing tradingagents. New tiers require an explicit execution policy.
+    from tradingagents.agents.utils.rating import RATINGS_5_TIER
+
+    expected = {
+        "Buy": "BUY", "Overweight": "BUY", "Hold": "HOLD",
+        "Underweight": "HOLD", "Sell": "SELL",
+    }
+    assert set(RATINGS_5_TIER) == set(expected)
+    assert len(RATINGS_5_TIER) == len(expected)
+    for rating in RATINGS_5_TIER:
+        for action in ("BUY", "SELL", "HOLD"):
+            assert run_one.normalize_decision(rating, {"action": action}) == expected[rating]
+
+
+@pytest.mark.unit
 def test_five_tier_enum_is_normalized_by_its_value():
     class Rating(str, Enum):
         UNDERWEIGHT = "Underweight"
