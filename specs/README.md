@@ -7,6 +7,11 @@ each other's internals. The overall v2 design and decision log live in
 [2026-08-03-pipeline-v2-design.md](2026-08-03-pipeline-v2-design.md).
 Day-to-day operations (install, manual slots, dry-run ramp, A/B campaign, troubleshooting): see [../RUNBOOK.md](../RUNBOOK.md).
 
+Planned reviewer alternatives and subscription-exit testing:
+[reviewer fallback and DeepSeek pilot design](../docs/superpowers/specs/2026-09-07-reviewer-fallback-and-deepseek-study-design.md).
+This design is awaiting written review; it does not change runtime D19 or the
+current mandatory Claude review policy.
+
 ## Contracts
 
 | Contract | Interface | Status |
