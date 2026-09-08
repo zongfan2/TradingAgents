@@ -5,6 +5,10 @@
 - **Status:** Direction and $5 pilot approved in chat; written design awaiting user review. No production activation.
 - **Baseline:** `8e7fb0cbd1326fb7e75fe7be9f4a0e951f937bf0`
 
+The subsequent user-directed [universal Flash backup amendment](2026-09-07-flash-backup-and-reviewer-study-design.md)
+takes precedence for backup selection. The pilot and its $5 budget remain one
+campaign, not duplicated by the amendment.
+
 ## 1. Objective and authority
 
 Reduce routine dependence on Claude while keeping Claude, Codex/GPT, and

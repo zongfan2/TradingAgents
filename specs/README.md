@@ -11,6 +11,8 @@ Planned reviewer alternatives and subscription-exit testing:
 [reviewer fallback and DeepSeek pilot design](../docs/superpowers/specs/2026-09-07-reviewer-fallback-and-deepseek-study-design.md).
 This design is awaiting written review; it does not change runtime D19 or the
 current mandatory Claude review policy.
+The latest [universal Flash backup amendment](../docs/superpowers/specs/2026-09-07-flash-backup-and-reviewer-study-design.md)
+specifies Flash for every model-assisted backup role without activating it.
 
 ## Contracts
 
