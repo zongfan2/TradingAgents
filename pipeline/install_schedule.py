@@ -95,10 +95,14 @@ _STANDARD_PATH_DIRS = ("/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin"
 _REQUIRED_CLIS = ("codex", "claude")
 
 
-def launchd_path() -> str:
-    """PATH for the generated plists: backend-CLI dirs first, then standard dirs."""
+def launchd_path(codex_cli: str = "codex") -> str:
+    """PATH for plists: resolved backends, standards, then explicit CLI parent."""
     dirs: list[str] = []
-    for cli in _REQUIRED_CLIS:
+    explicit_codex_parent: str | None = None
+    for cli in (codex_cli, *_REQUIRED_CLIS[1:]):
+        if Path(cli).is_absolute():
+            explicit_codex_parent = str(Path(cli).parent)
+            continue
         found = shutil.which(cli)
         if found:
             # Keep the symlink's own directory (e.g. nvm's bin/) — resolving
@@ -113,6 +117,8 @@ def launchd_path() -> str:
     for d in _STANDARD_PATH_DIRS:
         if d not in dirs:
             dirs.append(d)
+    if explicit_codex_parent and explicit_codex_parent not in dirs:
+        dirs.append(explicit_codex_parent)
     return ":".join(dirs)
 
 
@@ -130,7 +136,10 @@ def build_session_plist(
             session,
         ],
         "WorkingDirectory": str(REPO_ROOT),
-        "EnvironmentVariables": {"PATH": launchd_path()},
+        "EnvironmentVariables": {
+            "PATH": launchd_path(config.codex_cli),
+            "TRADINGAGENTS_CODEX_CLI": config.codex_cli,
+        },
         "StartCalendarInterval": [{"Hour": h, "Minute": m} for h, m in fire_times],
         "RunAtLoad": False,
         "StandardOutPath": str(config.state_dir / f"launchd.{session}.out.log"),
@@ -148,7 +157,10 @@ def build_watchdog_plist(config: PipelineConfig) -> dict:
             "watchdog",
         ],
         "WorkingDirectory": str(REPO_ROOT),
-        "EnvironmentVariables": {"PATH": launchd_path()},
+        "EnvironmentVariables": {
+            "PATH": launchd_path(config.codex_cli),
+            "TRADINGAGENTS_CODEX_CLI": config.codex_cli,
+        },
         "StartInterval": WATCHDOG_INTERVAL_S,
         "RunAtLoad": False,
         "StandardOutPath": str(config.state_dir / "launchd.watchdog.out.log"),
@@ -197,6 +209,7 @@ def install(config: PipelineConfig, host_tz: str, year: int, output_dir: Path) -
     lose their stdout/stderr. Atomic writes (temp file + rename) mean a kill
     mid-install can never leave a truncated plist for launchctl to reject.
     """
+    config.validate_codex_cli()
     output_dir.mkdir(parents=True, exist_ok=True)
     config.state_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []

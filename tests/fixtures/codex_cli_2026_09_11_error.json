@@ -1,0 +1,11 @@
+{
+  "provenance": "Redacted from the persisted 2026-09-11 task_complete.error.message JSON object. This is CLI error evidence, not a raw stdout/stderr transcript. The retained collector and launchd streams contain only the earlier models-cache diagnostic, so tests place this object in captured streams synthetically.",
+  "error_object": {
+    "type": "error",
+    "status": 400,
+    "error": {
+      "type": "invalid_request_error",
+      "message": "The '[model redacted]' model requires a newer version of Codex. Please upgrade to the latest app or CLI and try again."
+    }
+  }
+}

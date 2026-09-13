@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+from pipeline.cli_errors import cli_failure_reason
 from pipeline.common import (
     SESSIONS,
     append_log_line,
@@ -146,6 +147,9 @@ def default_runner(
 ) -> str:
     """Run the deep-search CLI for ``backend`` with the prompt on stdin."""
     command = list(BACKEND_COMMANDS[backend])
+    if backend == "codex":
+        config = load_config()
+        command[0] = config.codex_cli
     timeout = backend_timeout_seconds()
     if deadline is not None:
         remaining = deadline - time.monotonic()
@@ -153,6 +157,8 @@ def default_runner(
             raise CollectorError(f"backend '{backend}' deadline exhausted before launch")
         timeout = min(timeout, remaining)
     try:
+        if backend == "codex":
+            config.validate_codex_cli()
         proc = subprocess.run(
             command,
             input=prompt,
@@ -161,11 +167,15 @@ def default_runner(
             timeout=timeout,
         )
     except FileNotFoundError as exc:
+        if backend == "codex" and command[0] != "codex":
+            raise CollectorError("configured codex CLI is missing or not executable") from exc
         raise CollectorError(f"backend CLI '{command[0]}' not found on PATH") from exc
+    except OSError as exc:
+        raise CollectorError(f"backend '{backend}' could not be launched (OS error {exc.errno})") from exc
     except subprocess.TimeoutExpired as exc:
         raise CollectorError(f"backend '{backend}' timed out after {int(timeout)}s") from exc
     if proc.returncode != 0:
-        reason = _first_line(proc.stderr or proc.stdout) or "no output"
+        reason = cli_failure_reason(proc.stderr, proc.stdout)
         raise CollectorError(f"backend '{backend}' exited {proc.returncode}: {reason}")
     return proc.stdout
 

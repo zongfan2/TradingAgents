@@ -8,6 +8,7 @@ the host clock and host timezone never participate.
 import json
 import plistlib
 import re
+import shutil
 from datetime import date, datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -24,6 +25,39 @@ YEAR = 2026
 
 def make_config(tmp_path, **overrides):
     return PipelineConfig(state_dir=tmp_path / "state", **overrides)
+
+
+@pytest.mark.unit
+def test_installed_jobs_preserve_explicit_codex_cli_without_shell_splitting(tmp_path):
+    executable = tmp_path / "Trading Tools" / "codex"
+    executable.parent.mkdir()
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o700)
+    cli = str(executable)
+    config = make_config(tmp_path, codex_cli=cli)
+    paths = install_schedule.install(config, HOST_TZ, YEAR, tmp_path / "LaunchAgents")
+    for path in paths:
+        with path.open("rb") as handle:
+            plist = plistlib.load(handle)
+        assert plist["EnvironmentVariables"]["TRADINGAGENTS_CODEX_CLI"] == cli
+        assert plist["RunAtLoad"] is False
+
+
+@pytest.mark.unit
+def test_install_rejects_disappeared_codex_cli_before_writing_anything(tmp_path):
+    executable = tmp_path / "codex"
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o700)
+    config = make_config(tmp_path, codex_cli=str(executable))
+    executable.unlink()
+    output_dir = tmp_path / "LaunchAgents"
+
+    with pytest.raises(FileNotFoundError) as exc_info:
+        install_schedule.install(config, HOST_TZ, YEAR, output_dir)
+
+    assert str(executable) not in str(exc_info.value)
+    assert not output_dir.exists()
+    assert not config.state_dir.exists()
 
 
 def chicago(*args):
@@ -416,3 +450,82 @@ def test_plists_bake_backend_cli_dirs_into_path(monkeypatch, tmp_path):
         path = plist["EnvironmentVariables"]["PATH"]
         assert path.startswith(str(fake_bin))
         assert "/usr/bin" in path and "/bin" in path
+
+
+@pytest.mark.unit
+def test_explicit_codex_cli_does_not_require_codex_on_path(
+    monkeypatch, tmp_path, capsys
+):
+    executable = tmp_path / "app-bin" / "codex"
+    executable.parent.mkdir()
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o700)
+    config = make_config(tmp_path, codex_cli=str(executable))
+    monkeypatch.setenv("PATH", "")
+
+    plist = install_schedule.build_session_plist(config, "us", [(8, 30)])
+
+    assert plist["EnvironmentVariables"]["PATH"].split(":")[-1] == str(executable.parent)
+    assert "'codex' not found on the current PATH" not in capsys.readouterr().err
+
+
+@pytest.mark.unit
+def test_normalized_selector_is_exported_exactly_to_scheduled_plist(
+    monkeypatch, tmp_path, capsys
+):
+    from pipeline.config import load_config
+
+    executable = tmp_path / "Example App" / "Resources" / "codex"
+    cli = str(executable)
+    config = load_config({"TRADINGAGENTS_CODEX_CLI": f'  "{cli}"\t'})
+    monkeypatch.setenv("PATH", "")
+
+    plist = install_schedule.build_session_plist(config, "us", [(8, 30)])
+
+    assert config.codex_cli == cli
+    assert plist["EnvironmentVariables"]["TRADINGAGENTS_CODEX_CLI"] == cli
+    assert plist["EnvironmentVariables"]["PATH"].split(":")[-1] == str(
+        executable.parent
+    )
+    assert "'codex' not found on the current PATH" not in capsys.readouterr().err
+
+
+@pytest.mark.unit
+def test_explicit_cli_resources_directory_cannot_shadow_standard_command(
+    monkeypatch, tmp_path
+):
+    resources = tmp_path / "Example.app" / "Contents" / "Resources"
+    standard_bin = tmp_path / "standard-bin"
+    backend_bin = tmp_path / "backend-bin"
+    for directory in (resources, standard_bin, backend_bin):
+        directory.mkdir(parents=True)
+    codex = resources / "codex"
+    claude = backend_bin / "claude"
+    standard_command = standard_bin / "git"
+    shadow_command = resources / "git"
+    for executable in (codex, claude, standard_command, shadow_command):
+        executable.write_text("#!/bin/sh\nexit 0\n")
+        executable.chmod(0o700)
+
+    monkeypatch.setattr(install_schedule, "_STANDARD_PATH_DIRS", (str(standard_bin),))
+    monkeypatch.setenv("PATH", str(backend_bin))
+
+    generated_path = install_schedule.launchd_path(str(codex))
+
+    assert shutil.which("git", path=generated_path) == str(standard_command)
+    assert generated_path.split(":") == [
+        str(backend_bin),
+        str(standard_bin),
+        str(resources),
+    ]
+
+
+@pytest.mark.unit
+def test_default_codex_cli_warns_when_codex_is_absent_from_path(
+    monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setenv("PATH", "")
+
+    install_schedule.build_session_plist(make_config(tmp_path), "us", [(8, 30)])
+
+    assert "'codex' not found on the current PATH" in capsys.readouterr().err

@@ -141,6 +141,32 @@ structured keys are file-config only.
 | `component_timeouts` | see orchestrator.md R1 | structured | — |
 | `collect_backend` | `codex` | enum claude/codex (D19) | `TRADINGAGENTS_COLLECT_BACKEND` |
 | `eval_backend` | `claude` | enum claude/codex (D19) | `TRADINGAGENTS_EVAL_BACKEND` |
+| `codex_cli` | `codex` | literal `codex` (PATH lookup), or an absolute executable file path; preserve inner spaces/symlinks, never shell-split; blank env values use the default | `TRADINGAGENTS_CODEX_CLI` |
+
+The project-scoped `codex_cli` selector applies to macro/pool/ticker collection
+and Codex evaluation. The orchestrator exports its resolved value to children;
+the schedule installer writes it to all generated plists without invoking or
+upgrading the CLI. Invalid nonblank syntax fails at config load. Filesystem
+availability is checked before installing any plist and before each actual
+Codex invocation, not while loading shared configuration: a later removed or
+non-executable CLI must not disable the watchdog or status reporting. Such a
+runtime failure is a normal failed backend/component with no alternate-CLI
+fallback. OS launch failures after that check (including permission changes
+or invalid executable format) are also controlled backend failures; do not
+propagate raw exception paths/details or retry another executable. This does
+not change D19, collection's user-default model, or the
+evaluator's pinned model.
+
+At the `load_config()` environment boundary only, ordinary surrounding
+whitespace is removed and one matching outer single- or double-quote pair is
+unwrapped. The interior is preserved byte-for-byte, so whitespace inside the
+quotes remains part of the path and is still subject to `PipelineConfig`'s
+strict validation. Empty/whitespace-only environment values (including an
+empty matching quote pair) select the `codex` default. An unmatched or
+mismatched outer quote is rejected; there is no shell expansion,
+interpolation, relative-path acceptance, repeated unquoting, or fallback for
+a nonblank invalid value. Constructing `PipelineConfig` directly performs no
+environment-syntax normalization and remains strict.
 
 ## Implementation order
 

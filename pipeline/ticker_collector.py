@@ -51,6 +51,7 @@ from pathlib import Path
 
 import yaml
 
+from pipeline.cli_errors import cli_failure_reason
 from pipeline.common import (
     LOG_FIELD_SEPARATOR,
     SESSIONS,
@@ -236,12 +237,17 @@ def default_runner(
     ``timeout`` is the per-job window ceiling; each call is also capped by
     the optional absolute deadline shared with that job's retry."""
     command = list(BACKEND_COMMANDS[backend])
+    if backend == "codex":
+        config = load_config()
+        command[0] = config.codex_cli
     if deadline is not None:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise CollectorError(f"backend '{backend}' deadline exhausted before launch")
         timeout = min(timeout, remaining)
     try:
+        if backend == "codex":
+            config.validate_codex_cli()
         proc = subprocess.run(
             command,
             input=prompt,
@@ -250,13 +256,17 @@ def default_runner(
             timeout=timeout,
         )
     except FileNotFoundError as exc:
+        if backend == "codex" and command[0] != "codex":
+            raise CollectorError("configured codex CLI is missing or not executable") from exc
         raise CollectorError(f"backend CLI '{command[0]}' not found on PATH") from exc
+    except OSError as exc:
+        raise CollectorError(f"backend '{backend}' could not be launched (OS error {exc.errno})") from exc
     except subprocess.TimeoutExpired as exc:
         raise CollectorError(
             f"backend '{backend}' timed out after {int(timeout)}s"
         ) from exc
     if proc.returncode != 0:
-        reason = _first_line(proc.stderr or proc.stdout) or "no output"
+        reason = cli_failure_reason(proc.stderr, proc.stdout)
         raise CollectorError(f"backend '{backend}' exited {proc.returncode}: {reason}")
     return proc.stdout
 

@@ -105,6 +105,73 @@ notifies (once per session/day) if a weekday slot has not started by
 slot_time + 1 h. Changing `TRADINGAGENTS_SLOT_TIME_CN/US` requires re-running
 the installer — plists and gate are both generated from config.
 
+### Scheduled Codex version compatibility (2026-09-11 incident)
+
+The CLI visible in the app can differ from the one in a loaded launchd PATH.
+On this host the loaded jobs selected the NVM CLI 0.147.0; persisted failures
+said the inherited `gpt-6-astra` model required a newer Codex version. The first
+stderr line mentioned a models-cache field instead, masking the terminal
+error. Deleting or editing the shared cache does not fix that rejection.
+
+Use project-scoped `TRADINGAGENTS_CODEX_CLI` for an explicitly verified CLI
+path. This selector leaves the model, subscription login, collection/evaluation
+roles, timeouts, schedules and execution switches unchanged. An absolute path
+must exist and be executable at installation and each invocation; spaces and
+symlinks are preserved. Without an override (including a blank environment
+value), the historical `codex` PATH lookup remains. A configured path that later
+disappears is a component failure, never a fallback to another CLI. Config
+loading does not inspect that mutable file, so the watchdog can still alert.
+For an absolute selector, the exact `TRADINGAGENTS_CODEX_CLI` value remains
+authoritative. The installer appends its parent after the normally resolved
+backend and standard PATH directories, and does not require a separate
+`codex` on the installer's PATH.
+If the OS rejects a launch after this check (for example, changed permissions
+or invalid executable format), the component reports a controlled backend/OS
+error without raw exception paths, an alternate executable, or a retry.
+
+For this host the newer app-bundled candidate is:
+
+```bash
+/Applications/ChatGPT.app/Contents/Resources/codex --version
+```
+
+This is a no-inference version check, not proof of model access or collection
+success. After the source revision is accepted, set `TRADINGAGENTS_CODEX_CLI`
+to that verified absolute path in the project `.env` and regenerate the plists
+using the existing schedule configuration. Only the
+`TRADINGAGENTS_CODEX_CLI` selector removes one matching pair of outer quotes
+when config is loaded; the shared `.env` loader does not generally unquote
+values. Keep other `.env` values unquoted. A `.env` assignment has no
+`export`; this selector-specific form supports a path with spaces:
+
+```dotenv
+TRADINGAGENTS_CODEX_CLI="/Applications/Trading Tools/codex"
+```
+
+The installer and orchestrator load the project `.env`, but direct component
+entrypoints do not. Before any direct collector/evaluator recovery or backfill
+command later in this runbook, export the selector in that shell. Here the
+single quotes are shell syntax and are not part of the selected path:
+
+```bash
+export TRADINGAGENTS_CODEX_CLI='/Applications/Trading Tools/codex'
+python -m pipeline.evaluator <brief-path>
+python -m pipeline.macro_collector --session <s> --date <d>
+```
+
+Use the verified host path in place of the spaced example. Do not source the
+whole `.env` merely to run a component. Do not regenerate from defaults if
+this host has slot-time overrides. The installer persists the CLI selector but
+does not reload launchd; existing jobs keep their old environment until an
+explicit reload. Do not use `kickstart` or a manual slot as a version test.
+Preserve the old plists before a deployment and verify the loaded PATH, CLI
+selector, cwd, Python, fire times and execution flags afterward.
+
+Recovery remains unproven until later authorized natural CN/US slots produce
+fresh contract-valid briefs and matching evaluations with no failed/timeout
+components. A completed analysis stage or an execution adapter reporting `ok`
+does not establish fresh input data, submitted paper orders, or fills.
+
 ## 4. First manual slot
 
 Run one slot by hand (no window gate) and watch it:
@@ -293,8 +360,9 @@ collector falls back to core-only.
 **Eval `fail` verdicts.** Open the brief in the webui briefs page and read the
 flagged claims. Verdicts are revision-bound (`brief_sha256`): re-collecting a
 brief invalidates its old eval, and re-evaluation happens automatically next
-slot (or manually: `python -m pipeline.evaluator <brief-path>`; `--force` to
-override a hash match).
+slot. For a direct manual run, first export `TRADINGAGENTS_CODEX_CLI` as shown
+in §3, then run `python -m pipeline.evaluator <brief-path>` (`--force` overrides
+a hash match). The evaluator does not load the project `.env` itself.
 
 **Subscription quota exhaustion.** Collection burns the Codex quota, evals
 the Claude quota (that split *is* D19 — Claude's monthly cap was hit once).
@@ -306,10 +374,11 @@ different, a match warns loudly.
 
 **Stale briefs.** The webui banner flags sessions with no slot by
 slot_time + 1 h. Backfill any gap with
-`python -m pipeline.macro_collector --session <s> --date <d>` (and the
-ticker collector likewise, `--tickers CSV` for a subset). Same-day rewrites
-archive the displaced revision (`archive/<name>.<generated_at>`), so ledger
-hashes keep resolving.
+`python -m pipeline.macro_collector --session <s> --date <d>` (and the ticker
+collector likewise, `--tickers CSV` for a subset), after exporting
+`TRADINGAGENTS_CODEX_CLI` as shown in §3. Direct collectors do not load the
+project `.env`. Same-day rewrites archive the displaced revision
+(`archive/<name>.<generated_at>`), so ledger hashes keep resolving.
 
 **Timezone notes.** Slot dates and weekday gates resolve in the **session**
 timezone, never host time: the cn slot for Monday fires Sunday evening

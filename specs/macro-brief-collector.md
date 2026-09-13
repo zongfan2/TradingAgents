@@ -44,6 +44,13 @@ The robust version below replaces this one-liner.
   backend is `claude -p` with WebSearch/WebFetch allowed; an explicit
   `--backend claude|codex` overrides the config default per invocation so
   collector quality itself can be compared later.
+  `codex_cli` / `TRADINGAGENTS_CODEX_CLI` selects the executable independently
+  of the desktop/default PATH, per the design config appendix. The same
+  selector applies to pool/ticker collection and Codex evaluation; only argv[0]
+  changes. A configured missing/non-executable file is rejected before backend
+  launch and reported as a component failure, without disabling status or the
+  watchdog and without falling back to another CLI. Installation rejects it
+  before writing plists; shared config loading validates syntax only.
 - **R3 — Validate before write** (all checks are hard failures unless marked
   warn): frontmatter parses and fields present; `as_of_date` and `session`
   match the filename; `generator` matches the invoked backend; all 7 sections
@@ -60,6 +67,13 @@ The robust version below replaces this one-liner.
 - **R6 — Loud failure**: non-zero exit + one-line reason on stderr; never write
   a partial/invalid brief. The orchestrator turns non-zero exits into status
   entries and notifications — the collector itself does not notify.
+  For backend failures, inspect bounded tails of both captured streams for
+  known terminal JSON errors or explicit `ERROR:`/`FATAL:` lines before the
+  plain-text fallback. Startup cache warnings must not mask a later terminal
+  model/CLI compatibility error. Strip terminal controls, redact common
+  credential patterns and URLs, and cap the extracted diagnostic detail at
+  500 characters (the fixed component/backend/exit-code context is additional). Never
+  log the full prompt/transcript, add a transport retry, or alter exit semantics.
 - **R7 — Optional S3 sync**: when `MACRO_BRIEF_S3_URI` is set, copy the brief
   (and later its eval json) after write; local remains the source of truth.
 - **R8 — Log**: append one line per run (date, session, backend,

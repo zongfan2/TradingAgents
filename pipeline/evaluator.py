@@ -42,6 +42,7 @@ from pathlib import Path
 
 from pydantic import Field, ValidationError
 
+from pipeline.cli_errors import cli_failure_reason, sanitize_cli_error_detail
 from pipeline.common import append_log_line, archive_existing, atomic_write, sha256_text, to_utc_iso
 from pipeline.config import load_config
 from pipeline.contracts.base import ContractError, ContractModel, validation_error_messages
@@ -139,8 +140,9 @@ def codex_runner(prompt: str) -> str:
     collector's backend session/context. The prompt goes over stdin so brief
     content never hits the process argument list.
     """
+    config = load_config()
     command = [
-        "codex",
+        config.codex_cli,
         "exec",
         "--model",
         EVALUATOR_MODEL,
@@ -151,6 +153,7 @@ def codex_runner(prompt: str) -> str:
     ]
     timeout = backend_timeout_seconds()
     try:
+        config.validate_codex_cli()
         proc = subprocess.run(
             command,
             input=prompt,
@@ -159,11 +162,15 @@ def codex_runner(prompt: str) -> str:
             timeout=timeout,
         )
     except FileNotFoundError as exc:
+        if config.codex_cli != "codex":
+            raise BackendError("configured codex CLI is missing or not executable") from exc
         raise BackendError("codex CLI not found on PATH") from exc
+    except OSError as exc:
+        raise BackendError(f"codex CLI could not be launched (OS error {exc.errno})") from exc
     except subprocess.TimeoutExpired as exc:
         raise BackendError(f"codex exec timed out after {int(timeout)}s") from exc
     if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "").strip()[:500]
+        detail = cli_failure_reason(proc.stderr, proc.stdout)
         raise BackendError(f"codex exec failed (exit {proc.returncode}): {detail}")
     return proc.stdout
 
@@ -198,10 +205,12 @@ def claude_runner(prompt: str) -> str:
         )
     except FileNotFoundError as exc:
         raise BackendError("claude CLI not found on PATH") from exc
+    except OSError as exc:
+        raise BackendError(f"claude CLI could not be launched (OS error {exc.errno})") from exc
     except subprocess.TimeoutExpired as exc:
         raise BackendError(f"claude -p timed out after {int(timeout)}s") from exc
     if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "").strip()[:500]
+        detail = cli_failure_reason(proc.stderr, proc.stdout)
         raise BackendError(f"claude -p failed (exit {proc.returncode}): {detail}")
     try:
         envelope = json.loads(proc.stdout)
@@ -216,7 +225,7 @@ def claude_runner(prompt: str) -> str:
         raise BackendError("claude -p returned malformed result envelope")
     if is_error:
         result = envelope.get("result", "")
-        detail = " ".join(str(result).split())
+        detail = sanitize_cli_error_detail(str(result))
         raise BackendError(f"claude -p returned error result: {detail}")
     if envelope.get("subtype") != "success":
         raise BackendError("claude -p returned malformed result envelope")

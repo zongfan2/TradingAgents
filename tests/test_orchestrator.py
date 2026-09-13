@@ -980,6 +980,62 @@ def test_watchdog_notifies_once_for_missed_slot(tmp_path):
 
 
 @pytest.mark.unit
+def test_watchdog_main_still_alerts_after_configured_cli_disappears(tmp_path, monkeypatch):
+    executable = tmp_path / "codex"
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o700)
+    monkeypatch.setenv("TRADINGAGENTS_SKIP_DOTENV", "1")
+    monkeypatch.setenv("TRADINGAGENTS_CODEX_CLI", f'  "{executable}"\t')
+    monkeypatch.setenv("TRADINGAGENTS_STATE_DIR", str(tmp_path / "state"))
+    config = load_config()
+    executable.unlink()  # simulate a later app update/removal, in fixture only
+    notifier, sent = recording_notifier()
+    monkeypatch.setattr(orchestrator, "Notifier", lambda **kwargs: notifier)
+    monkeypatch.setattr(orchestrator, "_utc_now", lambda: datetime(2026, 1, 5, 18, tzinfo=timezone.utc))
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: pytest.fail("watchdog launched a process"))
+    assert orchestrator.main(["watchdog"]) == 0
+    assert len(sent) == 1
+    assert "us slot for 2026-01-05 has not started" in " ".join(sent[0])
+    assert orchestrator.watchdog_marker_path(config, "us", "2026-01-05").is_file()
+
+
+@pytest.mark.unit
+def test_slot_main_records_missing_cli_component_failure_and_notifies(tmp_path, monkeypatch):
+    from pipeline import macro_collector
+
+    executable = tmp_path / "codex"
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o700)
+    monkeypatch.setenv("TRADINGAGENTS_SKIP_DOTENV", "1")
+    monkeypatch.setenv("TRADINGAGENTS_CODEX_CLI", str(executable))
+    monkeypatch.setenv("TRADINGAGENTS_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("TRADINGAGENTS_SLOT_TIME_US", "08:30")
+    config = load_config()
+    executable.unlink()
+    notifier, sent = recording_notifier()
+
+    def fail_collection(argv):
+        try:
+            macro_collector.default_runner("codex", "FIXTURE PROMPT")
+        except macro_collector.CollectorError as exc:
+            return orchestrator.RunResult(1, stderr=f"macro-collector: {exc}\n")
+        pytest.fail("missing configured executable was not rejected")
+
+    runner = FakeRunner({"macro_collector": fail_collection})
+    monkeypatch.setattr(orchestrator, "build_default_registry", lambda cfg: full_fake_registry())
+    monkeypatch.setattr(orchestrator, "make_subprocess_runner", lambda env: runner)
+    monkeypatch.setattr(orchestrator, "Notifier", lambda **kwargs: notifier)
+    monkeypatch.setattr(orchestrator, "_utc_now", lambda: NOW)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: pytest.fail("launched real process"))
+    assert orchestrator.main(["slot", "--session", "us"]) == 1
+    status = read_status(config, "us")
+    assert status["slot"]["finished_at"] is not None
+    assert status["components"]["macro_collector"]["status"] == "failed"
+    assert "configured codex CLI" in status["components"]["macro_collector"]["error"]
+    assert any("macro_collector" in " ".join(message) for message in sent)
+
+
+@pytest.mark.unit
 def test_watchdog_suppressed_when_slot_started(tmp_path):
     config = make_config(tmp_path)
     now = datetime(2026, 1, 5, 18, 0, tzinfo=timezone.utc)

@@ -110,6 +110,7 @@ _DATA_DIR_ENV_KEYS = {
 _BACKEND_ENV_KEYS = {
     "TRADINGAGENTS_COLLECT_BACKEND": "collect_backend",
     "TRADINGAGENTS_EVAL_BACKEND": "eval_backend",
+    "TRADINGAGENTS_CODEX_CLI": "codex_cli",
 }
 
 

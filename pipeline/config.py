@@ -96,8 +96,19 @@ class PipelineConfig:
     #: loudly at config time, never as a mid-slot CLI error.
     collect_backend: str = DEFAULT_COLLECT_BACKEND
     eval_backend: str = DEFAULT_EVAL_BACKEND
+    #: Project-scoped executable selection, independent of the desktop PATH.
+    #: Does not select a model, change D19 roles, or update any global CLI.
+    codex_cli: str = "codex"
 
     def __post_init__(self) -> None:
+        if (
+            not isinstance(self.codex_cli, str)
+            or not self.codex_cli
+            or self.codex_cli != self.codex_cli.strip()
+            or any(ord(char) < 32 or ord(char) == 127 for char in self.codex_cli)
+            or (self.codex_cli != "codex" and not Path(self.codex_cli).is_absolute())
+        ):
+            raise ValueError("codex_cli must be 'codex' or one absolute executable path")
         for name in ("collect_backend", "eval_backend"):
             value = getattr(self, name)
             if value not in BACKEND_CHOICES:
@@ -119,11 +130,40 @@ class PipelineConfig:
             if session not in self.sessions:
                 raise ValueError(f"sessions config missing required session {session!r}")
 
+    def validate_codex_cli(self) -> None:
+        """Check mutable availability only at installation/invocation boundaries.
+
+        Loading this config must remain possible for watchdog/status reporting
+        after an app update removes the executable. Never substitute another CLI.
+        """
+        if self.codex_cli != "codex" and (
+            not Path(self.codex_cli).is_file() or not os.access(self.codex_cli, os.X_OK)
+        ):
+            raise FileNotFoundError("configured codex CLI is missing or not executable")
+
 
 def _env_bool(raw: str | None, default: bool) -> bool:
     if raw is None or not raw.strip():
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_codex_cli(raw: object) -> object:
+    """Normalize ordinary env/.env syntax at the selector boundary only."""
+    if not isinstance(raw, str):
+        return raw
+    value = raw.strip()
+    if not value:
+        return "codex"
+    starts_quoted = value[0] in ("'", '"')
+    ends_quoted = value[-1] in ("'", '"')
+    if starts_quoted or ends_quoted:
+        if len(value) < 2 or not (starts_quoted and value[-1] == value[0]):
+            raise ValueError("codex_cli has a malformed outer quote wrapper")
+        value = value[1:-1]
+        if not value:
+            return "codex"
+    return value
 
 
 def load_config(env: Mapping[str, str] | None = None) -> PipelineConfig:
@@ -154,6 +194,8 @@ def load_config(env: Mapping[str, str] | None = None) -> PipelineConfig:
         # Junk values are rejected by PipelineConfig's eager validation.
         return (env.get(key) or "").strip() or default
 
+    codex_cli = _env_codex_cli(env.get("TRADINGAGENTS_CODEX_CLI", "codex"))
+
     return PipelineConfig(
         state_dir=path_or_none("TRADINGAGENTS_STATE_DIR") or _default_state_dir(),
         macro_brief_dir=path_or_none("TRADINGAGENTS_MACRO_BRIEF_DIR"),
@@ -167,4 +209,5 @@ def load_config(env: Mapping[str, str] | None = None) -> PipelineConfig:
         python_executable=Path(env.get("TRADINGAGENTS_PIPELINE_PYTHON") or sys.executable),
         collect_backend=backend("TRADINGAGENTS_COLLECT_BACKEND", DEFAULT_COLLECT_BACKEND),
         eval_backend=backend("TRADINGAGENTS_EVAL_BACKEND", DEFAULT_EVAL_BACKEND),
+        codex_cli=codex_cli,
     )

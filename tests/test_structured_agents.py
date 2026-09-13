@@ -7,12 +7,16 @@ behavior we added for the Trader, Research Manager, and Sentiment Analyst
 so they share the same deterministic output shape.
 """
 
+import socket
 from unittest.mock import MagicMock
 
 import pytest
 from pydantic import ValidationError
 
-from tradingagents.agents.analysts.sentiment_analyst import create_sentiment_analyst
+import tradingagents.agents.analysts.sentiment_analyst as sentiment
+import tradingagents.dataflows.reddit as reddit
+import tradingagents.dataflows.stocktwits as stocktwits
+import tradingagents.dataflows.yfinance_news as yfinance_news
 from tradingagents.agents.managers.research_manager import create_research_manager
 from tradingagents.agents.schemas import (
     PortfolioDecision,
@@ -27,6 +31,8 @@ from tradingagents.agents.schemas import (
     render_trader_proposal,
 )
 from tradingagents.agents.trader.trader import create_trader
+
+create_sentiment_analyst = sentiment.create_sentiment_analyst
 
 # ---------------------------------------------------------------------------
 # Render functions
@@ -365,8 +371,47 @@ def _structured_sentiment_llm(captured: dict, report: SentimentReport | None = N
     return llm
 
 
+_NEWS_FIXTURE = "OFFLINE NEWS: NVDA datacenter demand remains resilient."
+_STOCKTWITS_FIXTURE = "OFFLINE STOCKTWITS: 2 bullish, 1 bearish NVDA messages."
+_REDDIT_FIXTURE = "OFFLINE REDDIT: NVDA valuation discussion has 314 upvotes."
+
+
 @pytest.mark.unit
 class TestSentimentAnalystAgent:
+    @pytest.fixture(autouse=True)
+    def _use_offline_sentiment_sources(self, monkeypatch):
+        def fail_external_io(*args, **kwargs):
+            pytest.fail("sentiment agent test reached an external data transport")
+
+        # Guard the current Yahoo/urllib transports and the socket fallback so
+        # a missing source stub fails before any external I/O can begin.
+        monkeypatch.setattr(socket.socket, "connect", fail_external_io)
+        monkeypatch.setattr(yfinance_news.yf, "Ticker", fail_external_io)
+        monkeypatch.setattr(stocktwits, "urlopen", fail_external_io)
+        monkeypatch.setattr(reddit, "urlopen", fail_external_io)
+
+        def news_source(ticker, start_date, end_date):
+            assert (ticker, start_date, end_date) == (
+                "NVDA",
+                "2026-01-08",
+                "2026-01-15",
+            )
+            return _NEWS_FIXTURE
+
+        def stocktwits_source(ticker, *, limit):
+            assert (ticker, limit) == ("NVDA", 30)
+            return _STOCKTWITS_FIXTURE
+
+        def reddit_source(ticker):
+            assert ticker == "NVDA"
+            return _REDDIT_FIXTURE
+
+        # Patch the three prefetch seams used by the real sentiment factory;
+        # prompt formatting, structured rendering and fallback stay real.
+        monkeypatch.setattr(sentiment.get_news, "func", news_source, raising=False)
+        monkeypatch.setattr(sentiment, "fetch_stocktwits_messages", stocktwits_source)
+        monkeypatch.setattr(sentiment, "fetch_reddit_posts", reddit_source)
+
     def test_structured_path_produces_rendered_markdown(self):
         captured = {}
         report = SentimentReport(
@@ -386,10 +431,15 @@ class TestSentimentAnalystAgent:
         assert len(result["messages"]) == 1
         assert result["sentiment_report"] == result["messages"][0].content
 
-    def test_prompt_contains_ticker(self):
+    def test_prompt_contains_ticker_dates_and_prefetched_sources(self):
         captured = {}
         create_sentiment_analyst(_structured_sentiment_llm(captured))(_make_sentiment_state())
-        assert any("NVDA" in str(m) for m in captured["prompt"])
+        prompt_text = "\n".join(str(message.content) for message in captured["prompt"])
+        assert "NVDA" in prompt_text
+        assert "2026-01-08 to 2026-01-15" in prompt_text
+        assert _NEWS_FIXTURE in prompt_text
+        assert _STOCKTWITS_FIXTURE in prompt_text
+        assert _REDDIT_FIXTURE in prompt_text
 
     def test_falls_back_to_freetext_when_structured_unavailable(self):
         plain = "**Overall Sentiment:** **Bearish** (Score: 3.0/10)\n**Confidence:** Low\n\nLimited data."

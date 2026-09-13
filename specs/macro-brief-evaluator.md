@@ -53,6 +53,14 @@ opportunity brief whose `catalyst_score` ≥ the analysis trigger threshold.
   failure. Schema retry remains only for an actual `_ModelJudgment` contract
   failure. The `codex` backend runs model `gpt-5.6-terra` through `codex exec`
   with web search enabled (identity `gpt-5.6-terra`).
+  Its executable follows `codex_cli` in the shared config appendix and is
+  checked before launch; an unavailable explicit path is a backend failure,
+  not permission to fall back to PATH. Both backends' nonzero-exit diagnostics
+  and Claude `is_error` result details are printable single lines, redact common
+  credentials/URLs and cap extracted detail at 500 characters plus fixed context.
+  OS-level launch failures become `BackendError` with bounded backend/errno
+  context, without raw OS details or paths, fallback, or schema retry.
+  This does not change success-envelope parsing, verdicts or retry eligibility.
   Independence: the evaluator must NOT reuse the collector's backend session
   or context, and the eval backend must differ from `collect_backend` — a
   match is a loud stderr warning (never a failure).
