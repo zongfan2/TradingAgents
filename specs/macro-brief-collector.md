@@ -70,7 +70,11 @@ The robust version below replaces this one-liner.
   For backend failures, inspect bounded tails of both captured streams for
   recognized terminal JSON errors first, then anchored `ERROR:`/`FATAL:` lines,
   then timestamped `ERROR`/`FATAL` logger candidates, before the original
-  plain-text fallback.
+  plain-text fallback. The recognized-error search alone is limited to each
+  stream's bounded tail. If it finds no candidate, scan original stderr then
+  stdout from the stream start and select the first logical line that remains
+  nonblank after terminal cleanup; sanitize and redact that complete selected
+  line before applying the 500-character output bound.
   Startup cache warnings must not mask a later terminal
   model/CLI compatibility error. Strip terminal controls, redact common
   credential patterns and URLs, and cap the extracted diagnostic detail at

@@ -1,5 +1,5 @@
 {
-  "provenance": "Redacted from the persisted 2026-09-11 task_complete.error.message JSON object. This is CLI error evidence, not a raw stdout/stderr transcript. The retained collector and launchd streams contain only the earlier models-cache diagnostic, so tests place this object in captured streams synthetically.",
+  "provenance": "The terminal error_object was redacted from the persisted 2026-09-11 task_complete.error.message JSON object. It is CLI error evidence, not a raw stdout/stderr transcript; its original terminal rendering and stream placement were not retained. The separate startup_status_evidence entries were observed in persisted pipeline status artifacts. Pairing a startup diagnostic with a rendered terminal line in tests remains synthetic: no complete startup-plus-terminal output stream was captured.",
   "error_object": {
     "type": "error",
     "status": 400,
@@ -7,5 +7,27 @@
       "type": "invalid_request_error",
       "message": "The '[model redacted]' model requires a newer version of Codex. Please upgrade to the latest app or CLI and try again."
     }
-  }
+  },
+  "startup_status_evidence": [
+    {
+      "source_basename": "pipeline_status.cn.json",
+      "json_pointer": "/components/macro_collector/error",
+      "slot": {
+        "session": "cn",
+        "date": "2026-09-11"
+      },
+      "status_error": "macro-collector: backend 'codex' exited 1: 2026-09-11T00:30:26.749363Z ERROR codex_models_manager::manager: failed to load models cache: missing field `supports_parallel_tool_calls` at line 132 column 5",
+      "startup_diagnostic": "2026-09-11T00:30:26.749363Z ERROR codex_models_manager::manager: failed to load models cache: missing field `supports_parallel_tool_calls` at line 132 column 5"
+    },
+    {
+      "source_basename": "pipeline_status.us.json",
+      "json_pointer": "/components/macro_collector/error",
+      "slot": {
+        "session": "us",
+        "date": "2026-09-11"
+      },
+      "status_error": "macro-collector: backend 'codex' exited 1: 2026-09-11T09:30:31.186247Z ERROR codex_models_manager::manager: failed to load models cache: missing field `supports_parallel_tool_calls` at line 132 column 5",
+      "startup_diagnostic": "2026-09-11T09:30:31.186247Z ERROR codex_models_manager::manager: failed to load models cache: missing field `supports_parallel_tool_calls` at line 132 column 5"
+    }
+  ]
 }

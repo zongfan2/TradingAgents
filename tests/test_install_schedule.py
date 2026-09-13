@@ -573,6 +573,37 @@ def test_explicit_cli_resources_directory_cannot_shadow_standard_command(
 
 
 @pytest.mark.unit
+def test_explicit_cli_parent_exposes_otherwise_unavailable_sibling_command(
+    monkeypatch, tmp_path
+):
+    resources = tmp_path / "Example.app" / "Contents" / "Resources"
+    standard_bin = tmp_path / "standard-bin"
+    backend_bin = tmp_path / "backend-bin"
+    for directory in (resources, standard_bin, backend_bin):
+        directory.mkdir(parents=True)
+    codex = resources / "codex"
+    sibling = resources / "co-located-helper"
+    claude = backend_bin / "claude"
+    for executable in (codex, sibling, claude):
+        executable.write_text("#!/bin/sh\nexit 0\n")
+        executable.chmod(0o700)
+
+    monkeypatch.setattr(install_schedule, "_STANDARD_PATH_DIRS", (str(standard_bin),))
+    monkeypatch.setenv("PATH", str(backend_bin))
+
+    without_explicit_parent = f"{backend_bin}:{standard_bin}"
+    generated_path = install_schedule.launchd_path(str(codex))
+
+    assert shutil.which(sibling.name, path=without_explicit_parent) is None
+    assert shutil.which(sibling.name, path=generated_path) == str(sibling)
+    assert generated_path.split(":") == [
+        str(backend_bin),
+        str(standard_bin),
+        str(resources),
+    ]
+
+
+@pytest.mark.unit
 def test_default_codex_cli_warns_when_codex_is_absent_from_path(
     monkeypatch, tmp_path, capsys
 ):

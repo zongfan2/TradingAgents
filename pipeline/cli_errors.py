@@ -22,6 +22,7 @@ _TIMESTAMPED_ERROR = re.compile(
     r"([A-Za-z0-9_.-]+(?:::[A-Za-z0-9_.-]+)*):\s*(.+)$",
     re.IGNORECASE,
 )
+_LINE_BREAK = re.compile(r"\r\n|[\n\v\f\r\x1c-\x1e\x85\u2028\u2029]")
 _URL = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 _API_TOKEN = re.compile(r"\bsk-[A-Za-z0-9_-]+")
 _BEARER = re.compile(r"\bBearer\s+[^\s,;\"']+", re.IGNORECASE)
@@ -86,6 +87,17 @@ def _timestamped_error_detail(line: str) -> tuple[str, bool] | None:
     return detail, is_cache_warning
 
 
+def _first_plaintext_detail(text: str) -> str:
+    """Sanitize the first useful logical line without splitting the transcript."""
+    start = 0
+    for boundary in _LINE_BREAK.finditer(text):
+        detail = _one_line(text[start : boundary.start()])
+        if detail:
+            return detail
+        start = boundary.end()
+    return _one_line(text[start:])
+
+
 def sanitize_cli_error_detail(text: str) -> str:
     """Bound and sanitize an already-selected structured backend error detail.
 
@@ -98,9 +110,9 @@ def sanitize_cli_error_detail(text: str) -> str:
 def cli_failure_reason(stderr: str | None, stdout: str | None) -> str:
     """One bounded reason; prefer terminal JSON/ERROR lines in either stream.
 
-    Search only each stream's bounded tail. Unrecognized stderr retains its
-    first nonblank line for CLIs with plain error text. Unrecognized stdout
-    is used only when stderr is empty, preserving the existing fallback.
+    Search only each stream's bounded tail for recognized errors. The plain
+    fallback starts at each original stream's beginning and selects sanitized
+    stderr before stdout, preserving the existing fallback priority.
     """
     streams = [
         ["".join(c for c in line if c.isprintable()).strip()
@@ -128,7 +140,8 @@ def cli_failure_reason(stderr: str | None, stdout: str | None) -> str:
             return _one_line(detail)
     if timestamped:
         return _one_line(timestamped[0][0])
-    for lines in streams:
-        if lines:
-            return _one_line(lines[0]) or "no output"
+    for text in (stderr or "", stdout or ""):
+        detail = _first_plaintext_detail(text)
+        if detail:
+            return detail
     return "no output"

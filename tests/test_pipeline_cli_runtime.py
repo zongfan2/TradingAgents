@@ -381,6 +381,47 @@ def test_timestamped_terminal_diagnostic_prefers_non_cache_across_streams_and_ke
 
 
 @pytest.mark.unit
+def test_retained_startup_status_diagnostics_are_exact_cache_candidates_and_demoted():
+    fixture = json.loads(INCIDENT_FIXTURE_PATH.read_text(encoding="utf-8"))
+    evidence = fixture["startup_status_evidence"]
+    assert [
+        (
+            item["source_basename"],
+            item["json_pointer"],
+            item["slot"]["session"],
+            item["slot"]["date"],
+            item["startup_diagnostic"],
+        )
+        for item in evidence
+    ] == [
+        (
+            "pipeline_status.cn.json",
+            "/components/macro_collector/error",
+            "cn",
+            "2026-09-11",
+            "2026-09-11T00:30:26.749363Z ERROR "
+            "codex_models_manager::manager: failed to load models cache: "
+            "missing field `supports_parallel_tool_calls` at line 132 column 5",
+        ),
+        (
+            "pipeline_status.us.json",
+            "/components/macro_collector/error",
+            "us",
+            "2026-09-11",
+            "2026-09-11T09:30:31.186247Z ERROR "
+            "codex_models_manager::manager: failed to load models cache: "
+            "missing field `supports_parallel_tool_calls` at line 132 column 5",
+        ),
+    ]
+    terminal = "2026-09-11T09:30:32Z ERROR codex_core::client: " + FATAL
+    for item in evidence:
+        assert item["status_error"].endswith(item["startup_diagnostic"])
+        assert cli_failure_reason(item["startup_diagnostic"], terminal) == (
+            "ERROR codex_core::client: " + FATAL
+        )
+
+
+@pytest.mark.unit
 def test_timestamped_candidates_keep_stream_and_newest_precedence_without_cross_stream_ordering():
     old = "2026-09-11T09:30:32Z ERROR codex_core::old: old terminal"
     new = "2026-09-11T09:30:33Z FATAL codex_core::new: newest terminal"
@@ -454,6 +495,59 @@ def test_reason_is_one_bounded_line_with_no_terminal_controls():
 def test_unknown_plain_error_keeps_existing_fallback_and_empty_is_explicit():
     assert cli_failure_reason("not logged in\nmore detail", "answer") == "not logged in"
     assert cli_failure_reason(None, None) == "no output"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("stderr", "stdout"),
+    [
+        ("not logged in\n" + "filler line\n" * 5000, "stdout answer"),
+        ("", "not logged in\n" + "filler line\n" * 5000),
+    ],
+    ids=["stderr", "stdout"],
+)
+def test_plain_fallback_reads_true_stream_start_beyond_recognized_tail(stderr, stdout):
+    assert cli_failure_reason(stderr, stdout) == "not logged in"
+
+
+@pytest.mark.unit
+def test_plain_fallback_finds_first_meaningful_line_after_long_leading_whitespace():
+    stderr = (" \r\n" * 12_000) + "  first useful diagnostic  \r\nlater"
+    assert cli_failure_reason(stderr, "stdout answer") == "first useful diagnostic"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("separator", ["\r\n", "\v", "\x1c", "\x85", "\u2028"])
+def test_plain_fallback_skips_cleaned_empty_lines_across_splitlines_boundaries(separator):
+    stderr = f" \t{separator}\x1b[31m\x00\x1b[0m{separator}  useful diagnostic  {separator}later"
+    assert cli_failure_reason(stderr, "stdout answer") == "useful diagnostic"
+
+
+@pytest.mark.unit
+def test_plain_fallback_redacts_complete_long_line_before_output_bound():
+    secret = "private-value-" + "x" * 32_768
+    stderr = f'  rejected api_key="{secret}" final reason ' + "y" * 900 + "\nlater"
+
+    reason = cli_failure_reason(stderr, "")
+
+    assert reason.startswith("rejected api_key=[redacted] final reason ")
+    assert secret[:32] not in reason
+    assert len(reason) == 500
+
+
+@pytest.mark.unit
+def test_collector_long_plain_failure_surfaces_initial_diagnostic_once(monkeypatch):
+    calls = []
+    stderr = "not logged in\n" + "filler line\n" * 5000
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr=stderr)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="not logged in"):
+        macro_collector.default_runner("claude", "PROMPT")
+    assert len(calls) == 1
 
 
 @pytest.mark.unit

@@ -124,7 +124,11 @@ loading does not inspect that mutable file, so the watchdog can still alert.
 For an absolute selector, the exact `TRADINGAGENTS_CODEX_CLI` value remains
 authoritative. The installer appends its parent after the normally resolved
 backend and standard PATH directories, and does not require a separate
-`codex` on the installer's PATH.
+`codex` on the installer's PATH. That suffix is intentional compatibility for
+co-located helper resolution, not a requirement for the absolute `argv[0]`:
+it makes otherwise-unavailable sibling command names resolvable while earlier
+backend and standard directories keep priority. No particular sibling helper
+is known to be required.
 If the OS rejects a launch after this check (for example, changed permissions
 or invalid executable format), the component reports a controlled backend/OS
 error without raw exception paths, an alternate executable, or a retry.
@@ -157,6 +161,7 @@ single quotes are shell syntax and are not part of the selected path:
 export TRADINGAGENTS_CODEX_CLI='/Applications/Trading Tools/codex'
 python -m pipeline.evaluator <brief-path>
 python -m pipeline.macro_collector --session <s> --date <d>
+python -m pipeline.pool_builder --session <s> --date <d>
 ```
 
 Use the verified host path in place of the spaced example. Do not source the
