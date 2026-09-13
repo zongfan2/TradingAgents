@@ -54,7 +54,12 @@ from pipeline.common import (
     session_date,
     to_utc_iso,
 )
-from pipeline.config import PipelineConfig, load_config, parse_slot_time
+from pipeline.config import (
+    PipelineConfig,
+    load_config,
+    notifications_enabled_from_env,
+    parse_slot_time,
+)
 
 logger = logging.getLogger("pipeline.orchestrator")
 
@@ -1303,7 +1308,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     _load_repo_dotenv()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     args = build_parser().parse_args(argv)
-    config = load_config()
+    try:
+        config = load_config()
+    except ValueError:
+        print("error: pipeline configuration invalid", file=sys.stderr)
+        if args.command == "watchdog":
+            Notifier(enabled=notifications_enabled_from_env()).notify(
+                "TradingAgents pipeline",
+                "configuration invalid; slot status not assessed",
+            )
+        return 2
     if args.command == "run":
         orchestrator = Orchestrator(config, args.session, slot_date=args.date)
         try:

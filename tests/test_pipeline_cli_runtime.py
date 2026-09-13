@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from pipeline import evaluator, macro_collector, orchestrator, pool_builder, ticker_collector
-from pipeline.cli_errors import cli_failure_reason
+from pipeline.cli_errors import cli_failure_reason, sanitize_cli_error_detail
 from pipeline.config import PipelineConfig, load_config
 
 COLLECTORS = (macro_collector, pool_builder, ticker_collector)
@@ -329,6 +329,71 @@ def test_claude_evaluator_failure_is_bounded_one_line_and_redacted(monkeypatch, 
     assert "rejected" in text
     assert all(char.isprintable() for char in text)
     assert len(text) <= 550  # <=500 extracted detail plus fixed backend context
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("field", "quote"), [("api_key", '"'), ("password", "'")])
+def test_structured_error_redacts_complete_long_quoted_assignment_before_bound(
+    field, quote
+):
+    credential = "fixture-private-credential-" + "x" * 32_768
+
+    detail = sanitize_cli_error_detail(
+        f"request rejected\n{field}={quote}{credential}{quote}\nretry denied"
+    )
+
+    assert detail == f"request rejected {field}=[redacted] retry denied"
+    assert credential[:32] not in detail
+    assert all(char.isprintable() for char in detail)
+    assert len(detail) <= 500
+
+
+@pytest.mark.unit
+def test_claude_error_envelope_redacts_long_credential_once_without_retry(monkeypatch):
+    credential = "fixture-private-credential-" + "x" * 32_768
+    diagnostic = f'permission denied\napi_key="{credential}"\ncontact support'
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stderr="",
+            stdout=json.dumps(
+                {"type": "result", "is_error": True, "result": diagnostic}
+            ),
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(evaluator.BackendError) as exc:
+        evaluator.claude_runner("PRIVATE PROMPT")
+
+    text = str(exc.value)
+    assert text == (
+        "claude -p returned error result: "
+        "permission denied api_key=[redacted] contact support"
+    )
+    assert credential[:32] not in text
+    assert all(char.isprintable() for char in text)
+    assert len(text.removeprefix("claude -p returned error result: ")) <= 500
+    assert len(calls) == 1
+    command, options = calls[0]
+    assert command[:-1] == [
+        "claude",
+        "-p",
+        "--allowedTools",
+        "WebSearch,WebFetch",
+        "--output-format",
+        "json",
+        "--json-schema",
+    ]
+    assert isinstance(json.loads(command[-1]), dict)
+    assert options["input"] == "PRIVATE PROMPT"
+    assert options["capture_output"] is True
+    assert options["text"] is True
+    assert options["timeout"] == 540.0
 
 
 @pytest.mark.unit

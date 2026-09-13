@@ -103,8 +103,10 @@ def sanitize_cli_error_detail(text: str) -> str:
 
     Unlike transcript selection, a result envelope's error text may span lines;
     preserve that context in a single printable line without logging the body.
+    Sanitize the complete selected field before applying the output bound so a
+    long quoted credential cannot lose its closing delimiter before redaction.
     """
-    return _one_line(text[:_SCAN_CHARS]) or "no output"
+    return _one_line(text) or "no output"
 
 
 def cli_failure_reason(stderr: str | None, stdout: str | None) -> str:

@@ -57,7 +57,10 @@ opportunity brief whose `catalyst_score` ≥ the analysis trigger threshold.
   checked before launch; an unavailable explicit path is a backend failure,
   not permission to fall back to PATH. Both backends' nonzero-exit diagnostics
   and Claude `is_error` result details are printable single lines, redact common
-  credentials/URLs and cap extracted detail at 500 characters plus fixed context.
+  credentials/URLs and cap extracted detail at 500 characters plus fixed
+  context. A selected structured error field is sanitized in full before that
+  output cap, so long quoted credentials retain their closing delimiter for
+  redaction; this is not a constant-work or global transcript-size guarantee.
   OS-level launch failures become `BackendError` with bounded backend/errno
   context, without raw OS details or paths, fallback, or schema retry.
   This does not change success-envelope parsing, verdicts or retry eligibility.

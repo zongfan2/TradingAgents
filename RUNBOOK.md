@@ -121,6 +121,11 @@ symlinks are preserved. Without an override (including a blank environment
 value), the historical `codex` PATH lookup remains. A configured path that later
 disappears is a component failure, never a fallback to another CLI. Config
 loading does not inspect that mutable file, so the watchdog can still alert.
+Malformed nonblank selector syntax remains a strict configuration failure: all
+orchestrator commands exit 2 without echoing the value. The watchdog does not
+guess schedule/state or claim a missed slot on that branch; when notifications
+are enabled it emits `configuration invalid; slot status not assessed`, with no
+per-slot marker. Fix the configuration and invoke the normal check again.
 For an absolute selector, the exact `TRADINGAGENTS_CODEX_CLI` value remains
 authoritative. The installer appends its parent after the normally resolved
 backend and standard PATH directories, and does not require a separate
@@ -341,6 +346,11 @@ exit 0 — normal; locks older than 12 h are auto-broken with a warning. To
 recover a missed slot: `orchestrator run --session <s> --date <d>` (or
 `--from N` if it died mid-slot — the status file names the failed step).
 No catch-up slot is run without explicit authorization.
+
+If the watchdog instead reports `configuration invalid; slot status not
+assessed`, it exited nonzero without reading schedule/state or writing a
+missed-slot marker. Correct the malformed configuration first; do not treat
+that alert as evidence that a particular session was missed.
 
 **Component failure ≠ slot failure.** Every component failure/timeout is
 recorded in the status file and the slot continues, degrading per D12:

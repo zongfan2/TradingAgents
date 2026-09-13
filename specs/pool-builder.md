@@ -75,9 +75,16 @@ price structure must confirm it.
   itself writes a pool file carrying the opportunity/watch layers forward from
   the most recent prior pool file (streaks untouched), sets
   `"carried_forward": true`, warns on stderr, and exits 0 (surfaced as `warn`
-  status) — ticker collection still covers known names. Only an unreadable
-  core file or a write failure is a non-zero exit; on such a hard crash,
-  downstream consumers read the most recent prior pool file.
+  status) — ticker collection still covers known names. Strict shared-config
+  failure is not nomination/runtime degradation: when the effective runner is
+  the real default runner, config is validated before core, prior pool,
+  nomination cache, price, log, or output access, even with an explicit backend
+  and pool path. Syntax-valid CLI unavailability still degrades under R4 only
+  when an invocation is needed; a valid cache can be reused without checking
+  executable availability. Explicit injected runners retain their existing
+  config-independent boundary when backend and pool path are also explicit.
+  An unreadable core file, config failure, or write failure is a non-zero exit;
+  on a hard crash, downstream consumers read the most recent prior pool file.
 - **R5 — Budget**: at most 1 deep search per slot; re-scoring rides in the
   same prompt as nomination.
 

@@ -1100,11 +1100,18 @@ def build_pool(
     on the R4 hard failures (unreadable core, contract-invalid output, write
     failure). ``backend`` ``None`` resolves from the shared config's
     ``collect_backend`` (env ``TRADINGAGENTS_COLLECT_BACKEND``, default
-    ``codex`` per D19); an explicit value always wins."""
+    ``codex`` per D19); an explicit value always wins. The real default runner
+    validates shared config before reading pool state; an explicitly injected
+    runner keeps its existing isolated boundary."""
     if session not in SESSIONS:
         raise BuilderError(f"unknown session '{session}' — expected one of {sorted(SESSIONS)}")
+    effective_runner = runner or default_runner
+    config = None
+    if effective_runner is default_runner or backend is None:
+        config = load_config()
     if backend is None:
-        backend = load_config().collect_backend
+        assert config is not None
+        backend = config.collect_backend
     if backend not in GENERATORS:
         raise BuilderError(f"unknown backend '{backend}' — expected one of {sorted(GENERATORS)}")
     if as_of is None:
@@ -1140,7 +1147,7 @@ def build_pool(
     nomination_backend = backend
     try:
         nominations, nomination_backend = nominate(
-            runner or default_runner,
+            effective_runner,
             backend,
             prompt,
             nomination_cache_path(directory, session, as_of),

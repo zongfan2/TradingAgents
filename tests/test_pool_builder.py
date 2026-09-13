@@ -1526,6 +1526,192 @@ def test_write_failure_exits_nonzero_via_cli(pool_dir, capsys):
     assert "pool-builder:" in capsys.readouterr().err
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "malformed_selector", ["./codex", '"/absolute/path/codex'], ids=["relative", "unmatched-quote"]
+)
+@pytest.mark.parametrize("cache_hit", [False, True], ids=["cache-miss", "cache-hit"])
+@pytest.mark.parametrize(
+    "runner_arg",
+    [None, pool_builder.default_runner],
+    ids=["implicit-default-runner", "explicit-default-runner"],
+)
+def test_real_pool_runner_rejects_malformed_config_before_any_pool_state_access(
+    pool_dir, monkeypatch, capsys, malformed_selector, cache_hit, runner_arg
+):
+    write_core(pool_dir, [{"ticker": "NVDA", "note": "fixture core"}])
+    write_prior_pool(
+        pool_dir,
+        FRIDAY.isoformat(),
+        opportunity=[prior_opportunity("AVGO", low=1, fail=1)],
+        watch=[prior_watch("MRVL")],
+    )
+    (pool_dir / "builder.log").write_text("fixture log\n", encoding="utf-8")
+    if cache_hit:
+        cache = pool_builder.nomination_cache_path(pool_dir, "us", RUN_DATE)
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(
+            json.dumps({"backend": "codex", "nominations": [nominee("AVGO")]}),
+            encoding="utf-8",
+        )
+        write_prior_pool(
+            pool_dir,
+            DATE,
+            opportunity=[prior_opportunity("AVGO", low=2, fail=1)],
+        )
+    before = {
+        path.relative_to(pool_dir): path.read_bytes()
+        for path in pool_dir.rglob("*")
+        if path.is_file()
+    }
+    fetcher = FakeFetcher()
+    monkeypatch.setenv("TRADINGAGENTS_CODEX_CLI", malformed_selector)
+    monkeypatch.setattr(
+        pool_builder.subprocess,
+        "run",
+        lambda *a, **kw: pytest.fail("malformed config reached subprocess"),
+    )
+
+    with pytest.raises(ValueError, match="codex_cli"):
+        build_pool(
+            "us",
+            as_of=RUN_DATE,
+            backend="codex",
+            runner=runner_arg,
+            fetch_ohlcv=fetcher,
+            pool_dir=pool_dir,
+        )
+
+    captured = capsys.readouterr()
+    assert "carrying opportunity/watch forward" not in captured.err
+    assert fetcher.calls == []
+    after = {
+        path.relative_to(pool_dir): path.read_bytes()
+        for path in pool_dir.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+
+
+@pytest.mark.unit
+def test_pool_cli_reports_malformed_config_nonzero_without_r4(
+    pool_dir, monkeypatch, capsys
+):
+    monkeypatch.setenv("TRADINGAGENTS_CODEX_CLI", "./codex")
+    monkeypatch.setattr(
+        pool_builder.subprocess,
+        "run",
+        lambda *a, **kw: pytest.fail("malformed config reached subprocess"),
+    )
+
+    rc = main(["--session", "us", "--date", DATE, "--backend", "codex"])
+
+    assert rc == 1
+    assert "codex_cli" in capsys.readouterr().err
+    assert not (pool_dir / "us" / f"{DATE}.json").exists()
+
+
+@pytest.mark.unit
+def test_missing_valid_codex_cli_cache_miss_keeps_full_r4_carry_forward(
+    pool_dir, tmp_path, monkeypatch, capsys
+):
+    write_core(pool_dir, [{"ticker": "NVDA", "note": "fixture core"}])
+    write_prior_pool(
+        pool_dir,
+        FRIDAY.isoformat(),
+        opportunity=[prior_opportunity("AVGO", low=2, fail=1)],
+        watch=[prior_watch("MRVL")],
+    )
+    fetcher = FakeFetcher()
+    monkeypatch.setenv("TRADINGAGENTS_CODEX_CLI", str(tmp_path / "missing-codex"))
+    monkeypatch.setattr(
+        pool_builder.subprocess,
+        "run",
+        lambda *a, **kw: pytest.fail("missing configured CLI reached subprocess"),
+    )
+
+    rc = main(
+        ["--session", "us", "--date", DATE, "--backend", "codex"],
+        fetch_ohlcv=fetcher,
+    )
+
+    assert rc == 0
+    assert "carrying opportunity/watch forward" in capsys.readouterr().err
+    pool = read_written_pool(pool_dir)
+    assert pool.carried_forward is True
+    assert [entry.ticker for entry in pool.core] == ["NVDA"]
+    assert [(entry.ticker, entry.low_score_streak, entry.gate_fail_streak) for entry in pool.opportunity] == [
+        ("AVGO", 2, 1)
+    ]
+    assert [entry.ticker for entry in pool.watch] == ["MRVL"]
+    assert fetcher.calls == []
+
+
+@pytest.mark.unit
+def test_missing_valid_codex_cli_cache_hit_reuses_nominations_without_availability_check(
+    pool_dir, tmp_path, monkeypatch
+):
+    write_core(pool_dir, [{"ticker": "NVDA", "note": "fixture core"}])
+    cache = pool_builder.nomination_cache_path(pool_dir, "us", RUN_DATE)
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(
+        json.dumps({"backend": "codex", "nominations": [nominee("AVGO")]}),
+        encoding="utf-8",
+    )
+    fetcher = FakeFetcher()
+    monkeypatch.setenv("TRADINGAGENTS_CODEX_CLI", str(tmp_path / "missing-codex"))
+    monkeypatch.setattr(
+        pool_builder.subprocess,
+        "run",
+        lambda *a, **kw: pytest.fail("cache hit checked CLI availability"),
+    )
+
+    rc = main(
+        ["--session", "us", "--date", DATE, "--backend", "codex"],
+        fetch_ohlcv=fetcher,
+    )
+
+    assert rc == 0
+    pool = read_written_pool(pool_dir)
+    assert pool.carried_forward is False
+    assert pool.generator == "codex-deep-search"
+    assert [entry.ticker for entry in pool.opportunity] == ["AVGO"]
+    assert set(fetcher.calls) == {"NVDA", "AVGO"}
+
+
+@pytest.mark.unit
+def test_explicit_injected_pool_runner_and_directory_do_not_require_cli_config(
+    tmp_path, monkeypatch
+):
+    explicit_pool_dir = tmp_path / "fixture-pools"
+    write_core(explicit_pool_dir, [{"ticker": "NVDA", "note": "fixture core"}])
+    runner = FakeRunner([nomination_json(nominee("AVGO"))])
+    ambient_pool_dir = tmp_path / "ambient-pools"
+    monkeypatch.setenv(pool_builder.POOL_DIR_ENV, str(ambient_pool_dir))
+    monkeypatch.setenv("TRADINGAGENTS_CODEX_CLI", "./malformed-codex")
+    monkeypatch.setattr(
+        pool_builder,
+        "default_runner",
+        lambda *a, **kw: pytest.fail("injection routed through default_runner"),
+    )
+
+    result = build_pool(
+        "us",
+        as_of=RUN_DATE,
+        backend="codex",
+        runner=runner,
+        fetch_ohlcv=FakeFetcher(),
+        pool_dir=explicit_pool_dir,
+    )
+
+    assert result.outcome == "written"
+    assert len(runner.calls) == 1
+    assert runner.calls[0][0] == "codex"
+    assert "AVGO" in runner.calls[0][1]
+    assert read_written_pool(explicit_pool_dir).opportunity[0].ticker == "AVGO"
+    assert not ambient_pool_dir.exists()
+
+
 # ---------------------------------------------------------------------------
 # CLI surface
 # ---------------------------------------------------------------------------

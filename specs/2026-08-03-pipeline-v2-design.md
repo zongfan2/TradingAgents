@@ -146,13 +146,22 @@ structured keys are file-config only.
 The project-scoped `codex_cli` selector applies to macro/pool/ticker collection
 and Codex evaluation. The orchestrator exports its resolved value to children;
 the schedule installer writes it to all generated plists without invoking or
-upgrading the CLI. Invalid nonblank syntax fails at config load. Filesystem
+upgrading the CLI. Invalid nonblank syntax fails at config load. Orchestrator
+commands report that failure with exit 2 and no raw configuration detail; the
+watchdog additionally emits the fixed notification `configuration invalid;
+slot status not assessed` when notifications are enabled, without reading
+schedule/state or writing a missed-slot marker. Pool builds using the real
+default runner validate shared config before reading pool/core/cache state,
+including when an explicit backend and pool path are supplied; an explicitly
+injected runner retains its isolated test/programmatic boundary. Filesystem
 availability is checked before installing any plist and before each actual
 Codex invocation, not while loading shared configuration: a later removed or
 non-executable CLI must not disable the watchdog or status reporting. Such a
 runtime failure applies each component's existing policy: collectors and
 evaluator fail, while pool nomination degrades under R4 to a visible
-carried-forward warning with exit 0; there is no alternate-CLI fallback. OS
+carried-forward warning with exit 0 when an invocation is needed; a valid
+nomination cache remains reusable without checking CLI availability. There is
+no alternate-CLI fallback. OS
 launch failures after that check (including permission changes
 or invalid executable format) are also controlled backend failures; do not
 propagate raw exception paths/details or retry another executable. This does

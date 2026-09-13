@@ -122,6 +122,12 @@ webui reads both.
 - An `osascript` failure degrades to log-only — notifications can never fail
   a slot.
 - Config `notifications_enabled` (default true).
+- If strict config loading fails, every orchestrator command exits 2 with a
+  fixed nonsecret diagnostic. `run`/`slot` stop before constructing the
+  orchestrator or accessing state. `watchdog` does not assess a slot, infer a
+  miss, or write a marker; when notifications are enabled it sends one fixed
+  `configuration invalid; slot status not assessed` notification for that
+  invocation. Suppression and notifier failure remain log-only.
 
 ## Requirements
 

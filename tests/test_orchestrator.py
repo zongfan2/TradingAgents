@@ -163,6 +163,43 @@ def recording_notifier():
     return orchestrator.Notifier(enabled=True, runner=osascript), sent
 
 
+@pytest.fixture
+def real_repo_dotenv(tmp_path, monkeypatch):
+    """Point the real repo-dotenv loader at a temporary repository root."""
+    keys = (
+        "TRADINGAGENTS_SKIP_DOTENV",
+        "TRADINGAGENTS_CODEX_CLI",
+        "TRADINGAGENTS_NOTIFICATIONS_ENABLED",
+        "TRADINGAGENTS_STATE_DIR",
+        "TRADINGAGENTS_TIMEOUT_POOL_BUILDER",
+    )
+    for key in keys:
+        monkeypatch.delenv(key, raising=False)
+    fake_module = tmp_path / "fixture-repo" / "pipeline" / "orchestrator.py"
+    fake_module.parent.mkdir(parents=True)
+    monkeypatch.setattr(orchestrator, "__file__", str(fake_module))
+    monkeypatch.setattr(
+        orchestrator.subprocess,
+        "run",
+        lambda *a, **kw: pytest.fail("config-fault test launched a subprocess"),
+    )
+    dotenv = fake_module.parent.parent / ".env"
+
+    def write(*lines):
+        state_dir = tmp_path / "runtime-state"
+        rendered = [line.replace("{STATE_DIR}", str(state_dir)) for line in lines]
+        dotenv.write_text("\n".join(rendered) + "\n", encoding="utf-8")
+        return state_dir
+
+    yield write
+
+    # _load_repo_dotenv deliberately writes through os.environ.setdefault,
+    # outside monkeypatch's bookkeeping. Remove those fixture values before
+    # monkeypatch restores the process's original environment.
+    for key in keys:
+        os.environ.pop(key, None)
+
+
 def write_eval(config, session, slot_date, verdict="pass", flags=0):
     path = orchestrator.macro_eval_path(config, session, slot_date)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1000,6 +1037,194 @@ def test_watchdog_main_still_alerts_after_configured_cli_disappears(tmp_path, mo
     assert len(sent) == 1
     assert "us slot for 2026-01-05 has not started" in " ".join(sent[0])
     assert orchestrator.watchdog_marker_path(config, "us", "2026-01-05").is_file()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "selector", ["./codex", '"/absolute/path/codex'], ids=["relative", "unmatched-quote"]
+)
+def test_watchdog_main_reports_invalid_config_without_assessing_slot(
+    real_repo_dotenv, monkeypatch, capsys, selector
+):
+    state_dir = real_repo_dotenv(
+        f"TRADINGAGENTS_CODEX_CLI={selector}",
+        "TRADINGAGENTS_STATE_DIR={STATE_DIR}",
+    )
+    notifications = []
+    monkeypatch.setattr(
+        orchestrator,
+        "default_osascript_runner",
+        lambda argv: notifications.append(argv) or 0,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "run_watchdog",
+        lambda *a, **kw: pytest.fail("invalid config reached run_watchdog"),
+    )
+    monkeypatch.setattr(
+        orchestrator.subprocess,
+        "run",
+        lambda *a, **kw: pytest.fail("invalid config launched a subprocess"),
+    )
+
+    assert orchestrator.main(["watchdog"]) == 2
+
+    assert capsys.readouterr().err.strip() == "error: pipeline configuration invalid"
+    assert len(notifications) == 1
+    notification = " ".join(notifications[0])
+    assert "TradingAgents pipeline" in notification
+    assert "configuration invalid; slot status not assessed" in notification
+    assert "missed" not in notification
+    assert not state_dir.exists()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, True),
+        ("", True),
+        ("1", True),
+        ("true", True),
+        ("yes", True),
+        ("on", True),
+        ("0", False),
+        ("false", False),
+        ("disabled", False),
+    ],
+    ids=["unset", "blank", "one", "true", "yes", "on", "zero", "false", "other"],
+)
+def test_watchdog_config_fault_uses_the_shared_notification_switch(
+    real_repo_dotenv, monkeypatch, raw, expected
+):
+    lines = [
+        "TRADINGAGENTS_CODEX_CLI=./codex",
+        "TRADINGAGENTS_STATE_DIR={STATE_DIR}",
+    ]
+    if raw is not None:
+        lines.append(f"TRADINGAGENTS_NOTIFICATIONS_ENABLED={raw}")
+    real_repo_dotenv(*lines)
+    notifications = []
+    monkeypatch.setattr(
+        orchestrator,
+        "default_osascript_runner",
+        lambda argv: notifications.append(argv) or 0,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "run_watchdog",
+        lambda *a, **kw: pytest.fail("invalid config reached run_watchdog"),
+    )
+    monkeypatch.setattr(
+        orchestrator.subprocess,
+        "run",
+        lambda *a, **kw: pytest.fail("invalid config launched a subprocess"),
+    )
+
+    assert orchestrator.main(["watchdog"]) == 2
+
+    assert bool(notifications) is expected
+    env = {} if raw is None else {"TRADINGAGENTS_NOTIFICATIONS_ENABLED": raw}
+    assert load_config(env).notifications_enabled is expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["run", "--session", "us", "--date", "2026-01-05"],
+        ["slot", "--session", "us"],
+    ],
+    ids=["run", "slot"],
+)
+def test_run_and_slot_reject_invalid_config_before_state_or_components(
+    real_repo_dotenv, monkeypatch, capsys, argv
+):
+    state_dir = real_repo_dotenv(
+        "TRADINGAGENTS_CODEX_CLI=./private-invalid-selector",
+        "TRADINGAGENTS_STATE_DIR={STATE_DIR}",
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "Orchestrator",
+        lambda *a, **kw: pytest.fail("invalid config instantiated orchestrator"),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "run_slot_if_due",
+        lambda *a, **kw: pytest.fail("invalid config reached slot gate"),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "default_osascript_runner",
+        lambda *a, **kw: pytest.fail("non-watchdog config fault notified"),
+    )
+
+    assert orchestrator.main(argv) == 2
+
+    stderr = capsys.readouterr().err
+    assert stderr.strip() == "error: pipeline configuration invalid"
+    assert "private-invalid-selector" not in stderr
+    assert not state_dir.exists()
+
+
+@pytest.mark.unit
+def test_watchdog_other_invalid_config_has_same_controlled_nonsecret_boundary(
+    real_repo_dotenv, monkeypatch, capsys
+):
+    state_dir = real_repo_dotenv(
+        "TRADINGAGENTS_TIMEOUT_POOL_BUILDER=private-invalid-timeout",
+        "TRADINGAGENTS_STATE_DIR={STATE_DIR}",
+    )
+    notifications = []
+    monkeypatch.setattr(
+        orchestrator,
+        "default_osascript_runner",
+        lambda argv: notifications.append(argv) or 0,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "run_watchdog",
+        lambda *a, **kw: pytest.fail("invalid config reached run_watchdog"),
+    )
+
+    assert orchestrator.main(["watchdog"]) == 2
+
+    stderr = capsys.readouterr().err
+    assert stderr.strip() == "error: pipeline configuration invalid"
+    assert "private-invalid-timeout" not in stderr
+    assert len(notifications) == 1
+    assert not state_dir.exists()
+
+
+@pytest.mark.unit
+def test_watchdog_config_fault_notification_failure_still_returns_nonzero(
+    real_repo_dotenv, monkeypatch, capsys
+):
+    state_dir = real_repo_dotenv(
+        "TRADINGAGENTS_CODEX_CLI=./private-invalid-selector",
+        "TRADINGAGENTS_STATE_DIR={STATE_DIR}",
+    )
+    notifications = []
+
+    def failed_notification(argv):
+        notifications.append(argv)
+        raise OSError("fixture notifier failure")
+
+    monkeypatch.setattr(orchestrator, "default_osascript_runner", failed_notification)
+    monkeypatch.setattr(
+        orchestrator,
+        "run_watchdog",
+        lambda *a, **kw: pytest.fail("invalid config reached run_watchdog"),
+    )
+
+    assert orchestrator.main(["watchdog"]) == 2
+
+    stderr = capsys.readouterr().err
+    assert stderr.strip() == "error: pipeline configuration invalid"
+    assert "private-invalid-selector" not in stderr
+    assert len(notifications) == 1
+    assert not state_dir.exists()
 
 
 @pytest.mark.unit

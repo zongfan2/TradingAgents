@@ -148,6 +148,13 @@ def _env_bool(raw: str | None, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def notifications_enabled_from_env(env: Mapping[str, str] | None = None) -> bool:
+    """Read only the notification switch using the shared bool rule."""
+    if env is None:
+        env = os.environ
+    return _env_bool(env.get("TRADINGAGENTS_NOTIFICATIONS_ENABLED"), True)
+
+
 def _env_codex_cli(raw: object) -> object:
     """Normalize ordinary env/.env syntax at the selector boundary only."""
     if not isinstance(raw, str):
@@ -204,7 +211,7 @@ def load_config(env: Mapping[str, str] | None = None) -> PipelineConfig:
         ledger_dir=path_or_none("TRADINGAGENTS_LEDGER_DIR"),
         sessions=sessions,
         component_timeouts=timeouts,
-        notifications_enabled=_env_bool(env.get("TRADINGAGENTS_NOTIFICATIONS_ENABLED"), True),
+        notifications_enabled=notifications_enabled_from_env(env),
         pool_max_staleness_days=int(env.get("TRADINGAGENTS_POOL_MAX_STALENESS_DAYS") or 3),
         python_executable=Path(env.get("TRADINGAGENTS_PIPELINE_PYTHON") or sys.executable),
         collect_backend=backend("TRADINGAGENTS_COLLECT_BACKEND", DEFAULT_COLLECT_BACKEND),
