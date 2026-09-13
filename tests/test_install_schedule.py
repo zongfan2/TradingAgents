@@ -6,9 +6,11 @@ the host clock and host timezone never participate.
 """
 
 import json
+import os
 import plistlib
 import re
 import shutil
+import subprocess
 from datetime import date, datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -16,7 +18,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from pipeline import install_schedule, orchestrator
-from pipeline.config import PipelineConfig, SessionSchedule
+from pipeline.config import PipelineConfig, SessionSchedule, load_config
 
 CHICAGO = ZoneInfo("America/Chicago")
 HOST_TZ = "America/Chicago"
@@ -119,6 +121,56 @@ def test_generated_plists_cover_sessions_and_watchdog(tmp_path):
     watchdog = plists["com.tradingagents.pipeline.watchdog.plist"]
     assert watchdog["StartInterval"] == 3600
     assert watchdog["ProgramArguments"][1:] == ["-m", "pipeline.orchestrator", "watchdog"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("selector_kind", ["default", "explicit"])
+def test_plist_selector_precedes_dotenv_and_regeneration_propagates_new_value(
+    tmp_path, monkeypatch, selector_kind
+):
+    def forbidden_subprocess_run(*_args, **_kwargs):
+        pytest.fail("plist/dotenv/config chain invoked subprocess.run")
+
+    monkeypatch.setattr(subprocess, "run", forbidden_subprocess_run)
+
+    repo = tmp_path / "repo"
+    (repo / "pipeline").mkdir(parents=True)
+    dotenv_cli = str(tmp_path / "dotenv-cli")
+    ambient_cli = "codex" if selector_kind == "default" else str(tmp_path / "ambient-plist-cli")
+    regenerated_cli = str(tmp_path / "regenerated-cli")
+    (repo / ".env").write_text(f"TRADINGAGENTS_CODEX_CLI={dotenv_cli}\n", encoding="utf-8")
+    monkeypatch.setattr(orchestrator, "__file__", str(repo / "pipeline" / "orchestrator.py"))
+    monkeypatch.delenv("TRADINGAGENTS_SKIP_DOTENV", raising=False)
+
+    for key in tuple(os.environ):
+        if key.startswith("TRADINGAGENTS_"):
+            monkeypatch.delenv(key, raising=False)
+    plist = install_schedule.build_session_plist(
+        make_config(tmp_path, codex_cli=ambient_cli), "cn", [(8, 30)]
+    )
+    for key, value in plist["EnvironmentVariables"].items():
+        monkeypatch.setenv(key, value)
+    orchestrator._load_repo_dotenv()
+    resolved = load_config(dict(os.environ))
+    assert resolved.codex_cli == ambient_cli
+    assert orchestrator.component_env(resolved)["TRADINGAGENTS_CODEX_CLI"] == ambient_cli
+
+    monkeypatch.delenv("TRADINGAGENTS_CODEX_CLI")
+    orchestrator._load_repo_dotenv()
+    resolved = load_config(dict(os.environ))
+    assert resolved.codex_cli == dotenv_cli
+    assert orchestrator.component_env(resolved)["TRADINGAGENTS_CODEX_CLI"] == dotenv_cli
+
+    regenerated = install_schedule.build_session_plist(
+        make_config(tmp_path, codex_cli=regenerated_cli), "cn", [(8, 30)]
+    )
+    for key, value in regenerated["EnvironmentVariables"].items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("TRADINGAGENTS_SKIP_DOTENV", raising=False)
+    orchestrator._load_repo_dotenv()
+    resolved = load_config(dict(os.environ))
+    assert resolved.codex_cli == regenerated_cli
+    assert orchestrator.component_env(resolved)["TRADINGAGENTS_CODEX_CLI"] == regenerated_cli
 
 
 @pytest.mark.unit

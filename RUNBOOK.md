@@ -167,6 +167,10 @@ explicit reload. Do not use `kickstart` or a manual slot as a version test.
 Preserve the old plists before a deployment and verify the loaded PATH, CLI
 selector, cwd, Python, fire times and execution flags afterward.
 
+Editing `.env` alone never updates a loaded launchd selector: set the selector,
+regenerate plists while preserving existing schedule settings, explicitly
+reload the jobs, then verify the loaded environment values.
+
 Recovery remains unproven until later authorized natural CN/US slots produce
 fresh contract-valid briefs and matching evaluations with no failed/timeout
 components. A completed analysis stage or an execution adapter reporting `ok`

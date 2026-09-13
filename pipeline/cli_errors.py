@@ -16,6 +16,12 @@ _SCAN_CHARS = 32_768
 _MESSAGE_CHARS = 500
 _ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _ERROR_PREFIX = re.compile(r"^(?:error|fatal)(?::|\s*\[)", re.IGNORECASE)
+_TIMESTAMPED_ERROR = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?"
+    r"(?:Z|[+-]\d{2}:\d{2})\s+(ERROR|FATAL)\s+"
+    r"([A-Za-z0-9_.-]+(?:::[A-Za-z0-9_.-]+)*):\s*(.+)$",
+    re.IGNORECASE,
+)
 _URL = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 _API_TOKEN = re.compile(r"\bsk-[A-Za-z0-9_-]+")
 _BEARER = re.compile(r"\bBearer\s+[^\s,;\"']+", re.IGNORECASE)
@@ -67,6 +73,19 @@ def _error_message(line: str) -> str | None:
     return None
 
 
+def _timestamped_error_detail(line: str) -> tuple[str, bool] | None:
+    match = _TIMESTAMPED_ERROR.match(line)
+    if not match:
+        return None
+    level, target, message = match.groups()
+    detail = f"{level.upper()} {target}: {message}"
+    is_cache_warning = (
+        target == "codex_models_manager::manager"
+        and message.lower().startswith("failed to load models cache:")
+    )
+    return detail, is_cache_warning
+
+
 def sanitize_cli_error_detail(text: str) -> str:
     """Bound and sanitize an already-selected structured backend error detail.
 
@@ -98,6 +117,17 @@ def cli_failure_reason(stderr: str | None, stdout: str | None) -> str:
         for line in reversed(lines):
             if _ERROR_PREFIX.match(line):
                 return _one_line(line)
+    timestamped = []
+    for lines in streams:
+        for line in reversed(lines):
+            candidate = _timestamped_error_detail(line)
+            if candidate:
+                timestamped.append(candidate)
+    for detail, is_cache_warning in timestamped:
+        if not is_cache_warning:
+            return _one_line(detail)
+    if timestamped:
+        return _one_line(timestamped[0][0])
     for lines in streams:
         if lines:
             return _one_line(lines[0]) or "no output"

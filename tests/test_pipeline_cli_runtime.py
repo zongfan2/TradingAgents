@@ -353,6 +353,89 @@ def test_synthetic_terminal_prefix_survives_ansi_and_control_characters():
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("terminal", "expected"),
+    [
+        ("2026-09-11T09:30:32Z ERROR codex_core::client: " + FATAL, "ERROR codex_core::client: " + FATAL),
+        ("2026-09-11T09:30:32.123Z FATAL codex_core::client: " + FATAL, "FATAL codex_core::client: " + FATAL),
+        ("2026-09-11T09:30:32.123456+05:30 ERROR codex_core::client: " + FATAL, "ERROR codex_core::client: " + FATAL),
+    ],
+)
+def test_timestamped_terminal_diagnostic_beats_cache_warning_in_each_stream(terminal, expected):
+    assert cli_failure_reason(CACHE_WARNING + "\n" + terminal + "\nINFO trailing mention ERROR", "") == expected
+    assert cli_failure_reason("", CACHE_WARNING + "\n" + terminal + "\nINFO trailing mention ERROR") == expected
+
+
+@pytest.mark.unit
+def test_timestamped_terminal_diagnostic_prefers_non_cache_across_streams_and_keeps_cache_only():
+    terminal = "2026-09-11T09:30:32Z ERROR codex_core::client: " + FATAL
+    assert cli_failure_reason(CACHE_WARNING, terminal) == "ERROR codex_core::client: " + FATAL
+    assert cli_failure_reason(CACHE_WARNING, "") == (
+        "ERROR codex_models_manager::manager: failed to load models cache: "
+        "missing field supports_parallel_tool_calls"
+    )
+    assert cli_failure_reason("INFO body mentions ERROR but is not terminal", "") == "INFO body mentions ERROR but is not terminal"
+    terminal = "2026-09-11T09:30:32Z ERROR codex_core::client: terminal"
+    assert cli_failure_reason(terminal, CACHE_WARNING) == "ERROR codex_core::client: terminal"
+    assert cli_failure_reason(terminal, "") == "ERROR codex_core::client: terminal"
+
+
+@pytest.mark.unit
+def test_timestamped_candidates_keep_stream_and_newest_precedence_without_cross_stream_ordering():
+    old = "2026-09-11T09:30:32Z ERROR codex_core::old: old terminal"
+    new = "2026-09-11T09:30:33Z FATAL codex_core::new: newest terminal"
+    assert cli_failure_reason(old + "\n" + new, "") == "FATAL codex_core::new: newest terminal"
+    assert cli_failure_reason(old, new) == "ERROR codex_core::old: old terminal"
+    assert cli_failure_reason(
+        "2026-09-11T09:30:32Z INFO codex_core::info: body says ERROR",
+        new,
+    ) == "FATAL codex_core::new: newest terminal"
+    warn_decoy = "2026-09-11T09:30:32Z WARN codex_core::warn: body says FATAL"
+    assert cli_failure_reason(
+        warn_decoy,
+        new,
+    ) == "FATAL codex_core::new: newest terminal"
+    assert cli_failure_reason(warn_decoy, "answer") == warn_decoy
+
+
+@pytest.mark.unit
+def test_timestamped_tail_bound_and_bare_prefix_priority():
+    outside = "2026-09-11T09:30:32Z ERROR codex_core::old: outside"
+    inside = "2026-09-11T09:30:33Z ERROR codex_core::new: inside"
+    assert cli_failure_reason(outside + "\n" + "x" * 32768, inside) == "ERROR codex_core::new: inside"
+    assert cli_failure_reason("ERROR: bare wins", inside) == "ERROR: bare wins"
+
+
+@pytest.mark.unit
+def test_collector_surfaces_timestamped_terminal_with_one_backend_call(monkeypatch):
+    calls = []
+    terminal = "2026-09-11T09:30:32+05:30 ERROR codex_core::client: " + FATAL
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 1, stdout=terminal, stderr=CACHE_WARNING)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="requires a newer version"):
+        macro_collector.default_runner("codex", "PROMPT")
+    assert len(calls) == 1
+
+
+@pytest.mark.unit
+def test_timestamped_terminal_diagnostic_preserves_json_priority_redaction_and_bound():
+    payload = {"type": "error", "message": "json wins"}
+    terminal = (
+        "2026-09-11T09:30:32Z ERROR codex_core::client: rejected "
+        "api_key=private-value https://example.test/private " + "x" * 900
+    )
+    assert cli_failure_reason(terminal, json.dumps(payload)) == "json wins"
+    reason = cli_failure_reason(terminal, "")
+    assert "private-value" not in reason
+    assert "[url redacted]" in reason
+    assert len(reason) == 500
+
+
+@pytest.mark.unit
 def test_untyped_model_json_does_not_override_explicit_terminal_error():
     stdout = json.dumps({"answer": "private answer", "error": {"message": "model content"}})
     assert cli_failure_reason("ERROR: permission denied", stdout) == "ERROR: permission denied"

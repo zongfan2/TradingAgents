@@ -9,6 +9,7 @@ collector argvs against the real CLIs, warn mappings, aggregate timeouts),
 and the step-0 settle wiring (argv, both sessions, refresh-warn passthrough).
 """
 
+import io
 import json
 import os
 import signal
@@ -19,6 +20,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
+import yaml
 
 from pipeline import (
     analysis_runner,
@@ -35,6 +37,7 @@ from pipeline.config import (
     SessionSchedule,
     load_config,
 )
+from pipeline.contracts.pool import OpportunityEntry, PoolFile, TechnicalBlock
 
 SLOT_DATE = date(2026, 1, 5)  # a Monday
 NOW = datetime(2026, 1, 5, 13, 40, tzinfo=timezone.utc)
@@ -1400,6 +1403,97 @@ def test_pool_builder_carried_forward_exit_zero_is_warn(tmp_path):
     # No failure notification for a warn — only the end-of-slot summary.
     assert not any("pool_builder" in " ".join(argv) for argv in sent)
     assert any("1 warn" in " ".join(argv) for argv in sent)
+
+
+@pytest.mark.unit
+def test_real_pool_builder_missing_cli_carries_prior_layers_and_orchestrator_warns(tmp_path, monkeypatch):
+    missing_cli = tmp_path / "deleted-codex"
+    missing_cli.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    missing_cli.chmod(0o700)
+    config = make_config(tmp_path, codex_cli=str(missing_cli))
+    config.pool_dir.mkdir(parents=True)
+    (config.pool_dir / "core.us.yaml").write_text(
+        yaml.safe_dump([{"ticker": "AAPL", "note": "core"}]), encoding="utf-8"
+    )
+    prior = PoolFile(
+        as_of_date=date(2026, 1, 4), session="us", generated_at=NOW,
+        generator="codex-deep-search", core=[], opportunity=[
+            OpportunityEntry(
+                ticker="MSFT", score=8.0, catalyst_type="earnings", rationale="prior",
+                citations=["https://example.com/prior"], entered_on=date(2025, 12, 1),
+                low_score_streak=2, gate_fail_streak=1,
+                technical=TechnicalBlock(gate="pass"),
+            )
+        ], watch=[
+            {
+                "ticker": "AMZN", "score": 6.5, "catalyst_type": "product",
+                "rationale": "prior watch", "citations": ["https://example.com/watch"],
+                "technical": {"gate": "watch"},
+            }
+        ], removed=[],
+    )
+    prior_path = config.pool_dir / "us" / "2026-01-04.json"
+    prior_path.parent.mkdir(parents=True)
+    prior_path.write_text(json.dumps(prior.model_dump(mode="json")), encoding="utf-8")
+    monkeypatch.setenv("TRADINGAGENTS_POOL_DIR", str(config.pool_dir))
+    monkeypatch.setenv("TRADINGAGENTS_CODEX_CLI", config.codex_cli)
+    missing_cli.unlink()
+    monkeypatch.setattr(pool_builder.subprocess, "run", lambda *a, **k: pytest.fail("CLI transport invoked"))
+    def forbidden_price(*_args, **_kwargs):
+        pytest.fail("price fetch invoked before nomination failure")
+
+    expected_argv = [
+        str(config.python_executable),
+        "-m",
+        "pipeline.pool_builder",
+        "--session",
+        "us",
+        "--date",
+        "2026-01-05",
+    ]
+    boundary_calls = []
+    boundary_results = []
+
+    def process_boundary(argv, _timeout):
+        out, err = io.StringIO(), io.StringIO()
+        boundary_calls.append(list(argv))
+        supplied_env = orchestrator.component_env(config)
+        previous = os.environ.copy()
+        os.environ.update(supplied_env)
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                code = pool_builder.main(argv[3:], fetch_ohlcv=forbidden_price)
+        finally:
+            os.environ.clear()
+            os.environ.update(previous)
+        result = orchestrator.RunResult(code, stdout=out.getvalue(), stderr=err.getvalue())
+        boundary_results.append(result)
+        return result
+
+    from contextlib import redirect_stderr, redirect_stdout
+    registry = orchestrator.build_default_registry(config)
+    exit_code = run_slot(config, "us", process_boundary, registry=registry, only="pool_builder")
+    status_document = read_status(config, "us")
+    status_record = status_document["components"]["pool_builder"]
+    assert exit_code == 0, status_record.get("error")
+    assert boundary_calls == [expected_argv]
+    assert len(boundary_results) == 1
+    boundary_result = boundary_results[0]
+    assert boundary_result.returncode == 0
+    assert boundary_result.stdout.startswith("carried_forward:")
+    assert "configured codex CLI" in boundary_result.stderr
+    assert "carrying opportunity/watch forward" in boundary_result.stderr
+    assert status_document["slot"]["finished_at"]
+    result = json.loads((config.pool_dir / "us" / "2026-01-05.json").read_text())
+    assert result["carried_forward"] is True
+    actual_pool = PoolFile.model_validate(result)
+    assert actual_pool.opportunity == prior.opportunity
+    assert actual_pool.watch == prior.watch
+    assert actual_pool.model_dump(mode="json")["opportunity"] == prior.model_dump(mode="json")["opportunity"]
+    assert actual_pool.model_dump(mode="json")["watch"] == prior.model_dump(mode="json")["watch"]
+    assert status_record["status"] == "warn"
+    assert "configured codex CLI" in status_record["error"]
+    assert "carrying opportunity/watch forward" in status_record["error"]
 
 
 @pytest.mark.unit

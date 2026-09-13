@@ -150,8 +150,10 @@ upgrading the CLI. Invalid nonblank syntax fails at config load. Filesystem
 availability is checked before installing any plist and before each actual
 Codex invocation, not while loading shared configuration: a later removed or
 non-executable CLI must not disable the watchdog or status reporting. Such a
-runtime failure is a normal failed backend/component with no alternate-CLI
-fallback. OS launch failures after that check (including permission changes
+runtime failure applies each component's existing policy: collectors and
+evaluator fail, while pool nomination degrades under R4 to a visible
+carried-forward warning with exit 0; there is no alternate-CLI fallback. OS
+launch failures after that check (including permission changes
 or invalid executable format) are also controlled backend failures; do not
 propagate raw exception paths/details or retry another executable. This does
 not change D19, collection's user-default model, or the

@@ -1278,10 +1278,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _load_repo_dotenv() -> None:
-    """Fill missing env keys from the repo-root ``.env`` (setdefault — never
-    overrides launchd/shell-provided values). Under launchd the process env is
-    only the plist's PATH, so orchestrator-level knobs (timeouts, slot times)
-    and component credentials all live in ``.env``; ``run_one`` already does
+    """Fill missing env keys from the repo-root ``.env`` without overriding
+    launchd/shell-provided values. Under launchd, install-time plist values
+    remain ambient and missing orchestrator knobs or component credentials
+    are filled from ``.env``; ``run_one`` already does
     the same for its children (2026-08-24). ``TRADINGAGENTS_SKIP_DOTENV``
     disables the load (tests set it — the real .env must not leak into
     fixtures)."""

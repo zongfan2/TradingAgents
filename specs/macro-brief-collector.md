@@ -68,8 +68,10 @@ The robust version below replaces this one-liner.
   a partial/invalid brief. The orchestrator turns non-zero exits into status
   entries and notifications — the collector itself does not notify.
   For backend failures, inspect bounded tails of both captured streams for
-  known terminal JSON errors or explicit `ERROR:`/`FATAL:` lines before the
-  plain-text fallback. Startup cache warnings must not mask a later terminal
+  recognized terminal JSON errors first, then anchored `ERROR:`/`FATAL:` lines,
+  then timestamped `ERROR`/`FATAL` logger candidates, before the original
+  plain-text fallback.
+  Startup cache warnings must not mask a later terminal
   model/CLI compatibility error. Strip terminal controls, redact common
   credential patterns and URLs, and cap the extracted diagnostic detail at
   500 characters (the fixed component/backend/exit-code context is additional). Never
