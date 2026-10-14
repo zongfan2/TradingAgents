@@ -22,6 +22,7 @@ import hashlib
 import importlib
 import json
 import logging
+import math
 import pickle
 import re
 import sys
@@ -45,6 +46,14 @@ PREFILTER_PRICE = 3.0
 # Calendar days of daily history loaded before cfg.start (~275 sessions >= min_history 150,
 # enough for ret126 / SMA50 / high63 at the first backtest session).
 WARMUP_DAYS = 400
+# Calendar days per session, with slack for holidays (252 sessions ~ 365 days).
+_CAL_PER_SESSION = 1.5
+
+
+def warmup_days(cfg: Config) -> int:
+    """Calendar days of history before cfg.start: at least WARMUP_DAYS, and enough that
+    a raised min_history can be met at the first session instead of being truncated."""
+    return max(WARMUP_DAYS, math.ceil(cfg.min_history * _CAL_PER_SESSION) + 30)
 CACHE_VERSION = 1
 SUMMARY_HEAD_LINES = 60
 
@@ -242,7 +251,7 @@ def _atomic_text(text: str, path: Path) -> None:
 def build_panel_features_watchlists(cfg: Config):
     """Load the daily panel (with warmup), compute features, build all watchlists."""
     features, signals = _stage("features"), _stage("signals")
-    warm_start = cfg.start - timedelta(days=WARMUP_DAYS)
+    warm_start = cfg.start - timedelta(days=warmup_days(cfg))
     log.info("loading daily panel from %s (warmup) to %s", warm_start, cfg.end or "latest")
     # The symbol prefilter must never be stricter than the configured universes, or a
     # lowered threshold override would silently drop eligible names.

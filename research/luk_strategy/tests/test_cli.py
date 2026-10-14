@@ -333,6 +333,15 @@ def test_panel_prefilter_never_stricter_than_configured_universe(env):
     assert env.panel_calls[-1]["prefilter_price"] == 1.0
 
 
+def test_warmup_covers_a_raised_min_history(env):
+    """Codex P2: min_history beyond the default warmup must extend the loaded history."""
+    assert cli.warmup_days(Config()) == cli.WARMUP_DAYS
+    assert cli.main(["build-watchlists", "--set", "min_history=400"]) == 0
+    loaded = env.panel_calls[-1]["start"]
+    sessions = len(pd.bdate_range(loaded, Config().start)) - 1
+    assert sessions >= 400 * 1.05  # weekdays, with room for ~10 holidays a year
+
+
 def test_fetch_intraday_uses_saved_watchlists(env, monkeypatch):
     assert cli.main(["fetch-intraday"]) == 1  # no watchlists.pkl yet
     cli.main(["build-watchlists"])

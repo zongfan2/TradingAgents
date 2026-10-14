@@ -174,6 +174,25 @@ def _bars_to_long(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _read_batch(path: Path) -> dict | None:
+    """A cached daily batch, or None if the file is truncated/corrupt (e.g. a write
+    interrupted by an older version); such a batch is simply re-fetched."""
+    try:
+        return pd.read_pickle(path)
+    except (EOFError, pickle.UnpicklingError, ValueError) as e:
+        log.warning("unreadable daily batch %s (%s); will re-fetch", path.name, type(e).__name__)
+        return None
+
+
+def _write_batch_atomic(path: Path, meta: dict) -> None:
+    """Serialize to a sibling temp file, then rename over the batch, so an interruption
+    never leaves a truncated batch or destroys the previous valid one."""
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "wb") as f:
+        pickle.dump(meta, f)
+    tmp.replace(path)
+
+
 def _batch_covers(meta: dict, syms: list[str], start: date, end: date) -> bool:
     """True if a cached batch already holds `syms` over [start, end]: same symbols and
     end, and a recorded start on or before the requested one."""
@@ -215,16 +234,15 @@ def fetch_daily(
     todo: list[int] = []
     for bi, syms in enumerate(batches):
         path = cache / f"batch_{bi:04d}.pkl"
-        if path.exists():
-            meta = pd.read_pickle(path)
-            if _batch_covers(meta, syms, start, end):
-                continue
+        meta = _read_batch(path) if path.exists() else None
+        if meta is not None and _batch_covers(meta, syms, start, end):
+            continue
         todo.append(bi)
     # Previous adjusted closes (all batches, before any file is removed or replaced): the
     # reference for detecting adjustment changes, even for symbols that moved between batches.
     old_close = None
     if todo and not raw and any(cache.glob("batch_*.pkl")):
-        old_close = load_daily_long(root)[["symbol", "date", "close"]]
+        old_close = load_daily_long(root, skip_unreadable=True)[["symbol", "date", "close"]]
     # Drop batch files beyond the current batch count (left over from a longer symbol list):
     # load_daily_long reads every batch_*.pkl and keeps the LAST duplicate, so a stale
     # high-numbered file would silently override fresh rows with old adjustments.
@@ -258,11 +276,9 @@ def fetch_daily(
                     len(changes),
                     n,
                 )
-        with open(path, "wb") as f:
-            pickle.dump(
-                {"symbols": syms, "start": start.isoformat(), "end": end.isoformat(), "bars": long},
-                f,
-            )
+        _write_batch_atomic(
+            path, {"symbols": syms, "start": start.isoformat(), "end": end.isoformat(), "bars": long}
+        )
         log.info(
             "daily batch %d/%d: %d rows in %.1fs", bi + 1, len(batches), len(long), time.time() - t0
         )
@@ -313,9 +329,17 @@ def invalidate_intraday(changes: dict[str, set[date]], cache: Path | None = None
     return dropped
 
 
-def load_daily_long(cache: Path | None = None, raw: bool = False) -> pd.DataFrame:
+def load_daily_long(
+    cache: Path | None = None, raw: bool = False, skip_unreadable: bool = False
+) -> pd.DataFrame:
+    """All cached daily bars. An unreadable batch raises (a backtest must not silently
+    lose symbols) unless `skip_unreadable`, used only by the fetcher's own bookkeeping."""
     cache = (cache or data_dir()) / ("daily_raw" if raw else "daily")
-    parts = [pd.read_pickle(p)["bars"] for p in sorted(cache.glob("batch_*.pkl"))]
+    parts = []
+    for p in sorted(cache.glob("batch_*.pkl")):
+        meta = _read_batch(p) if skip_unreadable else pd.read_pickle(p)
+        if meta is not None:
+            parts.append(meta["bars"])
     if not parts:
         raise FileNotFoundError(f"no daily cache in {cache}; run `cli fetch-daily` first")
     df = pd.concat(parts, ignore_index=True)

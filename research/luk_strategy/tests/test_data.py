@@ -313,6 +313,39 @@ def test_fetch_daily_refetches_batches_that_do_not_cover_the_requested_start(tmp
     assert pd.read_pickle(tmp_path / "daily" / "batch_0002.pkl")["start"] == "2015-06-01"
 
 
+def test_fetch_daily_survives_interrupted_write_and_truncated_batch(tmp_path, monkeypatch):
+    """Codex P2: an interrupted serialization must not destroy the previous valid batch,
+    and a truncated batch left by an older version is re-fetched instead of crashing."""
+    dates = pd.bdate_range("2024-01-02", periods=3)
+    _write_batch(tmp_path, 0, _long_series("AAA", dates, 10.0, 1e6), start="2024-01-02")
+    good = (tmp_path / "daily" / "batch_0000.pkl").read_bytes()
+    (tmp_path / "daily" / "batch_0001.pkl").write_bytes(good[: len(good) // 3])  # truncated
+
+    class _Client:
+        def get_stock_bars(self, req):
+            return SimpleNamespace(df=None)
+
+    monkeypatch.setattr(data, "_data_client", lambda: _Client())
+
+    def boom(obj, f, *a, **k):
+        f.write(b"partial")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(data.pickle, "dump", boom)
+    with pytest.raises(KeyboardInterrupt):
+        data.fetch_daily(["AAA", "BBB"], date(2016, 1, 1), date(2024, 6, 28), cache=tmp_path, batch=1)
+    assert (tmp_path / "daily" / "batch_0000.pkl").read_bytes() == good  # untouched
+
+    monkeypatch.undo()
+    monkeypatch.setattr(data, "_data_client", lambda: _Client())
+    data.fetch_daily(["AAA", "BBB"], date(2016, 1, 1), date(2024, 6, 28), cache=tmp_path, batch=1)
+    for i in (0, 1):
+        assert pd.read_pickle(tmp_path / "daily" / f"batch_000{i}.pkl")["start"] == "2016-01-01"
+    with pytest.raises((EOFError, pickle.UnpicklingError)):  # backtests refuse an unreadable batch
+        (tmp_path / "daily" / "batch_0002.pkl").write_bytes(good[:10])
+        data.load_daily_long(tmp_path)
+
+
 def test_load_daily_panel_carries_raw_open_without_back_fill(tmp_path):
     dates = pd.bdate_range("2024-01-02", periods=30)
     adj = pd.concat(
