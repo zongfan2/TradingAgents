@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -1857,12 +1858,40 @@ def test_suite_blocks_writes_into_the_production_archive(
         sys.audit("os.mkdir", str(target), 0o700, -1)
     with pytest.raises(PermissionError):
         sys.audit("open", str(target / "run.json"), "w", os.O_WRONLY | os.O_CREAT)
+    with pytest.raises(PermissionError):
+        sys.audit("os.symlink", "/elsewhere", str(target / "latest"), -1)
+    with pytest.raises(PermissionError):
+        sys.audit("os.link", "/elsewhere", str(target / "copy"), -1, -1)
+    with pytest.raises(PermissionError):
+        sys.audit("os.chown", str(target), 0, 0, -1)
     sys.audit("open", str(target / "run.json"), "r", os.O_RDONLY)
     sys.audit("os.mkdir", str(Path.home() / "elsewhere"), 0o700, -1)
+    # Only the new name is written: links elsewhere may point into the archive.
+    sys.audit("os.symlink", str(target), str(Path.home() / "link"), -1)
     assert blocked_production_writes == [
         f"os.mkdir {target}",
         f"open {target / 'run.json'}",
+        f"os.symlink {target / 'latest'}",
+        f"os.link {target / 'copy'}",
+        f"os.chown {target}",
     ]
+
+
+@pytest.mark.unit
+def test_suite_guard_lets_fd_relative_cleanup_run_after_cwd_removal(
+    tmp_path, monkeypatch
+):
+    # fd-based rmtree audits bare child names plus a dir_fd; resolving them
+    # against a deleted cwd used to break the cleanup with ENOTEMPTY.
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    shutil.rmtree(work)
+    tree = tmp_path / "tree"
+    (tree / "sub").mkdir(parents=True)
+    (tree / "sub" / "file").write_text("x", encoding="utf-8")
+    shutil.rmtree(tree)
+    assert not tree.exists()
 
 
 @pytest.mark.unit

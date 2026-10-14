@@ -105,34 +105,49 @@ _PRODUCTION_VERIFICATION_DIR = Path(
     os.path.realpath(Path.home() / ".tradingagents" / "verification")
 )
 _WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
-_MUTATING_EVENTS = frozenset({
-    "os.mkdir", "os.rename", "os.remove", "os.rmdir",
-    "os.truncate", "os.utime", "os.chmod", "shutil.rmtree",
-})
+# Mutating audit event -> (path arg, its dir_fd arg or None) pairs to check.
+# For links only the new name is a write; the source may lie anywhere.
+_MUTATED_PATHS = {
+    "os.mkdir": ((0, 2),), "os.rmdir": ((0, 1),), "os.remove": ((0, 1),),
+    "os.rename": ((0, 2), (1, 3)), "os.link": ((1, 3),), "os.symlink": ((1, 2),),
+    "os.utime": ((0, 3),), "os.chmod": ((0, 2),), "os.chown": ((0, 3),),
+    "os.chflags": ((0, None),), "os.truncate": ((0, None),),
+    "shutil.rmtree": ((0, 1),),
+}
 _blocked_writes: list[str] = []
 
 
 def _block_production_verification_writes(event, args):
-    """Audit hook: refuse any write this process aims at the real archive.
+    """Audit hook: refuse writes this process aims at the real archive.
 
     Defense in depth behind ``_sandbox_home`` that also covers paths captured
     before the sandbox existed. It is process-local on purpose: a before/after
     snapshot of the archive would blame the suite for concurrent real reviews
-    writing there (Layer 1 runs this suite inside those reviews)."""
+    writing there (Layer 1 runs this suite inside those reviews). Not covered:
+    sqlite files, names relative to a directory fd, and child processes (they
+    inherit the sandboxed HOME)."""
     if event == "open":
         if not args[2] & _WRITE_FLAGS:
             return
-        candidates = args[:1]
-    elif event in _MUTATING_EVENTS:
-        candidates = args
+        targets = ((args[0], None),)
+    elif event in _MUTATED_PATHS:
+        targets = [
+            (args[path], None if dir_fd is None else args[dir_fd])
+            for path, dir_fd in _MUTATED_PATHS[event]
+        ]
     else:
         return
-    for candidate in candidates:
-        if isinstance(candidate, (str, bytes, os.PathLike)):
+    for candidate, dir_fd in targets:
+        # fd-based rmtree audits bare names relative to dir_fd, not the cwd.
+        if dir_fd not in (None, -1) or not isinstance(candidate, (str, bytes, os.PathLike)):
+            continue
+        try:
             path = Path(os.fsdecode(os.path.realpath(candidate)))
-            if path.is_relative_to(_PRODUCTION_VERIFICATION_DIR):
-                _blocked_writes.append(f"{event} {path}")
-                raise PermissionError(f"tests must not write the real archive: {path}")
+        except (OSError, ValueError):  # e.g. a deleted cwd; the call itself reports it
+            continue
+        if path.is_relative_to(_PRODUCTION_VERIFICATION_DIR):
+            _blocked_writes.append(f"{event} {path}")
+            raise PermissionError(f"tests must not write the real archive: {path}")
 
 
 sys.addaudithook(_block_production_verification_writes)
@@ -145,10 +160,11 @@ def production_verification_dir():
 
 @pytest.fixture(autouse=True)
 def _sandbox_home(monkeypatch, tmp_path_factory):
-    """Point ``~`` at a fresh per-test directory, so defaults such as
-    claude_review's ``~/.tradingagents/verification`` resolve there instead of
-    in the developer's real home; the shipped defaults stay untouched. Fails
-    the test if the audit guard had to block a write to the real archive."""
+    """Point ``~`` at a fresh per-test directory, so defaults resolved at call
+    time, such as claude_review's ``~/.tradingagents/verification``, land there
+    instead of in the developer's real home (values computed at import keep the
+    real home); the shipped defaults stay untouched. Fails the test if the
+    audit guard had to block a write to the real archive."""
     monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("home")))
     yield
     blocked = list(_blocked_writes)
