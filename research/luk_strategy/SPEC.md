@@ -304,3 +304,14 @@ Rule changes after the v1 review (2026-10-14). Each item names the review findin
     at 13:00) are dropped using Alpaca's calendar.
   - §8.3 the partial sells floor(qty×partial_frac) (≥1 share) only if shares
     remain afterwards; the breakeven stop move applies either way.
+- Codex review (PR #4):
+  - §7 whole-share rounding (qty floors, caps, the partial's ⅓) is done in
+    **as-traded shares** using the candidate's point-in-time adjustment factor
+    (`tick`/0.01); quantities are then carried in split-adjusted units for
+    accounting. Rounding in adjusted units let later reverse splits shrink or
+    zero historical positions. Results moved by a few points (baseline −61.2% →
+    −58.3%); conclusions unchanged.
+  - Data plumbing: daily cache batches record their start and are re-fetched
+    when they do not cover a requested start; batches are written atomically;
+    the panel prefilter and warmup derive from the configured thresholds and
+    `min_history` (defaults unchanged).

@@ -377,6 +377,27 @@ def test_sizing_cash_cap(fakes):
     assert res.equity.iloc[0]["cash"] == pytest.approx(0.0)
 
 
+def test_sizing_counts_as_traded_shares_so_later_reverse_splits_do_not_matter(fakes):
+    """Codex P2 (round 4): a later 1:10,000 reverse split inflates split-adjusted history
+    10,000x. Rounding whole shares in adjusted units would turn this into qty_zero; sizing in
+    as-traded shares (via the candidate's point-in-time tick) keeps the trade identical."""
+
+    def scenario(scale: float) -> pd.Series:
+        pb = PanelBuilder(["A"]).bar("A", 3, h=106.0, c=105.0).bar("A", 4, o=101.0, lo=99.0, c=100.5)
+        for name in ("open", "high", "low", "close"):
+            pb.f[name] *= scale
+        c = cand(0, "A", fill=100.0 * scale, stop=95.0 * scale)
+        c.tick = 0.01 * scale  # one as-traded cent in adjusted units
+        return trade(run(pb, watch(c)), "A")
+
+    plain, inflated = scenario(1.0), scenario(1e4)
+    assert inflated["pnl"] == pytest.approx(plain["pnl"]) == pytest.approx(33 * 5.0)
+    assert inflated["risk_dollars"] == pytest.approx(plain["risk_dollars"])
+    assert inflated["qty"] * 1e4 == pytest.approx(plain["qty"])  # 100 as-traded shares
+    legs = json.loads(inflated["legs"])
+    assert [round(leg["qty"] * 1e4) for leg in legs] == [33, 67]
+
+
 def test_sizing_qty_zero(fakes):
     pb = PanelBuilder(["A"])
     res = run(pb, watch(cand(0, "A")), BASE.with_overrides(risk_per_trade=1e-5))  # $1 / $5

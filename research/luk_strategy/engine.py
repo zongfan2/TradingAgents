@@ -117,6 +117,18 @@ def _floor_shares(x: float) -> int:
     return math.floor(x + _EPS)
 
 
+def _share_unit(cand: Candidate) -> float:
+    """Split-adjusted shares per as-traded share at t-1, from the candidate's
+    point-in-time tick (one as-traded cent in adjusted units). Whole-share rounding is
+    done in as-traded shares so later splits cannot change historical sizing."""
+    tick = getattr(cand, "tick", None)
+    try:
+        f = float(tick) / 0.01
+    except (TypeError, ValueError):
+        return 1.0
+    return 1.0 / f if math.isfinite(f) and f > 0 else 1.0
+
+
 def _flag(x: object) -> bool:
     """Regime flag -> bool; None/NaN/NA count as False (risk-off), never True."""
     try:
@@ -170,8 +182,9 @@ class _Position:
     entry_fill: float  # incl. entry slippage
     initial_stop: float
     stop: float  # current stop (raised to breakeven after the partial)
-    qty_initial: int
-    qty: int  # remaining shares
+    qty_initial: float  # split-adjusted shares (= as-traded shares * unit)
+    qty: float  # remaining split-adjusted shares
+    unit: float  # split-adjusted shares per as-traded share at entry (1.0 if unknown)
     target: float  # contract take-profit; +inf in luk mode
     mark: float  # last valid close seen (entry fill until the first close)
     missing: int = 0  # consecutive sessions without a daily bar
@@ -246,9 +259,10 @@ class _Simulator:
             "close": float(self.C[i, j]),
         }
 
-    def _exit(self, pos: _Position, i: int, qty: int, raw: float, reason: str) -> None:
-        """Sell `qty` shares at RAW price `raw` on session i (exit slippage applied here)."""
-        qty = min(int(qty), pos.qty)
+    def _exit(self, pos: _Position, i: int, qty: float, raw: float, reason: str) -> None:
+        """Sell `qty` split-adjusted shares at RAW price `raw` on session i (exit slippage
+        applied here). Selling the full remainder passes pos.qty, which closes exactly."""
+        qty = min(float(qty), pos.qty)
         if qty <= 0:
             return
         px = float(raw) * self.slip_out
@@ -258,7 +272,8 @@ class _Simulator:
         pos.legs.append(
             {"date": self.days[i].isoformat(), "qty": qty, "price": px, "reason": reason}
         )
-        if pos.qty == 0:
+        if pos.qty <= pos.unit * _EPS:  # float residue below a billionth of a share
+            pos.qty = 0.0
             del self.book[pos.symbol]
             self._record_trade(pos, i, reason)
 
@@ -306,24 +321,28 @@ class _Simulator:
             return float(self.cfg.risk_off_ep_mult)
         return None
 
-    def _size(self, trig: Trigger, mult: float, e_prev: float, gross: float) -> tuple[int, str]:
-        """SPEC §7 sizing on prior-close equity E_{t-1}. Returns (qty, skip_reason)."""
+    def _size(
+        self, trig: Trigger, mult: float, e_prev: float, gross: float
+    ) -> tuple[float, str]:
+        """SPEC §7 sizing on prior-close equity E_{t-1}. Returns (split-adjusted qty,
+        skip_reason). Whole shares are counted in as-traded units (qty / unit)."""
         cfg = self.cfg
+        unit = _share_unit(trig.candidate)
         fill, stop = float(trig.fill), float(trig.stop)
-        per_share = fill - stop
+        per_share = (fill - stop) * unit  # risk per as-traded share
         if not (math.isfinite(per_share) and per_share > 0 and fill > 0):
-            return 0, SKIP_QTY_ZERO
+            return 0.0, SKIP_QTY_ZERO
         risk_dollars = cfg.risk_per_trade * e_prev * mult
-        qty = _floor_shares(risk_dollars / per_share)
-        if qty < 1:
-            return 0, SKIP_QTY_ZERO
+        shares = _floor_shares(risk_dollars / per_share)
+        if shares < 1:
+            return 0.0, SKIP_QTY_ZERO
         position_cap = cfg.max_position_pct * e_prev
         gross_cap = cfg.max_gross * e_prev - gross  # room left under the gross cap
         for cap_dollars in (position_cap, gross_cap, self.cash):
-            qty = min(qty, _floor_shares(cap_dollars / fill))
-        if qty < 1:
-            return 0, SKIP_CAP_EXPOSURE
-        return qty, ""
+            shares = min(shares, _floor_shares(cap_dollars / (fill * unit)))
+        if shares < 1:
+            return 0.0, SKIP_CAP_EXPOSURE
+        return shares * unit, ""
 
     def _entries(
         self, i: int, e_prev: float
@@ -399,7 +418,7 @@ class _Simulator:
                 self._skip(i, cand, SKIP_CAP_NEW)
                 continue
             qty, reason = self._size(trig, p.mult, e_prev, gross)
-            if qty < 1:
+            if qty <= 0:
                 self._skip(i, cand, reason)
                 continue
             fill = float(trig.fill)
@@ -415,6 +434,7 @@ class _Simulator:
                 stop=float(trig.stop),
                 qty_initial=qty,
                 qty=qty,
+                unit=_share_unit(cand),
                 target=float(contract_target(trig, cfg)) if not self.luk else math.inf,
                 mark=fill,
             )
@@ -473,8 +493,9 @@ class _Simulator:
         if not pos.partial_checked and held >= cfg.partial_day:
             pos.partial_checked = True
             if c > pos.entry_fill:
-                n = max(1, _floor_shares(pos.qty_initial * cfg.partial_frac))
-                if pos.qty > n:
+                shares = round(pos.qty_initial / pos.unit)  # as-traded shares held
+                n = max(1, _floor_shares(shares * cfg.partial_frac)) * pos.unit
+                if pos.qty > n * (1 + _EPS):
                     self._exit(pos, i, n, c, PARTIAL)
                 pos.stop = max(pos.stop, pos.entry_fill)  # breakeven on the remainder
         assert self.trail is not None
