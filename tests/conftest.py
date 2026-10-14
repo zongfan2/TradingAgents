@@ -1,6 +1,8 @@
 """Shared pytest fixtures that prevent CI hangs when API keys are absent."""
 
 import os
+import sys
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -104,3 +106,89 @@ def _hermetic_tradingagents_env(monkeypatch):
         if key.startswith("TRADINGAGENTS_"):
             monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("TRADINGAGENTS_SKIP_DOTENV", "1")
+
+
+# The developer's real review archive (claude_review's default report dir),
+# resolved at import, before any fixture can sandbox HOME. By 2026-10-14 tests
+# that omitted report_dir had filed 500+ fake runs/bbbb… records there.
+_PRODUCTION_VERIFICATION_DIR = Path(
+    os.path.realpath(Path.home() / ".tradingagents" / "verification")
+)
+_WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
+# Mutating audit event -> (path arg, its dir_fd arg or None) pairs to check.
+# For links only the new name is a write; the source may lie anywhere.
+_MUTATED_PATHS = {
+    "os.mkdir": ((0, 2),), "os.rmdir": ((0, 1),), "os.remove": ((0, 1),),
+    "os.rename": ((0, 2), (1, 3)), "os.link": ((1, 3),), "os.symlink": ((1, 2),),
+    "os.utime": ((0, 3),), "os.chmod": ((0, 2),), "os.chown": ((0, 3),),
+    "os.chflags": ((0, None),), "os.truncate": ((0, None),),
+    "shutil.rmtree": ((0, 1),),
+}
+_blocked_writes: list[str] = []
+
+
+def _block_production_verification_writes(event, args):
+    """Audit hook: refuse writes this process aims at the real archive.
+
+    Defense in depth behind ``_sandbox_home`` that also covers paths captured
+    before the sandbox existed. It is process-local on purpose: a before/after
+    snapshot of the archive would blame the suite for concurrent real reviews
+    writing there (Layer 1 runs this suite inside those reviews). Not covered:
+    sqlite files, names relative to a directory fd, and child processes (they
+    inherit the sandboxed HOME)."""
+    if event == "open":
+        if not args[2] & _WRITE_FLAGS:
+            return
+        targets = ((args[0], None),)
+    elif event in _MUTATED_PATHS:
+        targets = [
+            (args[path], None if dir_fd is None else args[dir_fd])
+            for path, dir_fd in _MUTATED_PATHS[event]
+        ]
+    else:
+        return
+    for candidate, dir_fd in targets:
+        # fd-based rmtree audits bare names relative to dir_fd, not the cwd.
+        if dir_fd not in (None, -1) or not isinstance(candidate, (str, bytes, os.PathLike)):
+            continue
+        try:
+            path = Path(os.fsdecode(os.path.realpath(candidate)))
+        except (OSError, ValueError):  # e.g. a deleted cwd; the call itself reports it
+            continue
+        if path.is_relative_to(_PRODUCTION_VERIFICATION_DIR):
+            _blocked_writes.append(f"{event} {path}")
+            raise PermissionError(f"tests must not write the real archive: {path}")
+
+
+sys.addaudithook(_block_production_verification_writes)
+
+
+@pytest.fixture(scope="session")
+def production_verification_dir():
+    return _PRODUCTION_VERIFICATION_DIR
+
+
+@pytest.fixture(autouse=True)
+def _sandbox_home(monkeypatch, tmp_path_factory):
+    """Point ``~`` at a fresh per-test directory, so defaults resolved at call
+    time, such as claude_review's ``~/.tradingagents/verification``, land there
+    instead of in the developer's real home (values computed at import keep the
+    real home); the shipped defaults stay untouched. Fails the test if the
+    audit guard had to block a write to the real archive."""
+    monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("home")))
+    yield
+    blocked = list(_blocked_writes)
+    _blocked_writes.clear()
+    if blocked:
+        pytest.fail(
+            "test wrote to the real verification archive:\n" + "\n".join(blocked),
+            pytrace=False,
+        )
+
+
+@pytest.fixture
+def blocked_production_writes(_sandbox_home):
+    """The guard's log, for tests of the guard itself: what they provoke on
+    purpose is dropped before ``_sandbox_home`` checks for leaks."""
+    yield _blocked_writes
+    _blocked_writes.clear()

@@ -1,4 +1,6 @@
 import json
+import os
+import shutil
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -1821,6 +1823,75 @@ def test_default_report_dir_reads_only_named_override(monkeypatch, tmp_path):
     assert review.default_report_dir() == configured
     monkeypatch.delenv("TRADINGAGENTS_VERIFICATION_DIR")
     assert review.default_report_dir() == tmp_path / "home/.tradingagents/verification"
+
+
+@pytest.mark.unit
+def test_review_without_report_dir_archives_only_in_the_test_home(
+    tmp_path, monkeypatch, production_verification_dir
+):
+    """Regression: reviews that omit report_dir filed fake runs/bbbb… records
+    in the developer's real archive on every suite run."""
+    prepare_review_preflights(monkeypatch, tmp_path)
+    with pytest.raises(review.ReviewError, match="exited 9"):
+        review.run_review(
+            repo=tmp_path,
+            base_ref="base",
+            acceptance="works",
+            risk="mandatory",
+            original_symptom="none",
+            runner=lambda argv, **kwargs: completed(argv, code=9),
+        )
+    default = review.default_report_dir()
+    assert not default.resolve().is_relative_to(production_verification_dir)
+    [record] = default.glob(f"runs/{'b' * 40}/*/run.json")
+    assert json.loads(record.read_text())["reason_code"] == "claude-exit"
+
+
+@pytest.mark.unit
+def test_suite_blocks_writes_into_the_production_archive(
+    production_verification_dir, blocked_production_writes
+):
+    # sys.audit raises the event without doing any I/O, so even a broken
+    # guard cannot touch the real archive from here.
+    target = production_verification_dir / "runs" / ("b" * 40) / "probe"
+    with pytest.raises(PermissionError):
+        sys.audit("os.mkdir", str(target), 0o700, -1)
+    with pytest.raises(PermissionError):
+        sys.audit("open", str(target / "run.json"), "w", os.O_WRONLY | os.O_CREAT)
+    with pytest.raises(PermissionError):
+        sys.audit("os.symlink", "/elsewhere", str(target / "latest"), -1)
+    with pytest.raises(PermissionError):
+        sys.audit("os.link", "/elsewhere", str(target / "copy"), -1, -1)
+    with pytest.raises(PermissionError):
+        sys.audit("os.chown", str(target), 0, 0, -1)
+    sys.audit("open", str(target / "run.json"), "r", os.O_RDONLY)
+    sys.audit("os.mkdir", str(Path.home() / "elsewhere"), 0o700, -1)
+    # Only the new name is written: links elsewhere may point into the archive.
+    sys.audit("os.symlink", str(target), str(Path.home() / "link"), -1)
+    assert blocked_production_writes == [
+        f"os.mkdir {target}",
+        f"open {target / 'run.json'}",
+        f"os.symlink {target / 'latest'}",
+        f"os.link {target / 'copy'}",
+        f"os.chown {target}",
+    ]
+
+
+@pytest.mark.unit
+def test_suite_guard_lets_fd_relative_cleanup_run_after_cwd_removal(
+    tmp_path, monkeypatch
+):
+    # fd-based rmtree audits bare child names plus a dir_fd; resolving them
+    # against a deleted cwd used to break the cleanup with ENOTEMPTY.
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    shutil.rmtree(work)
+    tree = tmp_path / "tree"
+    (tree / "sub").mkdir(parents=True)
+    (tree / "sub" / "file").write_text("x", encoding="utf-8")
+    shutil.rmtree(tree)
+    assert not tree.exists()
 
 
 @pytest.mark.unit
