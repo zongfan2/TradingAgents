@@ -45,7 +45,9 @@ Environment lives in `.venv` (Python 3.14, `pip install -e .`). API keys are in
   re-exported via `agent_utils.py`, and must ALSO be registered in the matching
   `ToolNode` in `tradingagents/graph/trading_graph.py` or calls fail at runtime.
 - Tests are offline: mock network (see `tests/test_search_news.py` for the
-  `yf.Search` pattern). Run `ruff` before finishing.
+  `yf.Search` pattern). yfinance requests go through `curl_cffi` (libcurl), so a
+  guard that only patches sockets cannot see them; `TestSentimentAnalystAgent` in
+  `tests/test_structured_agents.py` guards both. Run `ruff` before finishing.
 - Upstream behavior is not changed unless a spec says so.
 
 ## Codex-Claude hybrid workflow
