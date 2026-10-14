@@ -1,12 +1,14 @@
 """Brief evaluator (macro + ticker) — specs/macro-brief-evaluator.md.
 
 Scores a collected brief for accuracy with a web-search-enabled CLI backend —
-``claude -p`` (identity ``claude-eval``, the D19 default) or GPT-5.6 Terra via
-``codex exec`` — and writes the ``*.eval.json`` next to the brief per its data
-contract. The backend is selectable (``--backend claude|codex``, default from
-config ``eval_backend``, env ``TRADINGAGENTS_EVAL_BACKEND``); a backend that
-matches the config's ``collect_backend`` degrades collector/evaluator
-independence (R2) and warns loudly on stderr without failing. One evaluator
+``claude -p`` (identity ``claude-eval``, the default; D20 pins its model and
+effort, Opus 5.5 by default) or GPT-5.6 Terra via ``codex exec`` — and writes
+the ``*.eval.json`` next to the brief per its data contract. The backend is
+selectable (``--backend claude|codex``, default from config ``eval_backend``,
+env ``TRADINGAGENTS_EVAL_BACKEND``); an evaluator on the same model as the
+collector (same backend, and for claude the same pinned model) degrades
+collector/evaluator independence (R2) and warns loudly on stderr without
+failing. One evaluator
 handles both brief kinds, detecting the kind from the frontmatter (``ticker``
 present ⇒ ticker brief).
 
@@ -42,6 +44,7 @@ from pathlib import Path
 
 from pydantic import Field, ValidationError
 
+from pipeline.claude_cli import EnvelopeError, claude_command, parse_envelope, record_usage
 from pipeline.common import append_log_line, archive_existing, atomic_write, sha256_text, to_utc_iso
 from pipeline.config import load_config
 from pipeline.contracts.base import ContractError, ContractModel, validation_error_messages
@@ -67,7 +70,7 @@ from pipeline.contracts.evals import (
 
 EVALUATOR_MODEL = "gpt-5.6-terra"
 #: Evaluator identity written into the eval json for the claude backend (the
-#: D19 default). Never model-reported — the harness stamps it (R3).
+#: default). Never model-reported — the harness stamps it (R3).
 CLAUDE_EVALUATOR = "claude-eval"
 
 #: Per-backend evaluator identity for the eval json's ``evaluator`` field.
@@ -177,16 +180,9 @@ def claude_runner(prompt: str) -> str:
     judgment path remains backend-neutral and parses only the judgment object.
     """
     schema = json.dumps(_ModelJudgment.model_json_schema(), separators=(",", ":"))
-    command = [
-        "claude",
-        "-p",
-        "--allowedTools",
-        "WebSearch,WebFetch",
-        "--output-format",
-        "json",
-        "--json-schema",
-        schema,
-    ]
+    config = load_config()
+    model, effort = config.claude_eval_model, config.claude_eval_effort
+    command = claude_command(model, effort, "--json-schema", schema)
     timeout = backend_timeout_seconds()
     try:
         proc = subprocess.run(
@@ -204,22 +200,10 @@ def claude_runner(prompt: str) -> str:
         detail = (proc.stderr or proc.stdout or "").strip()[:500]
         raise BackendError(f"claude -p failed (exit {proc.returncode}): {detail}")
     try:
-        envelope = json.loads(proc.stdout)
-    except json.JSONDecodeError as exc:
-        raise BackendError("claude -p returned invalid JSON envelope") from exc
-    if not isinstance(envelope, dict):
-        raise BackendError("claude -p returned malformed result envelope")
-    if envelope.get("type") != "result":
-        raise BackendError("claude -p returned malformed result envelope")
-    is_error = envelope.get("is_error")
-    if not isinstance(is_error, bool):
-        raise BackendError("claude -p returned malformed result envelope")
-    if is_error:
-        result = envelope.get("result", "")
-        detail = " ".join(str(result).split())
-        raise BackendError(f"claude -p returned error result: {detail}")
-    if envelope.get("subtype") != "success":
-        raise BackendError("claude -p returned malformed result envelope")
+        envelope = parse_envelope(proc.stdout)
+    except EnvelopeError as exc:
+        raise BackendError(str(exc)) from exc
+    record_usage("evaluator", model, effort, envelope)
     structured_output = envelope.get("structured_output")
     if not isinstance(structured_output, dict):
         raise BackendError("claude -p result missing structured_output object")
@@ -531,7 +515,7 @@ def evaluate_brief(
     """Evaluate one brief file; returns the process exit code.
 
     ``backend`` ``None`` resolves from the shared config's ``eval_backend``
-    (env ``TRADINGAGENTS_EVAL_BACKEND``, default ``claude`` per D19); an
+    (env ``TRADINGAGENTS_EVAL_BACKEND``, default ``claude`` per D19/D20); an
     explicit value always wins. The backend picks the production runner and
     the harness-stamped ``evaluator`` identity; an injected ``runner`` (tests)
     replaces only the subprocess boundary.
@@ -546,13 +530,16 @@ def evaluate_brief(
             file=sys.stderr,
         )
         return EXIT_ERROR
-    if backend == config.collect_backend:
+    if backend == config.collect_backend and (
+        backend != "claude" or config.claude_eval_model == config.claude_collect_model
+    ):
         # Evaluator R2 independence: warn loudly, never fail — the run is
-        # still an evaluation, just a same-family one.
+        # still an evaluation, just a same-model one. D20: claude on both
+        # roles stays independent while the pinned models differ.
         print(
-            f"warning: eval backend '{backend}' matches collect_backend — "
-            "collector/evaluator independence (R2) is degraded; keep "
-            "TRADINGAGENTS_EVAL_BACKEND and TRADINGAGENTS_COLLECT_BACKEND apart",
+            f"warning: eval backend '{backend}' matches collect_backend on the "
+            "same model — collector/evaluator independence (R2) is degraded; keep "
+            "the eval and collect backends (or claude models) apart",
             file=sys.stderr,
         )
     evaluator_id = EVALUATOR_IDENTITIES[backend]
@@ -783,7 +770,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--backend",
         choices=tuple(EVALUATOR_IDENTITIES),
         default=None,
-        help="evaluation backend (default: config eval_backend — claude per D19, "
+        help="evaluation backend (default: config eval_backend — claude per D20, "
         "env TRADINGAGENTS_EVAL_BACKEND)",
     )
     parser.add_argument(

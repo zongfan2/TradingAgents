@@ -27,14 +27,18 @@ All commands run from the repo root with the project venv (`.venv/bin/python`).
     data-API keys.
   - LLM API keys only if you run per-token presets (`luna`/`deepseek`); the
     default pipeline runs on subscription CLIs.
-- **Logged-in CLIs** (D19 role split, defaults from `pipeline/config.py`):
-  - `codex` CLI — default **collection** backend (`collect_backend=codex`,
-    env `TRADINGAGENTS_COLLECT_BACKEND`): macro briefs, pool nomination,
-    ticker briefs.
-  - `claude` CLI — default **evaluation** backend (`eval_backend=claude`,
-    identity `claude-eval`, env `TRADINGAGENTS_EVAL_BACKEND`).
-  - The two roles must use different backends (a match warns loudly —
-    collector/evaluator independence).
+- **Logged-in CLIs** (D20 roles, defaults from `pipeline/config.py`):
+  - `claude` CLI — default backend for **both** roles, on different pinned
+    models: collection (macro briefs, pool nomination, ticker briefs) on
+    `claude-sonnet-5-5` / effort `medium`, evaluation (identity
+    `claude-eval`) on `claude-opus-5-5` / effort `high`. Every call is a
+    hermetic web-only `claude -p` (no hooks, plugins, MCP servers or
+    CLAUDE.md from your interactive setup) and appends its token usage to
+    `~/.tradingagents/claude_usage.jsonl`.
+  - `codex` CLI — optional; selectable per role via
+    `TRADINGAGENTS_COLLECT_BACKEND` / `TRADINGAGENTS_EVAL_BACKEND`.
+  - Collector and evaluator must not run on the same model (same backend
+    and, for claude, the same pinned model warns loudly — independence).
 - **Runtime home**: everything lives under `~/.tradingagents/`
   (`TRADINGAGENTS_STATE_DIR`) — briefs, pools, ledger, status files, logs.
   Never inside the repo.
@@ -248,7 +252,7 @@ axis at a time**, and let ≥ 2 weeks of slots accumulate before judging.
 | Volume confirmation (5d/20d ratio, else demote to watch) | 1.2 | `TRADINGAGENTS_VOLUME_CONFIRM_RATIO` |
 | Plan sizing risk | `risk_pct` ~1%, validator bounds 0.1–2.0 | validator constant (ledger contract) |
 | Adapter caps | per-order 15% equity, gross 100%, total risk 5%, ≤ 10 positions, ≤ 10 orders/slot, ≤ 2 tranches, ≥ 3 days apart, per-ticker 20%, pyramid-up only | code defaults (`execution_adapter.AdapterSettings`) — no env |
-| Backend split (D19) | collect=`codex`, eval=`claude` | `TRADINGAGENTS_COLLECT_BACKEND` / `TRADINGAGENTS_EVAL_BACKEND` (must differ; per-run `--backend` overrides) |
+| Backend roles (D20) | collect=`claude` on `claude-sonnet-5-5`/`medium`, eval=`claude` on `claude-opus-5-5`/`high` | `TRADINGAGENTS_COLLECT_BACKEND` / `TRADINGAGENTS_EVAL_BACKEND`; `TRADINGAGENTS_CLAUDE_{COLLECT,EVAL}_{MODEL,EFFORT}` (roles must not share a model; per-run `--backend` overrides) |
 
 Raising the trigger threshold cuts quota spend and sample size; lowering it
 floods slots (the 30-run budget then drops catalyst runs). Entry/exit
@@ -296,13 +300,15 @@ brief invalidates its old eval, and re-evaluation happens automatically next
 slot (or manually: `python -m pipeline.evaluator <brief-path>`; `--force` to
 override a hash match).
 
-**Subscription quota exhaustion.** Collection burns the Codex quota, evals
-the Claude quota (that split *is* D19 — Claude's monthly cap was hit once).
+**Subscription quota exhaustion.** Under D20 collection *and* evals burn
+the Claude quota (D19 had moved collection to Codex after Claude's monthly
+cap was hit once). Watch `~/.tradingagents/claude_usage.jsonl` (one line per
+call: component, model, effort, tokens, `total_cost_usd`) for the trend.
 Symptoms: evaluator exit 3 / collector exit 1 with a backend CLI error.
 Options: wait it out and backfill with `--date` (collectors skip
-already-collected dates; `--force` to redo); or temporarily swap roles via
-`TRADINGAGENTS_COLLECT_BACKEND` / `TRADINGAGENTS_EVAL_BACKEND` — keep them
-different, a match warns loudly.
+already-collected dates; `--force` to redo); move collection back to Codex
+with `TRADINGAGENTS_COLLECT_BACKEND=codex`; or lower
+`TRADINGAGENTS_CLAUDE_COLLECT_EFFORT` / `TRADINGAGENTS_CLAUDE_EVAL_EFFORT`.
 
 **Stale briefs.** The webui banner flags sessions with no slot by
 slot_time + 1 h. Backfill any gap with

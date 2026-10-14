@@ -35,13 +35,18 @@ The robust version below replaces this one-liner.
   recaps the Asia session and US pre-market data (releases land 08:30 ET).
 - **R2 — Generate**: invoke the deep-search backend. The primary backend is
   selectable via config `collect_backend` (env `TRADINGAGENTS_COLLECT_BACKEND`),
-  default `codex` per D19 — `codex exec` with web search enabled
-  (`--skip-git-repo-check`: components inherit an arbitrary cwd). The codex
-  invocation deliberately passes no `--model` (unlike the evaluator's pinned
-  `gpt-5.6-terra`): collection rides the codex CLI's user-configured default
-  model, and the stamped generator id stays the CLI-level `codex-deep-search`
-  per R1. The other
-  backend is `claude -p` with WebSearch/WebFetch allowed; an explicit
+  default `claude` per D20 — a hermetic web-only `claude -p` (`--safe-mode`,
+  `--tools WebSearch,WebFetch`, `--strict-mcp-config`, `--permission-mode
+  dontAsk`, `--no-session-persistence`) pinned to config
+  `claude_collect_model` / `claude_collect_effort` (default
+  `claude-sonnet-5-5` / `medium`) with `--output-format json`: the brief is
+  the envelope's `result`, an unusable envelope is a backend failure, and the
+  envelope's usage is appended to `claude_usage.jsonl` (best-effort). The
+  stamped generator id stays the CLI-level `claude-deep-search` per R1. The
+  other backend is `codex exec` with web search enabled
+  (`--skip-git-repo-check`: components inherit an arbitrary cwd); it
+  deliberately passes no `--model` and rides the codex CLI's user-configured
+  default model, stamping `codex-deep-search`. An explicit
   `--backend claude|codex` overrides the config default per invocation so
   collector quality itself can be compared later.
 - **R3 — Validate before write** (all checks are hard failures unless marked
@@ -84,8 +89,8 @@ deadline. A retry that has no positive remainder fails immediately.
 
 ## Acceptance criteria
 
-1. Fresh machine + logged-in `codex` CLI (the D19 default backend; a logged-in
-   `claude` CLI for `--backend claude`) → one command per session produces a
+1. Fresh machine + logged-in `claude` CLI (the D20 default backend; a logged-in
+   `codex` CLI for `--backend codex`) → one command per session produces a
    contract-valid `YYYY-MM-DD.<session>.md`; a second run for the same session
    and day exits 0 without rewriting.
 2. Killing the process mid-run leaves no partial file.

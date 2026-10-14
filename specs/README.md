@@ -30,7 +30,7 @@ specifies Flash for every model-assisted backup role without activating it.
 | [macro-brief-pipeline.md](macro-brief-pipeline.md) | Macro consumption (`get_macro_brief`, `macro_source` switch) | Claude Code | **Implemented (v1)** — v2 deltas in pipeline-consumption-v2 |
 | [pipeline-consumption-v2.md](pipeline-consumption-v2.md) | Session-aware readers, `get_ticker_brief`, `ticker_source`, offline brief arm | Claude Code | **Implemented** |
 | [macro-brief-collector.md](macro-brief-collector.md) | Scheduled deep-search macro briefs (dual session) | Codex | **Implemented** |
-| [macro-brief-evaluator.md](macro-brief-evaluator.md) | Accuracy scoring of briefs (macro + ticker) — `claude-eval` default per D19, GPT-5.6 Terra selectable | Claude Code | **Implemented** |
+| [macro-brief-evaluator.md](macro-brief-evaluator.md) | Accuracy scoring of briefs (macro + ticker) — `claude-eval` on pinned Opus 5.5 default per D20, GPT-5.6 Terra selectable | Claude Code | **Implemented** |
 | [pool-builder.md](pool-builder.md) | Deep-search nomination + Bollinger gate + hysteresis | Claude Code | **Implemented** |
 | [ticker-brief-collector.md](ticker-brief-collector.md) | Pool-driven per-ticker deep-search briefs | Claude Code | **Implemented** |
 | [analysis-runner.md](analysis-runner.md) | Trigger rules, A/B pairing, TradePlan + validator, ledger writes | Claude Code | **Implemented** |

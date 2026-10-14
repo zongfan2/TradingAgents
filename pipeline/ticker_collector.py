@@ -51,6 +51,7 @@ from pathlib import Path
 
 import yaml
 
+from pipeline.claude_cli import EnvelopeError, collect_command, collect_output
 from pipeline.common import (
     LOG_FIELD_SEPARATOR,
     SESSIONS,
@@ -101,12 +102,13 @@ GENERATORS = {
 #: Default backend commands; the rendered prompt is piped on stdin.
 #: ``--skip-git-repo-check``: codex exec refuses to run outside a trusted git
 #: worktree, and orchestrated components inherit an arbitrary cwd — without
-#: it the codex path dies before searching (D19 makes codex the default).
+#: it the codex path dies before searching (codex is selectable per D20).
 #: Deliberately no ``--model`` (unlike the evaluator's pinned gpt-5.6-terra):
 #: collection deep searches ride the codex CLI's user-configured default
 #: model, and the generator id stays the CLI-level ``codex-deep-search``.
+#: The claude command is built per call from the D20 pinned collect
+#: model/effort (:func:`pipeline.claude_cli.collect_command`).
 BACKEND_COMMANDS = {
-    "claude": ("claude", "-p", "--allowedTools", "WebSearch,WebFetch"),
     "codex": ("codex", "exec", "-c", "tools.web_search=true", "--skip-git-repo-check", "-"),
 }
 
@@ -235,7 +237,7 @@ def default_runner(
 
     ``timeout`` is the per-job window ceiling; each call is also capped by
     the optional absolute deadline shared with that job's retry."""
-    command = list(BACKEND_COMMANDS[backend])
+    command = collect_command(backend, BACKEND_COMMANDS)
     if deadline is not None:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -258,7 +260,10 @@ def default_runner(
     if proc.returncode != 0:
         reason = _first_line(proc.stderr or proc.stdout) or "no output"
         raise CollectorError(f"backend '{backend}' exited {proc.returncode}: {reason}")
-    return proc.stdout
+    try:
+        return collect_output(backend, proc.stdout, component="ticker_collector")
+    except EnvelopeError as exc:
+        raise CollectorError(f"backend '{backend}' {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -632,7 +637,7 @@ def collect_all(
     """Collect briefs for the session's ``core ∪ opportunity`` tickers.
 
     ``backend`` ``None`` resolves from the shared config's ``collect_backend``
-    (env ``TRADINGAGENTS_COLLECT_BACKEND``, default ``codex`` per D19); an
+    (env ``TRADINGAGENTS_COLLECT_BACKEND``, default ``claude`` per D20); an
     explicit value always wins. Raises :class:`NoTickersError` (R1's distinct
     failure) when even the core-yaml fallback yields no tickers, and
     :class:`CollectorError` on an unreadable pool/core file; individual ticker
@@ -741,8 +746,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--backend",
         choices=tuple(GENERATORS),
         default=None,
-        help="deep-search backend (default: config collect_backend — codex per "
-        "D19, env TRADINGAGENTS_COLLECT_BACKEND)",
+        help="deep-search backend (default: config collect_backend — claude per "
+        "D20, env TRADINGAGENTS_COLLECT_BACKEND)",
     )
     parser.add_argument(
         "--force",

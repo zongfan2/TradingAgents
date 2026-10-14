@@ -95,7 +95,8 @@ Only the user may authorize a waiver, explicitly for the exact bound revision.
 Use `claude_review waive` only with that authorization; its report remains
 visibly `waived`, never `pass`, and becomes stale if the revision changes.
 
-This development-review policy is separate from runtime D19: Codex performs
-collection and Claude performs evaluation. Do not rewrite historical `Builder`
+This development-review policy is separate from runtime D20 (superseding
+D19's collection default): Claude performs collection on Sonnet 5.5 and
+evaluation on Opus 5.5. Do not rewrite historical `Builder`
 fields in component specs; those record existing delivery ownership, while this
 guide governs future work.

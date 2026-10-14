@@ -515,6 +515,63 @@ def test_claude_runner_command_construction_and_stdin(monkeypatch):
     assert "scores" in schema["required"]
     assert seen["input"] == "EVAL PROMPT"  # prompt over stdin, never argv
     assert seen["timeout"] == 540.0  # same budget-derived timeout as the codex backend
+    # D20: the evaluator pins its own model/effort — never the CLI default —
+    # and runs the same hermetic web-only session as the collectors.
+    assert seen["cmd"][seen["cmd"].index("--model") + 1] == "claude-opus-5-5"
+    assert seen["cmd"][seen["cmd"].index("--effort") + 1] == "high"
+    assert seen["cmd"][seen["cmd"].index("--tools") + 1] == "WebSearch,WebFetch"
+    assert seen["cmd"][seen["cmd"].index("--permission-mode") + 1] == "dontAsk"
+    assert {"--safe-mode", "--strict-mcp-config"} <= set(seen["cmd"])
+
+
+@pytest.mark.unit
+def test_claude_runner_honours_eval_overrides_and_records_usage(tmp_path, monkeypatch):
+    log = tmp_path / "usage.jsonl"
+    monkeypatch.setenv("TRADINGAGENTS_CLAUDE_USAGE_LOG", str(log))
+    monkeypatch.setenv("TRADINGAGENTS_CLAUDE_EVAL_EFFORT", "medium")
+    seen = {}
+    envelope = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "structured_output": json.loads(judgment()),
+        "usage": {"input_tokens": 7, "cache_read_input_tokens": 70, "output_tokens": 9},
+        "total_cost_usd": 0.5,
+    }
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(envelope), stderr="")
+
+    monkeypatch.setattr(evaluator_module.subprocess, "run", fake_run)
+    claude_runner("PROMPT")
+    assert seen["cmd"][seen["cmd"].index("--effort") + 1] == "medium"
+    record = json.loads(log.read_text())
+    assert record["component"] == "evaluator"
+    assert (record["model"], record["effort"]) == ("claude-opus-5-5", "medium")
+    assert (record["cache_read_input_tokens"], record["output_tokens"]) == (70, 9)
+    assert record["cache_creation_input_tokens"] is None  # absent field, not invented
+    assert record["total_cost_usd"] == 0.5
+
+
+@pytest.mark.unit
+def test_usage_log_failure_never_fails_the_evaluation(tmp_path, monkeypatch, capsys):
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("file in the way")
+    monkeypatch.setenv("TRADINGAGENTS_CLAUDE_USAGE_LOG", str(blocker / "usage.jsonl"))
+    envelope = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "structured_output": json.loads(judgment()),
+    }
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(envelope), stderr="")
+
+    monkeypatch.setattr(evaluator_module.subprocess, "run", fake_run)
+    assert json.loads(claude_runner("PROMPT")) == envelope["structured_output"]
+    assert "could not record claude usage" in capsys.readouterr().err
 
 
 @pytest.mark.unit
@@ -679,12 +736,23 @@ def test_eval_backend_env_override_resolves_the_default(macro_dir, monkeypatch):
 
 
 @pytest.mark.unit
-def test_matching_collect_and_eval_backends_warn_loudly_but_never_fail(
-    macro_dir, monkeypatch, capsys
+@pytest.mark.parametrize(
+    "env",
+    [
+        # claude on both roles pinned to the same model.
+        {"TRADINGAGENTS_CLAUDE_EVAL_MODEL": "claude-sonnet-5-5"},
+        # codex on both roles (codex has no per-role model pin).
+        {"TRADINGAGENTS_COLLECT_BACKEND": "codex", "TRADINGAGENTS_EVAL_BACKEND": "codex"},
+    ],
+    ids=["claude_same_model", "codex_both_roles"],
+)
+def test_same_model_collect_and_eval_warn_loudly_but_never_fail(
+    macro_dir, monkeypatch, capsys, env
 ):
-    # Default eval backend (claude) colliding with collect_backend=claude
-    # degrades R2 independence: loud stderr warning, still a completed eval.
-    monkeypatch.setenv("TRADINGAGENTS_COLLECT_BACKEND", "claude")
+    # Collector and evaluator on the same model degrade R2 independence:
+    # loud stderr warning, still a completed eval.
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
     brief = write_brief(macro_dir, "2026-08-03.us.md", macro_text())
     assert evaluate_brief(brief, runner=FakeRunner(judgment())) == EXIT_OK
     err = capsys.readouterr().err
@@ -694,8 +762,18 @@ def test_matching_collect_and_eval_backends_warn_loudly_but_never_fail(
 
 
 @pytest.mark.unit
-def test_distinct_backends_emit_no_independence_warning(macro_dir, capsys):
-    # Out of the box (collect=codex, eval=claude) the warning must NOT fire.
+def test_default_claude_roles_on_distinct_models_emit_no_warning(macro_dir, monkeypatch, capsys):
+    # Out of the box (D20: claude collects on Sonnet, evaluates on Opus) the
+    # warning must NOT fire — independence holds at the model level.
+    monkeypatch.setenv("TRADINGAGENTS_COLLECT_BACKEND", "claude")
+    brief = write_brief(macro_dir, "2026-08-03.us.md", macro_text())
+    assert evaluate_brief(brief, runner=FakeRunner(judgment())) == EXIT_OK
+    assert "matches collect_backend" not in capsys.readouterr().err
+
+
+@pytest.mark.unit
+def test_distinct_backends_emit_no_independence_warning(macro_dir, monkeypatch, capsys):
+    monkeypatch.setenv("TRADINGAGENTS_COLLECT_BACKEND", "codex")
     brief = write_brief(macro_dir, "2026-08-03.us.md", macro_text())
     assert evaluate_brief(brief, runner=FakeRunner(judgment())) == EXIT_OK
     assert "matches collect_backend" not in capsys.readouterr().err

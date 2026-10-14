@@ -16,6 +16,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from pipeline.claude_cli import EFFORT_CHOICES
+
 #: Orchestrator R1 default per-component subprocess timeouts, in seconds.
 #: The fan-out steps (ticker collectors/evaluators) get one aggregate budget.
 #: ``pool_builder`` is not pinned by R1 — private default, flagged in review.
@@ -34,12 +36,20 @@ DEFAULT_SLOT_TIME = "08:30"
 
 #: Subscription-backed CLI backends the pipeline can drive.
 BACKEND_CHOICES = ("claude", "codex")
-#: D19 (2026-08-10): codex performs all deep-search collection (macro, pool
-#: nomination, ticker briefs) and claude performs evaluation — collection is
-#: the heavier consumer and the Claude subscription's monthly cap was hit
-#: once. Collector/evaluator backend independence is preserved, mirrored.
-DEFAULT_COLLECT_BACKEND = "codex"
+#: D20 (2026-10-13, supersedes D19's codex collection default): claude
+#: performs both deep-search collection and evaluation, on *different pinned
+#: models* — Sonnet 5.5 collects, Opus 5.5 evaluates — so collector/evaluator
+#: independence (evaluator R2) is kept at the model level. codex stays
+#: selectable per role.
+DEFAULT_COLLECT_BACKEND = "claude"
 DEFAULT_EVAL_BACKEND = "claude"
+#: D20 pinned ``claude -p`` model/effort per role (a bare ``claude -p`` rides
+#: the user's interactive default). Eval effort stays ``high`` until the
+#: medium-vs-high study shows medium flags as much.
+DEFAULT_CLAUDE_COLLECT_MODEL = "claude-sonnet-5-5"
+DEFAULT_CLAUDE_COLLECT_EFFORT = "medium"
+DEFAULT_CLAUDE_EVAL_MODEL = "claude-opus-5-5"
+DEFAULT_CLAUDE_EVAL_EFFORT = "high"
 
 _SLOT_TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
@@ -91,11 +101,16 @@ class PipelineConfig:
     notifications_enabled: bool = True
     pool_max_staleness_days: int = 3
     python_executable: Path = field(default_factory=lambda: Path(sys.executable))
-    #: D19 backend roles: deep-search collection vs evaluation. Validated
+    #: D19/D20 backend roles: deep-search collection vs evaluation. Validated
     #: eagerly against :data:`BACKEND_CHOICES` — a typo'd backend must fail
     #: loudly at config time, never as a mid-slot CLI error.
     collect_backend: str = DEFAULT_COLLECT_BACKEND
     eval_backend: str = DEFAULT_EVAL_BACKEND
+    #: D20 pinned claude models/efforts per role; efforts validated eagerly.
+    claude_collect_model: str = DEFAULT_CLAUDE_COLLECT_MODEL
+    claude_collect_effort: str = DEFAULT_CLAUDE_COLLECT_EFFORT
+    claude_eval_model: str = DEFAULT_CLAUDE_EVAL_MODEL
+    claude_eval_effort: str = DEFAULT_CLAUDE_EVAL_EFFORT
 
     def __post_init__(self) -> None:
         for name in ("collect_backend", "eval_backend"):
@@ -104,6 +119,15 @@ class PipelineConfig:
                 raise ValueError(
                     f"invalid {name} {value!r} — expected one of {sorted(BACKEND_CHOICES)}"
                 )
+        for name in ("claude_collect_effort", "claude_eval_effort"):
+            value = getattr(self, name)
+            if value not in EFFORT_CHOICES:
+                raise ValueError(
+                    f"invalid {name} {value!r} — expected one of {list(EFFORT_CHOICES)}"
+                )
+        for name in ("claude_collect_model", "claude_eval_model"):
+            if not getattr(self, name):
+                raise ValueError(f"{name} must not be empty")
         object.__setattr__(self, "state_dir", Path(self.state_dir).expanduser())
         derived = {
             "macro_brief_dir": "macro_briefs",
@@ -167,4 +191,12 @@ def load_config(env: Mapping[str, str] | None = None) -> PipelineConfig:
         python_executable=Path(env.get("TRADINGAGENTS_PIPELINE_PYTHON") or sys.executable),
         collect_backend=backend("TRADINGAGENTS_COLLECT_BACKEND", DEFAULT_COLLECT_BACKEND),
         eval_backend=backend("TRADINGAGENTS_EVAL_BACKEND", DEFAULT_EVAL_BACKEND),
+        claude_collect_model=backend(
+            "TRADINGAGENTS_CLAUDE_COLLECT_MODEL", DEFAULT_CLAUDE_COLLECT_MODEL
+        ),
+        claude_collect_effort=backend(
+            "TRADINGAGENTS_CLAUDE_COLLECT_EFFORT", DEFAULT_CLAUDE_COLLECT_EFFORT
+        ),
+        claude_eval_model=backend("TRADINGAGENTS_CLAUDE_EVAL_MODEL", DEFAULT_CLAUDE_EVAL_MODEL),
+        claude_eval_effort=backend("TRADINGAGENTS_CLAUDE_EVAL_EFFORT", DEFAULT_CLAUDE_EVAL_EFFORT),
     )

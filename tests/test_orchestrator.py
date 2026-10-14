@@ -301,33 +301,38 @@ def test_component_env_exports_resolved_data_dirs(tmp_path):
 
 @pytest.mark.unit
 def test_component_env_exports_backend_roles():
-    # D19 split-brain guard, backend edition: orchestrated subprocesses must
-    # see the orchestrator's *resolved* backend roles — codex collects,
-    # claude evaluates, out of the box.
+    # Split-brain guard, backend edition: orchestrated subprocesses must see
+    # the orchestrator's *resolved* backend roles and pinned claude
+    # models/efforts — D20: claude collects on Sonnet, evaluates on Opus.
     env = orchestrator.component_env(load_config({}))
-    assert env["TRADINGAGENTS_COLLECT_BACKEND"] == "codex"
+    assert env["TRADINGAGENTS_COLLECT_BACKEND"] == "claude"
     assert env["TRADINGAGENTS_EVAL_BACKEND"] == "claude"
+    assert env["TRADINGAGENTS_CLAUDE_COLLECT_MODEL"] == "claude-sonnet-5-5"
+    assert env["TRADINGAGENTS_CLAUDE_COLLECT_EFFORT"] == "medium"
+    assert env["TRADINGAGENTS_CLAUDE_EVAL_MODEL"] == "claude-opus-5-5"
+    assert env["TRADINGAGENTS_CLAUDE_EVAL_EFFORT"] == "high"
 
     # Overrides propagate resolved, exactly like the data dirs.
     config = load_config(
         {
-            "TRADINGAGENTS_COLLECT_BACKEND": "claude",
-            "TRADINGAGENTS_EVAL_BACKEND": "codex",
+            "TRADINGAGENTS_COLLECT_BACKEND": "codex",
+            "TRADINGAGENTS_EVAL_BACKEND": "claude",
+            "TRADINGAGENTS_CLAUDE_EVAL_EFFORT": "medium",
         }
     )
     env = orchestrator.component_env(config)
-    assert env["TRADINGAGENTS_COLLECT_BACKEND"] == "claude"
-    assert env["TRADINGAGENTS_EVAL_BACKEND"] == "codex"
+    assert env["TRADINGAGENTS_COLLECT_BACKEND"] == "codex"
+    assert env["TRADINGAGENTS_EVAL_BACKEND"] == "claude"
+    assert env["TRADINGAGENTS_CLAUDE_EVAL_EFFORT"] == "medium"
 
 
 @pytest.mark.unit
-def test_default_runner_spawns_collectors_on_codex_and_evaluator_on_claude(
-    tmp_path, monkeypatch
-):
-    """Out of the box, the orchestrated subprocesses land on the D19 split:
+def test_default_runner_spawns_components_on_the_d20_claude_roles(tmp_path, monkeypatch):
+    """Out of the box, the orchestrated subprocesses land on the D20 roles:
     the argv carries no --backend (the CLIs defer to the env-aware config),
-    and the exported env resolves collect=codex / eval=claude — the exact
-    resolution each component's own load_config() performs."""
+    and the exported env resolves claude on both roles with distinct pinned
+    models — the exact resolution each component's own load_config()
+    performs."""
     config = make_config(tmp_path)
     calls = []
 
@@ -359,11 +364,13 @@ def test_default_runner_spawns_collectors_on_codex_and_evaluator_on_claude(
     for argv, kwargs in calls:
         assert "--backend" not in argv  # backend defers to the exported env
         env = kwargs["env"]
-        assert env["TRADINGAGENTS_COLLECT_BACKEND"] == "codex"
+        assert env["TRADINGAGENTS_COLLECT_BACKEND"] == "claude"
         assert env["TRADINGAGENTS_EVAL_BACKEND"] == "claude"
         resolved = load_config(env)  # what the subprocess itself will resolve
-        assert resolved.collect_backend == "codex"
+        assert resolved.collect_backend == "claude"
         assert resolved.eval_backend == "claude"
+        assert resolved.claude_collect_model == "claude-sonnet-5-5"
+        assert resolved.claude_eval_model == "claude-opus-5-5"
 
 
 @pytest.mark.unit

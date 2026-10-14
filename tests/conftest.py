@@ -46,12 +46,22 @@ def _dummy_api_keys(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _isolate_pipeline_backends(monkeypatch):
-    """Strip the D19 backend-role env overrides so every test sees the shipped
-    defaults (collect=codex, eval=claude) unless it sets them explicitly —
-    ambient developer environments must not skew backend-resolution tests."""
-    for env_var in ("TRADINGAGENTS_COLLECT_BACKEND", "TRADINGAGENTS_EVAL_BACKEND"):
+def _isolate_pipeline_backends(monkeypatch, tmp_path):
+    """Strip the D19/D20 backend-role env overrides so every test sees the
+    shipped defaults (claude on both roles: Sonnet collects, Opus evaluates)
+    unless it sets them explicitly — ambient developer environments must not
+    skew backend-resolution tests. The claude usage log goes to a temp file so
+    no test appends to the real ``~/.tradingagents``."""
+    for env_var in (
+        "TRADINGAGENTS_COLLECT_BACKEND",
+        "TRADINGAGENTS_EVAL_BACKEND",
+        "TRADINGAGENTS_CLAUDE_COLLECT_MODEL",
+        "TRADINGAGENTS_CLAUDE_COLLECT_EFFORT",
+        "TRADINGAGENTS_CLAUDE_EVAL_MODEL",
+        "TRADINGAGENTS_CLAUDE_EVAL_EFFORT",
+    ):
         monkeypatch.delenv(env_var, raising=False)
+    monkeypatch.setenv("TRADINGAGENTS_CLAUDE_USAGE_LOG", str(tmp_path / "claude_usage.jsonl"))
 
 
 @pytest.fixture(autouse=True)

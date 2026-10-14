@@ -7,8 +7,8 @@
 ## Goal
 
 Score briefs for accuracy using a web-search-enabled CLI backend — default
-**`claude -p`** (identity `claude-eval`) per D19, with **GPT-5.6 Terra** (via
-`codex exec`) selectable — writing
+**`claude -p`** (identity `claude-eval`) on pinned **Opus 5.5** per D20, with
+**GPT-5.6 Terra** (via `codex exec`) selectable — writing
 the eval json next to each brief per its contract. The eval serves two
 purposes: (a) catch fabrication/staleness before a brief feeds trading
 analysis (see gating below), (b) provide a quality weight when A/B-comparing
@@ -45,17 +45,24 @@ opportunity brief whose `catalyst_score` ≥ the analysis trigger threshold.
   contract's hard structural requirements (that's a collector bug — exit
   distinctly).
 - **R2**: backend selectable — `--backend claude|codex`, default from config
-  `eval_backend` (env `TRADINGAGENTS_EVAL_BACKEND`), `claude` per D19. The
-  Claude backend invokes `claude -p --output-format json --json-schema
-  <schema>` with WebSearch/WebFetch (evaluator identity `claude-eval`) and
-  consumes only the envelope's `structured_output` object. A non-zero exit,
+  `eval_backend` (env `TRADINGAGENTS_EVAL_BACKEND`), `claude` per D19/D20.
+  The Claude backend invokes a hermetic web-only `claude -p` (D20 flags:
+  `--safe-mode`, `--tools WebSearch,WebFetch`, `--strict-mcp-config`,
+  `--permission-mode dontAsk`, `--no-session-persistence`) pinned to config
+  `claude_eval_model` / `claude_eval_effort` (default `claude-opus-5-5` /
+  `high`; `medium` pending the eval-effort study) with `--output-format json
+  --json-schema <schema>` (evaluator identity `claude-eval`), consumes only
+  the envelope's `structured_output` object, and appends the envelope's usage
+  to `claude_usage.jsonl` (best-effort, never a failure). A non-zero exit,
   `is_error`, malformed envelope, or missing structured output is a backend
   failure. Schema retry remains only for an actual `_ModelJudgment` contract
   failure. The `codex` backend runs model `gpt-5.6-terra` through `codex exec`
   with web search enabled (identity `gpt-5.6-terra`).
   Independence: the evaluator must NOT reuse the collector's backend session
-  or context, and the eval backend must differ from `collect_backend` — a
-  match is a loud stderr warning (never a failure).
+  or context, and must not run on the collector's model — eval backend equal
+  to `collect_backend` *and* (for claude) `claude_eval_model` equal to
+  `claude_collect_model` is a loud stderr warning (never a failure). Claude on
+  both roles with distinct pinned models (the D20 default) is independent.
 - **R3**: output the eval json per the brief's contract schema (including
   `session` for macro, `ticker` for ticker briefs, and always
   `brief_sha256`/`brief_generated_at` of the exact revision evaluated),

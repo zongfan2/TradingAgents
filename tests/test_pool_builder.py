@@ -31,6 +31,7 @@ from pipeline.pool_builder import (
     technical_gate,
     weekly_closes,
 )
+from tests.claude_envelopes import claude_envelope
 
 RUN_DATE = date(2026, 8, 10)  # a Monday
 FRIDAY = date(2026, 8, 7)  # the trading day before, across the weekend
@@ -895,17 +896,17 @@ def test_fresh_run_writes_contract_valid_pool(pool_dir):
 
 
 @pytest.mark.unit
-def test_default_backend_is_codex_when_env_unset(pool_dir, monkeypatch):
-    # D19: with no TRADINGAGENTS_COLLECT_BACKEND set, nomination runs on codex
+def test_default_backend_is_claude_when_env_unset(pool_dir, monkeypatch):
+    # D20: with no TRADINGAGENTS_COLLECT_BACKEND set, nomination runs on claude
     # and both the pool's generator and the cache provenance record it.
     monkeypatch.delenv("TRADINGAGENTS_COLLECT_BACKEND", raising=False)
     runner = FakeRunner([nomination_json(nominee("AVGO", 7.5))])
     result = build_pool("us", as_of=RUN_DATE, runner=runner, fetch_ohlcv=FakeFetcher())
     assert result.outcome == "written"
-    assert runner.calls[0][0] == "codex"
-    assert read_written_pool(pool_dir).generator == "codex-deep-search"
+    assert runner.calls[0][0] == "claude"
+    assert read_written_pool(pool_dir).generator == "claude-deep-search"
     cache = pool_builder.nomination_cache_path(pool_dir, "us", RUN_DATE)
-    assert json.loads(cache.read_text(encoding="utf-8"))["backend"] == "codex"
+    assert json.loads(cache.read_text(encoding="utf-8"))["backend"] == "claude"
 
 
 @pytest.mark.unit
@@ -1691,11 +1692,14 @@ def test_default_runner_uses_the_budget_sized_timeout(monkeypatch):
     def fake_run(cmd, **kwargs):
         seen["cmd"] = cmd
         seen["timeout"] = kwargs.get("timeout")
-        return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout=claude_envelope("[]"), stderr="")
 
     monkeypatch.setattr(pool_builder.subprocess, "run", fake_run)
     assert pool_builder.default_runner("claude", "PROMPT") == "[]"
     assert seen["cmd"][0] == "claude"
+    # D20: pinned collect model/effort + JSON envelope, never the CLI default.
+    assert seen["cmd"][seen["cmd"].index("--model") + 1] == "claude-sonnet-5-5"
+    assert seen["cmd"][seen["cmd"].index("--effort") + 1] == "medium"
     assert seen["timeout"] == 360.0  # budget-derived, not the outer 900s
 
 

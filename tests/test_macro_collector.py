@@ -5,6 +5,7 @@ and the aws CLI are exercised only through injected fakes or a monkeypatched
 ``subprocess.run``.
 """
 
+import json
 import subprocess
 import sys
 from datetime import date
@@ -16,6 +17,7 @@ from pipeline import macro_collector
 from pipeline.contracts import briefs
 from pipeline.macro_collector import CollectorError, collect, main
 from pipeline.prompts import SESSION_BLOCKS
+from tests.claude_envelopes import claude_envelope
 
 DATE = "2026-08-08"
 AS_OF = date(2026, 8, 8)
@@ -342,11 +344,25 @@ def test_default_runner_claude_command(monkeypatch):
     def fake_run(cmd, **kwargs):
         seen["cmd"] = cmd
         seen["input"] = kwargs.get("input")
-        return subprocess.CompletedProcess(cmd, 0, stdout="BRIEF TEXT", stderr="")
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout=claude_envelope("BRIEF TEXT"), stderr=""
+        )
 
     monkeypatch.setattr(macro_collector.subprocess, "run", fake_run)
     assert macro_collector.default_runner("claude", "PROMPT") == "BRIEF TEXT"
-    assert seen["cmd"] == ["claude", "-p", "--allowedTools", "WebSearch,WebFetch"]
+    # D20: hermetic web-only session, pinned collect model/effort, JSON
+    # envelope — never the CLI's interactive defaults.
+    assert seen["cmd"] == [
+        "claude", "-p",
+        "--safe-mode",
+        "--tools", "WebSearch,WebFetch",
+        "--allowedTools", "WebSearch,WebFetch",
+        "--strict-mcp-config",
+        "--permission-mode", "dontAsk",
+        "--no-session-persistence",
+        "--model", "claude-sonnet-5-5", "--effort", "medium",
+        "--output-format", "json",
+    ]
     assert seen["input"] == "PROMPT"  # prompt goes over stdin
 
 
@@ -419,7 +435,7 @@ def test_default_runner_uses_the_budget_sized_timeout(monkeypatch):
 
     def fake_run(cmd, **kwargs):
         seen["timeout"] = kwargs.get("timeout")
-        return subprocess.CompletedProcess(cmd, 0, stdout="BRIEF", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout=claude_envelope("BRIEF"), stderr="")
 
     monkeypatch.setattr(macro_collector.subprocess, "run", fake_run)
     macro_collector.default_runner("claude", "PROMPT")
@@ -433,7 +449,7 @@ def test_default_runner_uses_shared_deadline_remainder_for_each_attempt(monkeypa
 
     def fake_run(cmd, **kwargs):
         timeouts.append(kwargs["timeout"])
-        return subprocess.CompletedProcess(cmd, 0, stdout="BRIEF", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout=claude_envelope("BRIEF"), stderr="")
 
     monkeypatch.setattr(macro_collector.time, "monotonic", lambda: next(clock))
     monkeypatch.setattr(macro_collector.subprocess, "run", fake_run)
@@ -452,7 +468,7 @@ def test_collect_production_runner_shares_its_deadline_with_retry(brief_dir, mon
     def fake_run(cmd, **kwargs):
         timeouts.append(kwargs["timeout"])
         text = missing_section_brief() if len(timeouts) == 1 else make_brief()
-        return subprocess.CompletedProcess(cmd, 0, stdout=text, stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout=claude_envelope(text), stderr="")
 
     monkeypatch.setattr(macro_collector.time, "monotonic", lambda: next(clock))
     monkeypatch.setattr(macro_collector.subprocess, "run", fake_run)
@@ -522,18 +538,47 @@ def test_cli_backend_flag_selects_generator(brief_dir):
 
 
 @pytest.mark.unit
-def test_default_backend_is_codex_when_env_unset(tmp_path, monkeypatch):
-    directory = tmp_path / "briefs-codex-default"
+def test_default_backend_is_claude_when_env_unset(tmp_path, monkeypatch):
+    directory = tmp_path / "briefs-claude-default"
     monkeypatch.setenv(macro_collector.MACRO_BRIEF_DIR_ENV, str(directory))
     monkeypatch.delenv(macro_collector.S3_URI_ENV, raising=False)
     monkeypatch.delenv("TRADINGAGENTS_COLLECT_BACKEND", raising=False)
-    runner = FakeRunner([make_brief(generator="codex-deep-search")])
+    runner = FakeRunner([make_brief(generator="claude-deep-search")])
     result = collect("us", as_of=AS_OF, runner=runner)
     assert result.outcome == "written"
     backend, prompt = runner.calls[0]
-    assert backend == "codex"  # D19 shipped default
-    assert "generator: codex-deep-search" in prompt
-    assert f"{DATE} | us | codex | 9 | written" in collector_log(directory)
+    assert backend == "claude"  # D20 shipped default
+    assert "generator: claude-deep-search" in prompt
+    assert f"{DATE} | us | claude | 9 | written" in collector_log(directory)
+
+
+@pytest.mark.unit
+def test_default_runner_unwraps_envelope_and_records_usage(tmp_path, monkeypatch):
+    log = tmp_path / "usage.jsonl"
+    monkeypatch.setenv("TRADINGAGENTS_CLAUDE_USAGE_LOG", str(log))
+    monkeypatch.setenv("TRADINGAGENTS_CLAUDE_COLLECT_EFFORT", "low")
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, stdout=claude_envelope("BRIEF"), stderr="")
+
+    monkeypatch.setattr(macro_collector.subprocess, "run", fake_run)
+    assert macro_collector.default_runner("claude", "PROMPT") == "BRIEF"
+    record = json.loads(log.read_text())
+    assert record["component"] == "macro_collector"
+    assert record["model"] == "claude-sonnet-5-5"
+    assert record["effort"] == "low"
+    assert record["cache_read_input_tokens"] == 900
+    assert record["total_cost_usd"] == 0.12
+
+
+@pytest.mark.unit
+def test_default_runner_rejects_an_unusable_claude_envelope(monkeypatch):
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, stdout="plain text, no envelope", stderr="")
+
+    monkeypatch.setattr(macro_collector.subprocess, "run", fake_run)
+    with pytest.raises(CollectorError, match="invalid JSON envelope"):
+        macro_collector.default_runner("claude", "PROMPT")
 
 
 @pytest.mark.unit

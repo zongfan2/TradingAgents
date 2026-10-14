@@ -54,7 +54,8 @@ near-zero marginal API cost.
 | D16 | Inputs are immutable: same-day rewrites archive the prior revision (`archive/<name>.<generated_at>`), and every decision row records path + generated_at + sha256 of the exact briefs/pool it consumed plus a config digest | A/B audit must be able to reproduce what a run saw; overwrite-in-place destroys that (Codex review 2026-08-03, pt 1) |
 | D17 | Market-state guards before any live submit: broker calendar/clock, halt status, quote freshness (`max_quote_age`) — closed/halted/stale ⇒ skip, never submit | Old prices must not arm GTC orders on holidays/halts (Codex review 2026-08-03, pt 5) |
 | D18 | Constrained add-ons: position snapshot (`positions.json`) feeds the trader; a BUY on a held ticker is a maintain unless `add_intent` + rationale; adds are pyramid-up only, ≤ 2 tranches, ≥ 3 trading days apart, per-ticker notional ≤ 20% | Daily re-analysis re-emits BUY for held names — without explicit add semantics, signal persistence compounds into an uncapped position; blanket skip forbids legitimate pyramiding (user decision 2026-08-05) |
-| D19 | CLI-role swap: **codex performs all deep-search collection** (macro, pool nomination, ticker briefs — config `collect_backend`, default `codex`) and **claude performs evaluation** (config `eval_backend`, default `claude`, identity `claude-eval`); explicit `--backend` still overrides per invocation, and collector/evaluator backend independence is preserved (backends must differ; a match warns loudly) — just mirrored | Claude subscription's monthly cap was hit once and collection is the heavier consumer (user decision 2026-08-10) |
+| D19 | CLI-role swap: **codex performs all deep-search collection** (macro, pool nomination, ticker briefs — config `collect_backend`, default `codex`) and **claude performs evaluation** (config `eval_backend`, default `claude`, identity `claude-eval`); explicit `--backend` still overrides per invocation, and collector/evaluator backend independence is preserved (backends must differ; a match warns loudly) — just mirrored | Claude subscription's monthly cap was hit once and collection is the heavier consumer (user decision 2026-08-10) — **collection default superseded by D20** |
+| D20 | Claude on both roles, independent by model: **claude collects** (config `collect_backend`, default `claude`) on pinned **Sonnet 5.5 / effort `medium`** (`claude_collect_model` / `claude_collect_effort`) and **claude evaluates** (identity `claude-eval`) on pinned **Opus 5.5 / effort `high`** (`claude_eval_model` / `claude_eval_effort`; `medium` pending the eval-effort study). Every pipeline `claude -p` pins model + effort (never the user's interactive default) and runs hermetically — `--safe-mode`, `--tools WebSearch,WebFetch`, `--strict-mcp-config`, `--permission-mode dontAsk`, `--no-session-persistence` — with `--output-format json`, appending each call's envelope `usage` / `total_cost_usd` to `~/.tradingagents/claude_usage.jsonl` (best-effort, never fails a run). Collector/evaluator independence (evaluator R2) now means *different models*: same backend + same model warns loudly. codex stays selectable per role | User decision 2026-10-13: retire codex collection; a bare `claude -p` had silently run the evaluator on the user's interactive default (Fable 5.1 / `xhigh`) with their hooks, plugins, MCP servers and `defaultMode: auto` loaded (~50K context tokens per call) |
 
 ## Contracts (files are the only interfaces)
 
@@ -68,9 +69,10 @@ near-zero marginal API cost.
 ## Cost model
 
 Per slot: 1 macro deepsearch + 1 pool deepsearch + ≤15 ticker deepsearches
-(concurrency 3) on the Codex subscription; evaluator runs on the Claude
-subscription (D19 — collection is the heavier consumer, so it burns the Codex
-quota); analysis runs on the preset backend (claude-sub preset =
+(concurrency 3) plus the evaluator, all on the Claude subscription (D20 —
+Sonnet 5.5 collects, Opus 5.5 evaluates; `claude_usage.jsonl` records each
+call's tokens so quota headroom is measurable, D19's codex split remains one
+env var away); analysis runs on the preset backend (claude-sub preset =
 subscription quota). Analysis-time external calls collapse to yfinance OHLCV /
 fundamentals (free) + optional Polymarket (free). The only per-token billing
 left is the optional `luna`/`deepseek` presets.
@@ -139,8 +141,10 @@ structured keys are file-config only.
 | `max_quote_age_minutes` | 15 | int | — |
 | `notifications_enabled` | `true` | bool | — |
 | `component_timeouts` | see orchestrator.md R1 | structured | — |
-| `collect_backend` | `codex` | enum claude/codex (D19) | `TRADINGAGENTS_COLLECT_BACKEND` |
-| `eval_backend` | `claude` | enum claude/codex (D19) | `TRADINGAGENTS_EVAL_BACKEND` |
+| `collect_backend` | `claude` | enum claude/codex (D20) | `TRADINGAGENTS_COLLECT_BACKEND` |
+| `eval_backend` | `claude` | enum claude/codex (D19/D20) | `TRADINGAGENTS_EVAL_BACKEND` |
+| `claude_collect_model` / `claude_collect_effort` | `claude-sonnet-5-5` / `medium` | str / enum low…max (D20) | `TRADINGAGENTS_CLAUDE_COLLECT_MODEL` / `TRADINGAGENTS_CLAUDE_COLLECT_EFFORT` |
+| `claude_eval_model` / `claude_eval_effort` | `claude-opus-5-5` / `high` | str / enum low…max (D20) | `TRADINGAGENTS_CLAUDE_EVAL_MODEL` / `TRADINGAGENTS_CLAUDE_EVAL_EFFORT` |
 
 ## Implementation order
 

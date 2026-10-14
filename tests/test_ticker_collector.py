@@ -28,6 +28,7 @@ from pipeline.ticker_collector import (
     main,
     render_ticker_prompt,
 )
+from tests.claude_envelopes import claude_envelope
 
 DATE = "2026-08-08"
 AS_OF = date(2026, 8, 8)
@@ -534,11 +535,25 @@ def test_default_runner_claude_command(monkeypatch):
         seen["cmd"] = cmd
         seen["input"] = kwargs.get("input")
         seen["timeout"] = kwargs.get("timeout")
-        return subprocess.CompletedProcess(cmd, 0, stdout="BRIEF TEXT", stderr="")
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout=claude_envelope("BRIEF TEXT"), stderr=""
+        )
 
     monkeypatch.setattr(ticker_collector.subprocess, "run", fake_run)
     assert ticker_collector.default_runner("claude", "PROMPT") == "BRIEF TEXT"
-    assert seen["cmd"] == ["claude", "-p", "--allowedTools", "WebSearch,WebFetch"]
+    # D20: hermetic web-only session, pinned collect model/effort, JSON
+    # envelope — never the CLI's interactive defaults.
+    assert seen["cmd"] == [
+        "claude", "-p",
+        "--safe-mode",
+        "--tools", "WebSearch,WebFetch",
+        "--allowedTools", "WebSearch,WebFetch",
+        "--strict-mcp-config",
+        "--permission-mode", "dontAsk",
+        "--no-session-persistence",
+        "--model", "claude-sonnet-5-5", "--effort", "medium",
+        "--output-format", "json",
+    ]
     assert seen["input"] == "PROMPT"  # prompt goes over stdin
     assert seen["timeout"] == ticker_collector.BACKEND_TIMEOUT_SECONDS  # ceiling default
 
@@ -554,25 +569,55 @@ def test_default_runner_codex_command_is_a_working_invocation(monkeypatch):
 
     monkeypatch.setattr(ticker_collector.subprocess, "run", fake_run)
     assert ticker_collector.default_runner("codex", "PROMPT") == "BRIEF TEXT"
-    # D19 (codex is the collection default): web search on, git-repo trust
-    # check skipped (components inherit an arbitrary cwd), prompt over stdin.
+    # codex (selectable collection backend since D20): web search on, git-repo
+    # trust check skipped (components inherit an arbitrary cwd), prompt over
+    # stdin, plain-text stdout passed through.
     assert seen["cmd"] == ["codex", "exec", "-c", "tools.web_search=true", "--skip-git-repo-check", "-"]
     assert seen["input"] == "PROMPT"
 
 
 @pytest.mark.unit
-def test_default_backend_is_codex_when_env_unset(dirs, monkeypatch):
-    # D19: with no TRADINGAGENTS_COLLECT_BACKEND set, the fan-out collects on
-    # codex and stamps codex-deep-search briefs.
+def test_default_backend_is_claude_when_env_unset(dirs, monkeypatch):
+    # D20: with no TRADINGAGENTS_COLLECT_BACKEND set, the fan-out collects on
+    # claude and stamps claude-deep-search briefs.
     _brief_dir, pool_dir = dirs
     monkeypatch.delenv("TRADINGAGENTS_COLLECT_BACKEND", raising=False)
     write_pool(pool_dir, core=("NVDA",), opportunity=())
-    fake = FakeBackend({"NVDA": [make_ticker_brief(generator="codex-deep-search")]})
+    fake = FakeBackend({"NVDA": [make_ticker_brief(generator="claude-deep-search")]})
     summary = collect_all("us", as_of=AS_OF, runner=fake)
     assert summary.written == 1
     backend, _ticker, prompt = fake.calls[0]
-    assert backend == "codex"
-    assert "generator: codex-deep-search" in prompt
+    assert backend == "claude"
+    assert "generator: claude-deep-search" in prompt
+
+
+@pytest.mark.unit
+def test_default_runner_records_ticker_usage(tmp_path, monkeypatch):
+    log = tmp_path / "usage.jsonl"
+    monkeypatch.setenv("TRADINGAGENTS_CLAUDE_USAGE_LOG", str(log))
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, stdout=claude_envelope("BRIEF"), stderr="")
+
+    monkeypatch.setattr(ticker_collector.subprocess, "run", fake_run)
+    assert ticker_collector.default_runner("claude", "PROMPT") == "BRIEF"
+    record = json.loads(log.read_text())
+    assert (record["component"], record["model"], record["effort"]) == (
+        "ticker_collector",
+        "claude-sonnet-5-5",
+        "medium",
+    )
+
+
+@pytest.mark.unit
+def test_default_runner_rejects_an_errored_claude_envelope(monkeypatch):
+    def fake_run(cmd, **kwargs):
+        envelope = claude_envelope("usage limit reached", is_error=True)
+        return subprocess.CompletedProcess(cmd, 0, stdout=envelope, stderr="")
+
+    monkeypatch.setattr(ticker_collector.subprocess, "run", fake_run)
+    with pytest.raises(CollectorError, match="error result: usage limit reached"):
+        ticker_collector.default_runner("claude", "PROMPT")
 
 
 @pytest.mark.unit
@@ -629,7 +674,7 @@ def test_ticker_retry_uses_the_remaining_job_deadline(dirs, monkeypatch):
             if len(timeouts) == 1
             else make_ticker_brief()
         )
-        return subprocess.CompletedProcess(cmd, 0, stdout=text, stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout=claude_envelope(text), stderr="")
 
     monkeypatch.setattr(ticker_collector.time, "monotonic", lambda: next(clock))
     monkeypatch.setattr(ticker_collector.subprocess, "run", fake_run)
@@ -653,7 +698,7 @@ def test_queued_ticker_cannot_start_after_the_aggregate_deadline(dirs, monkeypat
         ticker = re.search(r"^ticker: (\S+)$", prompt, re.MULTILINE).group(1)
         launched.append((ticker, kwargs["timeout"]))
         return subprocess.CompletedProcess(
-            cmd, 0, stdout=make_ticker_brief(ticker=ticker), stderr=""
+            cmd, 0, stdout=claude_envelope(make_ticker_brief(ticker=ticker)), stderr=""
         )
 
     monkeypatch.setenv("TRADINGAGENTS_TIMEOUT_TICKER_COLLECTORS", "121")

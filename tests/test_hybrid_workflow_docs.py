@@ -67,7 +67,7 @@ def test_agent_guide_covers_every_mandatory_claude_trigger():
 
 
 @pytest.mark.unit
-def test_agent_guide_covers_complex_bugs_reports_waivers_and_d19():
+def test_agent_guide_covers_complex_bugs_reports_waivers_and_runtime_roles():
     guide = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
     normalized_guide = " ".join(guide.split())
 
@@ -76,4 +76,8 @@ def test_agent_guide_covers_complex_bugs_reports_waivers_and_d19():
     assert "reviewed head SHA" in guide
     assert "exact bound revision" in guide
     assert "visibly `waived`, never `pass`" in guide
-    assert "runtime D19: Codex performs collection and Claude performs evaluation" in normalized_guide
+    # The dev-review policy stays separate from the runtime role split (D20).
+    assert (
+        "separate from runtime D20 (superseding D19's collection default): Claude "
+        "performs collection on Sonnet 5.5 and evaluation on Opus 5.5"
+    ) in normalized_guide

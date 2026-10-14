@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+from pipeline.claude_cli import EnvelopeError, collect_command, collect_output
 from pipeline.common import (
     SESSIONS,
     append_log_line,
@@ -75,12 +76,13 @@ GENERATORS = {
 #: ``--skip-git-repo-check``: codex exec refuses to run outside a trusted git
 #: worktree, and orchestrated components inherit an arbitrary cwd (launchd
 #: starts them in the user's home) — without it the codex path dies before
-#: searching (evaluator R2 precedent, D19 makes codex the collection default).
+#: searching (evaluator R2 precedent; codex is selectable per D20).
 #: Deliberately no ``--model`` (unlike the evaluator's pinned gpt-5.6-terra):
 #: collection deep searches ride the codex CLI's user-configured default
 #: model, and R1 stamps the CLI-level identity ``codex-deep-search``.
+#: The claude command is built per call from the D20 pinned collect
+#: model/effort (:func:`pipeline.claude_cli.collect_command`).
 BACKEND_COMMANDS = {
-    "claude": ("claude", "-p", "--allowedTools", "WebSearch,WebFetch"),
     "codex": ("codex", "exec", "-c", "tools.web_search=true", "--skip-git-repo-check", "-"),
 }
 
@@ -145,7 +147,7 @@ def default_runner(
     backend: str, prompt: str, *, deadline: float | None = None
 ) -> str:
     """Run the deep-search CLI for ``backend`` with the prompt on stdin."""
-    command = list(BACKEND_COMMANDS[backend])
+    command = collect_command(backend, BACKEND_COMMANDS)
     timeout = backend_timeout_seconds()
     if deadline is not None:
         remaining = deadline - time.monotonic()
@@ -167,7 +169,10 @@ def default_runner(
     if proc.returncode != 0:
         reason = _first_line(proc.stderr or proc.stdout) or "no output"
         raise CollectorError(f"backend '{backend}' exited {proc.returncode}: {reason}")
-    return proc.stdout
+    try:
+        return collect_output(backend, proc.stdout, component="macro_collector")
+    except EnvelopeError as exc:
+        raise CollectorError(f"backend '{backend}' {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -299,7 +304,7 @@ def collect(
     """Collect one session-scoped macro brief; raises on any failure (R6).
 
     ``backend`` ``None`` resolves from the shared config's ``collect_backend``
-    (env ``TRADINGAGENTS_COLLECT_BACKEND``, default ``codex`` per D19); an
+    (env ``TRADINGAGENTS_COLLECT_BACKEND``, default ``claude`` per D20); an
     explicit value always wins. The brief is written only after full
     validation passes, via :func:`pipeline.common.atomic_write` — killing the
     process at any point never leaves a partial file (AC2).
@@ -385,8 +390,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--backend",
         choices=tuple(GENERATORS),
         default=None,
-        help="deep-search backend (default: config collect_backend — codex per "
-        "D19, env TRADINGAGENTS_COLLECT_BACKEND)",
+        help="deep-search backend (default: config collect_backend — claude per "
+        "D20, env TRADINGAGENTS_COLLECT_BACKEND)",
     )
     parser.add_argument(
         "--force",
