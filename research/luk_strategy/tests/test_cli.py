@@ -303,7 +303,14 @@ def test_fetch_daily_wiring(env, monkeypatch, capsys):
 
 def test_build_watchlists_writes_pickle_manifest_and_counts(env, capsys):
     assert cli.main(["build-watchlists", "--set", "bo_max_candidates=10"]) == 0
-    assert env.panel_calls == [{"start": Config().start - timedelta(days=400), "end": None}]
+    assert env.panel_calls == [
+        {
+            "start": Config().start - timedelta(days=400),
+            "end": None,
+            "prefilter_adv": 5e6,
+            "prefilter_price": 3.0,
+        }
+    ]
     assert len(env.features) == 1 and env.features[0].bo_max_candidates == 10
     with open(env.root / "watchlists.pkl", "rb") as f:
         assert pickle.load(f) == FAKE_WL
@@ -315,6 +322,15 @@ def test_build_watchlists_writes_pickle_manifest_and_counts(env, capsys):
     out = capsys.readouterr().out
     assert "BO: 1 candidates" in out and "EP: 1 candidates" in out and "PB: 2 candidates" in out
     assert "3 symbol-days" in out
+
+
+def test_panel_prefilter_never_stricter_than_configured_universe(env):
+    """Codex P2: lowering min_adv / ep_min_adv / min_price below the loader's default
+    prefilter must loosen the prefilter too, or eligible names are silently dropped."""
+    cmd = ["build-watchlists", "--set", "min_adv=2e6", "--set", "ep_min_adv=2e6"]
+    assert cli.main([*cmd, "--set", "min_price=1"]) == 0
+    assert env.panel_calls[-1]["prefilter_adv"] == 2e6
+    assert env.panel_calls[-1]["prefilter_price"] == 1.0
 
 
 def test_fetch_intraday_uses_saved_watchlists(env, monkeypatch):

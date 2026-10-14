@@ -174,6 +174,18 @@ def _bars_to_long(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _batch_covers(meta: dict, syms: list[str], start: date, end: date) -> bool:
+    """True if a cached batch already holds `syms` over [start, end]: same symbols and
+    end, and a recorded start on or before the requested one."""
+    cached_start = meta.get("start")
+    return (
+        meta.get("symbols") == syms
+        and meta.get("end") == end.isoformat()
+        and cached_start is not None
+        and date.fromisoformat(cached_start) <= start
+    )
+
+
 def fetch_daily(
     symbols: list[str],
     start: date,
@@ -184,7 +196,9 @@ def fetch_daily(
 ) -> None:
     """Fetch split-adjusted (or, with raw=True, unadjusted) SIP daily bars; one
     pickle per symbol batch. Resumable: a batch whose file exists with the same
-    symbols is skipped. Unadjusted closes back the point-in-time price filter.
+    symbols and end, and whose cached start is on or before `start`, is skipped (a
+    batch without a recorded start is re-fetched). Unadjusted closes back the
+    point-in-time price filter.
 
     Split-adjusted re-fetches are compared with the previous cache; symbol-days whose
     adjusted close moved are dropped from the intraday cache (`invalidate_intraday`)
@@ -203,7 +217,7 @@ def fetch_daily(
         path = cache / f"batch_{bi:04d}.pkl"
         if path.exists():
             meta = pd.read_pickle(path)
-            if meta.get("symbols") == syms and meta.get("end") == end.isoformat():
+            if _batch_covers(meta, syms, start, end):
                 continue
         todo.append(bi)
     # Previous adjusted closes (all batches, before any file is removed or replaced): the
@@ -245,7 +259,10 @@ def fetch_daily(
                     n,
                 )
         with open(path, "wb") as f:
-            pickle.dump({"symbols": syms, "end": end.isoformat(), "bars": long}, f)
+            pickle.dump(
+                {"symbols": syms, "start": start.isoformat(), "end": end.isoformat(), "bars": long},
+                f,
+            )
         log.info(
             "daily batch %d/%d: %d rows in %.1fs", bi + 1, len(batches), len(long), time.time() - t0
         )

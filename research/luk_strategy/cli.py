@@ -37,6 +37,11 @@ from .config import Config, data_dir, parse_override
 
 log = logging.getLogger(__name__)
 
+# Default symbol prefilter for the wide panel (data.load_daily_panel); lowered to the
+# configured universe thresholds when those are looser.
+PREFILTER_ADV = 5e6
+PREFILTER_PRICE = 3.0
+
 # Calendar days of daily history loaded before cfg.start (~275 sessions >= min_history 150,
 # enough for ret126 / SMA50 / high63 at the first backtest session).
 WARMUP_DAYS = 400
@@ -239,7 +244,14 @@ def build_panel_features_watchlists(cfg: Config):
     features, signals = _stage("features"), _stage("signals")
     warm_start = cfg.start - timedelta(days=WARMUP_DAYS)
     log.info("loading daily panel from %s (warmup) to %s", warm_start, cfg.end or "latest")
-    panel = data.load_daily_panel(start=warm_start, end=cfg.end)
+    # The symbol prefilter must never be stricter than the configured universes, or a
+    # lowered threshold override would silently drop eligible names.
+    panel = data.load_daily_panel(
+        start=warm_start,
+        end=cfg.end,
+        prefilter_adv=min(PREFILTER_ADV, cfg.min_adv, cfg.ep_min_adv),
+        prefilter_price=min(PREFILTER_PRICE, cfg.min_price),
+    )
     log.info("panel: %d sessions x %d symbols", len(panel.dates), len(panel.symbols))
     feats = features.compute_features(panel, cfg)
     log.info("features computed")

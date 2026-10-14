@@ -7,6 +7,7 @@ import logging
 import pickle
 import threading
 from datetime import date, datetime
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -182,12 +183,17 @@ def _long_series(symbol: str, dates: pd.DatetimeIndex, close, volume) -> pd.Data
     )
 
 
-def _write_batch(root, bi: int, long: pd.DataFrame, end: str = "2024-06-28") -> None:
+def _write_batch(
+    root, bi: int, long: pd.DataFrame, end: str = "2024-06-28", start: str | None = "2016-01-01"
+) -> None:
     d = root / "daily"
     d.mkdir(parents=True, exist_ok=True)
     syms = sorted(long["symbol"].unique())
+    meta = {"symbols": syms, "end": end, "bars": long}
+    if start is not None:
+        meta["start"] = start
     with open(d / f"batch_{bi:04d}.pkl", "wb") as f:
-        pickle.dump({"symbols": syms, "end": end, "bars": long}, f)
+        pickle.dump(meta, f)
 
 
 def test_load_daily_panel_prefilter_keeps_ever_passing_symbols_and_benchmarks(tmp_path):
@@ -281,6 +287,30 @@ def test_fetch_daily_removes_stale_batches_beyond_current_count(tmp_path, monkey
     assert names == ["batch_0000.pkl", "batch_0001.pkl"]
     out = data.load_daily_long(tmp_path)
     assert out.loc[out["symbol"] == "AAA", "close"].tolist() == [10.0, 10.0, 10.0]
+
+
+def test_fetch_daily_refetches_batches_that_do_not_cover_the_requested_start(tmp_path, monkeypatch):
+    """Codex P2: a cache fetched from 2024 must not satisfy a request from 2016; a batch
+    with no recorded start (older cache format) is re-fetched too."""
+    dates = pd.bdate_range("2024-01-02", periods=3)
+    _write_batch(tmp_path, 0, _long_series("AAA", dates, 10.0, 1e6), start="2024-01-02")
+    _write_batch(tmp_path, 1, _long_series("BBB", dates, 20.0, 1e6), start=None)
+    _write_batch(tmp_path, 2, _long_series("CCC", dates, 30.0, 1e6), start="2015-06-01")
+    requested = []
+
+    class _Client:
+        def get_stock_bars(self, req):
+            requested.append((tuple(req.symbol_or_symbols), req.start.date()))
+            return SimpleNamespace(df=None)
+
+    monkeypatch.setattr(data, "_data_client", lambda: _Client())
+    data.fetch_daily(
+        ["AAA", "BBB", "CCC"], date(2016, 1, 1), date(2024, 6, 28), cache=tmp_path, batch=1
+    )
+    assert requested == [(("AAA",), date(2016, 1, 1)), (("BBB",), date(2016, 1, 1))]
+    meta = pd.read_pickle(tmp_path / "daily" / "batch_0000.pkl")
+    assert meta["start"] == "2016-01-01"
+    assert pd.read_pickle(tmp_path / "daily" / "batch_0002.pkl")["start"] == "2015-06-01"
 
 
 def test_load_daily_panel_carries_raw_open_without_back_fill(tmp_path):
