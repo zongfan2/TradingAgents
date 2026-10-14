@@ -44,7 +44,13 @@ from pathlib import Path
 
 from pydantic import Field, ValidationError
 
-from pipeline.claude_cli import EnvelopeError, claude_command, parse_envelope, record_usage
+from pipeline.claude_cli import (
+    EnvelopeError,
+    claude_command,
+    parse_envelope,
+    record_failed_call,
+    record_usage,
+)
 from pipeline.common import append_log_line, archive_existing, atomic_write, sha256_text, to_utc_iso
 from pipeline.config import load_config
 from pipeline.contracts.base import ContractError, ContractModel, validation_error_messages
@@ -197,16 +203,19 @@ def claude_runner(prompt: str) -> str:
     except subprocess.TimeoutExpired as exc:
         raise BackendError(f"claude -p timed out after {int(timeout)}s") from exc
     if proc.returncode != 0:
+        record_failed_call("evaluator", model, effort, proc.stdout)
         detail = (proc.stderr or proc.stdout or "").strip()[:500]
         raise BackendError(f"claude -p failed (exit {proc.returncode}): {detail}")
     try:
         envelope = parse_envelope(proc.stdout)
     except EnvelopeError as exc:
+        record_failed_call("evaluator", model, effort, proc.stdout)
         raise BackendError(str(exc)) from exc
-    record_usage("evaluator", model, effort, envelope)
     structured_output = envelope.get("structured_output")
     if not isinstance(structured_output, dict):
+        record_usage("evaluator", model, effort, envelope, outcome="error")
         raise BackendError("claude -p result missing structured_output object")
+    record_usage("evaluator", model, effort, envelope)
     return json.dumps(structured_output)
 
 

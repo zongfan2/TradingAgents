@@ -44,12 +44,13 @@ BACKEND_CHOICES = ("claude", "codex")
 DEFAULT_COLLECT_BACKEND = "claude"
 DEFAULT_EVAL_BACKEND = "claude"
 #: D20 pinned ``claude -p`` model/effort per role (a bare ``claude -p`` rides
-#: the user's interactive default). Eval effort stays ``high`` until the
-#: medium-vs-high study shows medium flags as much.
+#: the user's interactive default). Eval effort ``medium`` per the 2026-10-14
+#: study (docs/2026-10-14-eval-effort-study.md): medium matched high within
+#: run-to-run noise and caught 8/8 planted fabrications, at ~60% of the cost.
 DEFAULT_CLAUDE_COLLECT_MODEL = "claude-sonnet-5-5"
 DEFAULT_CLAUDE_COLLECT_EFFORT = "medium"
 DEFAULT_CLAUDE_EVAL_MODEL = "claude-opus-5-5"
-DEFAULT_CLAUDE_EVAL_EFFORT = "high"
+DEFAULT_CLAUDE_EVAL_EFFORT = "medium"
 
 _SLOT_TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 

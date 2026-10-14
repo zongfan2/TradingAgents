@@ -518,7 +518,7 @@ def test_claude_runner_command_construction_and_stdin(monkeypatch):
     # D20: the evaluator pins its own model/effort — never the CLI default —
     # and runs the same hermetic web-only session as the collectors.
     assert seen["cmd"][seen["cmd"].index("--model") + 1] == "claude-opus-5-5"
-    assert seen["cmd"][seen["cmd"].index("--effort") + 1] == "high"
+    assert seen["cmd"][seen["cmd"].index("--effort") + 1] == "medium"
     assert seen["cmd"][seen["cmd"].index("--tools") + 1] == "WebSearch,WebFetch"
     assert seen["cmd"][seen["cmd"].index("--permission-mode") + 1] == "dontAsk"
     assert {"--safe-mode", "--strict-mcp-config"} <= set(seen["cmd"])
@@ -528,7 +528,7 @@ def test_claude_runner_command_construction_and_stdin(monkeypatch):
 def test_claude_runner_honours_eval_overrides_and_records_usage(tmp_path, monkeypatch):
     log = tmp_path / "usage.jsonl"
     monkeypatch.setenv("TRADINGAGENTS_CLAUDE_USAGE_LOG", str(log))
-    monkeypatch.setenv("TRADINGAGENTS_CLAUDE_EVAL_EFFORT", "medium")
+    monkeypatch.setenv("TRADINGAGENTS_CLAUDE_EVAL_EFFORT", "high")
     seen = {}
     envelope = {
         "type": "result",
@@ -545,13 +545,72 @@ def test_claude_runner_honours_eval_overrides_and_records_usage(tmp_path, monkey
 
     monkeypatch.setattr(evaluator_module.subprocess, "run", fake_run)
     claude_runner("PROMPT")
-    assert seen["cmd"][seen["cmd"].index("--effort") + 1] == "medium"
+    assert seen["cmd"][seen["cmd"].index("--effort") + 1] == "high"
     record = json.loads(log.read_text())
     assert record["component"] == "evaluator"
-    assert (record["model"], record["effort"]) == ("claude-opus-5-5", "medium")
+    assert (record["model"], record["effort"], record["outcome"]) == (
+        "claude-opus-5-5",
+        "high",
+        "ok",
+    )
     assert (record["cache_read_input_tokens"], record["output_tokens"]) == (70, 9)
     assert record["cache_creation_input_tokens"] is None  # absent field, not invented
     assert record["total_cost_usd"] == 0.5
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "returncode, envelope_overrides, message",
+    [
+        (0, {"is_error": True, "result": "usage limit reached"}, "error result"),
+        (0, {"subtype": "error_max_turns"}, "malformed result envelope"),
+        (0, {"structured_output": None}, "missing structured_output"),
+        (1, {"is_error": True, "result": "overloaded"}, r"failed \(exit 1\)"),
+    ],
+    ids=["is_error", "error_subtype", "missing_structured_output", "nonzero_exit"],
+)
+def test_failed_claude_calls_still_record_their_usage(
+    tmp_path, monkeypatch, returncode, envelope_overrides, message
+):
+    # Review F1: an errored call can still have spent quota — its envelope's
+    # usage is logged as outcome=error and the backend failure still raises.
+    log = tmp_path / "usage.jsonl"
+    monkeypatch.setenv("TRADINGAGENTS_CLAUDE_USAGE_LOG", str(log))
+    envelope = {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "structured_output": json.loads(judgment()),
+        "usage": {"input_tokens": 5, "output_tokens": 300},
+        "total_cost_usd": 0.42,
+        **envelope_overrides,
+    }
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(
+            cmd, returncode, stdout=json.dumps(envelope), stderr=""
+        )
+
+    monkeypatch.setattr(evaluator_module.subprocess, "run", fake_run)
+    with pytest.raises(BackendError, match=message):
+        claude_runner("PROMPT")
+    record = json.loads(log.read_text())
+    assert (record["component"], record["outcome"]) == ("evaluator", "error")
+    assert (record["output_tokens"], record["total_cost_usd"]) == (300, 0.42)
+
+
+@pytest.mark.unit
+def test_failed_call_without_an_envelope_logs_nothing(tmp_path, monkeypatch):
+    log = tmp_path / "usage.jsonl"
+    monkeypatch.setenv("TRADINGAGENTS_CLAUDE_USAGE_LOG", str(log))
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 2, stdout="", stderr="not logged in")
+
+    monkeypatch.setattr(evaluator_module.subprocess, "run", fake_run)
+    with pytest.raises(BackendError, match="not logged in"):
+        claude_runner("PROMPT")
+    assert not log.exists()  # no envelope, no usage to report — never invented
 
 
 @pytest.mark.unit

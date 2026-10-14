@@ -310,20 +310,20 @@ def test_component_env_exports_backend_roles():
     assert env["TRADINGAGENTS_CLAUDE_COLLECT_MODEL"] == "claude-sonnet-5-5"
     assert env["TRADINGAGENTS_CLAUDE_COLLECT_EFFORT"] == "medium"
     assert env["TRADINGAGENTS_CLAUDE_EVAL_MODEL"] == "claude-opus-5-5"
-    assert env["TRADINGAGENTS_CLAUDE_EVAL_EFFORT"] == "high"
+    assert env["TRADINGAGENTS_CLAUDE_EVAL_EFFORT"] == "medium"
 
     # Overrides propagate resolved, exactly like the data dirs.
     config = load_config(
         {
             "TRADINGAGENTS_COLLECT_BACKEND": "codex",
             "TRADINGAGENTS_EVAL_BACKEND": "claude",
-            "TRADINGAGENTS_CLAUDE_EVAL_EFFORT": "medium",
+            "TRADINGAGENTS_CLAUDE_EVAL_EFFORT": "high",
         }
     )
     env = orchestrator.component_env(config)
     assert env["TRADINGAGENTS_COLLECT_BACKEND"] == "codex"
     assert env["TRADINGAGENTS_EVAL_BACKEND"] == "claude"
-    assert env["TRADINGAGENTS_CLAUDE_EVAL_EFFORT"] == "medium"
+    assert env["TRADINGAGENTS_CLAUDE_EVAL_EFFORT"] == "high"
 
 
 @pytest.mark.unit

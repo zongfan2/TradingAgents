@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from pipeline.claude_cli import EnvelopeError, collect_command, collect_output
+from pipeline.claude_cli import EnvelopeError, collect_command, collect_failed, collect_output
 from pipeline.common import (
     SESSIONS,
     append_log_line,
@@ -167,6 +167,7 @@ def default_runner(
     except subprocess.TimeoutExpired as exc:
         raise CollectorError(f"backend '{backend}' timed out after {int(timeout)}s") from exc
     if proc.returncode != 0:
+        collect_failed(backend, proc.stdout, component="macro_collector")
         reason = _first_line(proc.stderr or proc.stdout) or "no output"
         raise CollectorError(f"backend '{backend}' exited {proc.returncode}: {reason}")
     try:

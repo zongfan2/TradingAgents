@@ -610,7 +610,10 @@ def test_default_runner_records_ticker_usage(tmp_path, monkeypatch):
 
 
 @pytest.mark.unit
-def test_default_runner_rejects_an_errored_claude_envelope(monkeypatch):
+def test_default_runner_rejects_an_errored_claude_envelope(tmp_path, monkeypatch):
+    log = tmp_path / "usage.jsonl"
+    monkeypatch.setenv("TRADINGAGENTS_CLAUDE_USAGE_LOG", str(log))
+
     def fake_run(cmd, **kwargs):
         envelope = claude_envelope("usage limit reached", is_error=True)
         return subprocess.CompletedProcess(cmd, 0, stdout=envelope, stderr="")
@@ -618,6 +621,40 @@ def test_default_runner_rejects_an_errored_claude_envelope(monkeypatch):
     monkeypatch.setattr(ticker_collector.subprocess, "run", fake_run)
     with pytest.raises(CollectorError, match="error result: usage limit reached"):
         ticker_collector.default_runner("claude", "PROMPT")
+    # Review F1: the errored call's spend is still logged, marked as an error.
+    record = json.loads(log.read_text())
+    assert (record["component"], record["outcome"]) == ("ticker_collector", "error")
+    assert record["total_cost_usd"] == 0.12
+
+
+@pytest.mark.unit
+def test_default_runner_logs_usage_of_a_nonzero_exit_envelope(tmp_path, monkeypatch):
+    log = tmp_path / "usage.jsonl"
+    monkeypatch.setenv("TRADINGAGENTS_CLAUDE_USAGE_LOG", str(log))
+
+    def fake_run(cmd, **kwargs):
+        envelope = claude_envelope("max turns", subtype="error_max_turns", is_error=True)
+        return subprocess.CompletedProcess(cmd, 1, stdout=envelope, stderr="max turns")
+
+    monkeypatch.setattr(ticker_collector.subprocess, "run", fake_run)
+    with pytest.raises(CollectorError, match="exited 1: max turns"):
+        ticker_collector.default_runner("claude", "PROMPT")
+    record = json.loads(log.read_text())
+    assert (record["outcome"], record["output_tokens"]) == ("error", 40)
+
+
+@pytest.mark.unit
+def test_codex_failures_never_touch_the_claude_usage_log(tmp_path, monkeypatch):
+    log = tmp_path / "usage.jsonl"
+    monkeypatch.setenv("TRADINGAGENTS_CLAUDE_USAGE_LOG", str(log))
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 1, stdout=claude_envelope("x"), stderr="boom")
+
+    monkeypatch.setattr(ticker_collector.subprocess, "run", fake_run)
+    with pytest.raises(CollectorError):
+        ticker_collector.default_runner("codex", "PROMPT")
+    assert not log.exists()
 
 
 @pytest.mark.unit

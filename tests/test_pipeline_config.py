@@ -30,7 +30,8 @@ def test_backend_defaults_are_the_d20_claude_roles():
         "claude-sonnet-5-5",
         "medium",
     )
-    assert (config.claude_eval_model, config.claude_eval_effort) == ("claude-opus-5-5", "high")
+    # Eval effort medium per the 2026-10-14 study (medium matched high).
+    assert (config.claude_eval_model, config.claude_eval_effort) == ("claude-opus-5-5", "medium")
     # Independence out of the box: the roles must not collapse onto one model.
     assert config.claude_collect_model != config.claude_eval_model
 

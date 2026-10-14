@@ -108,24 +108,49 @@ def collect_command(backend: str, other_commands: dict[str, tuple[str, ...]]) ->
     backend from the collector's own command table."""
     if backend != "claude":
         return list(other_commands[backend])
-    from pipeline.config import load_config  # config imports this module
-
-    config = load_config()
-    return claude_command(config.claude_collect_model, config.claude_collect_effort)
+    return claude_command(*_collect_model_effort())
 
 
 def collect_output(backend: str, stdout: str, *, component: str) -> str:
     """Collector output text. claude's envelope is unwrapped and its usage
-    logged; raises :class:`EnvelopeError` on an unusable envelope."""
+    logged — an unusable envelope still logs whatever usage it carries, then
+    raises :class:`EnvelopeError`."""
     if backend != "claude":
         return stdout
-    from pipeline.config import load_config
+    model, effort = _collect_model_effort()
+    try:
+        envelope = parse_envelope(stdout)
+        text = result_text(envelope)
+    except EnvelopeError:
+        record_failed_call(component, model, effort, stdout)
+        raise
+    record_usage(component, model, effort, envelope)
+    return text
+
+
+def collect_failed(backend: str, stdout: str, *, component: str) -> None:
+    """Log the usage of a collector call that exited non-zero (claude only)."""
+    if backend == "claude":
+        record_failed_call(component, *_collect_model_effort(), stdout)
+
+
+def _collect_model_effort() -> tuple[str, str]:
+    from pipeline.config import load_config  # config imports this module
 
     config = load_config()
-    envelope = parse_envelope(stdout)
-    text = result_text(envelope)
-    record_usage(component, config.claude_collect_model, config.claude_collect_effort, envelope)
-    return text
+    return config.claude_collect_model, config.claude_collect_effort
+
+
+def record_failed_call(component: str, model: str, effort: str, stdout: str) -> None:
+    """A failed call (error envelope, non-zero exit) can still have spent
+    quota: log the usage of any JSON envelope on its stdout as ``error``. A
+    call that printed no envelope (timeout, crash) has no usage to report."""
+    try:
+        envelope = json.loads(stdout)
+    except (json.JSONDecodeError, TypeError):
+        return
+    if isinstance(envelope, dict):
+        record_usage(component, model, effort, envelope, outcome="error")
 
 
 def usage_log_path() -> Path:
@@ -136,14 +161,18 @@ def usage_log_path() -> Path:
     return Path(state_dir).expanduser() / USAGE_LOG_NAME
 
 
-def record_usage(component: str, model: str, effort: str, envelope: dict) -> None:
-    """Append one usage line for a finished call; never raises."""
+def record_usage(
+    component: str, model: str, effort: str, envelope: dict, *, outcome: str = "ok"
+) -> None:
+    """Append one usage line for a finished call (``outcome`` ``ok`` or
+    ``error``); never raises."""
     usage = envelope.get("usage") if isinstance(envelope.get("usage"), dict) else {}
     line = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "component": component,
         "model": model,
         "effort": effort,
+        "outcome": outcome,
         **{name: usage.get(name) for name in _USAGE_FIELDS},
         "total_cost_usd": envelope.get("total_cost_usd"),
         "num_turns": envelope.get("num_turns"),

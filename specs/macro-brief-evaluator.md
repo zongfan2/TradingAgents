@@ -50,10 +50,11 @@ opportunity brief whose `catalyst_score` ≥ the analysis trigger threshold.
   `--safe-mode`, `--tools WebSearch,WebFetch`, `--strict-mcp-config`,
   `--permission-mode dontAsk`, `--no-session-persistence`) pinned to config
   `claude_eval_model` / `claude_eval_effort` (default `claude-opus-5-5` /
-  `high`; `medium` pending the eval-effort study) with `--output-format json
+  `medium`, per the 2026-10-14 eval-effort study) with `--output-format json
   --json-schema <schema>` (evaluator identity `claude-eval`), consumes only
   the envelope's `structured_output` object, and appends the envelope's usage
-  to `claude_usage.jsonl` (best-effort, never a failure). A non-zero exit,
+  to `claude_usage.jsonl` — `outcome: error` for a failed call that still
+  printed an envelope (best-effort, never a failure). A non-zero exit,
   `is_error`, malformed envelope, or missing structured output is a backend
   failure. Schema retry remains only for an actual `_ModelJudgment` contract
   failure. The `codex` backend runs model `gpt-5.6-terra` through `codex exec`

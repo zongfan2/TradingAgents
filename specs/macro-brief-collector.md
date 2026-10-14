@@ -41,7 +41,8 @@ The robust version below replaces this one-liner.
   `claude_collect_model` / `claude_collect_effort` (default
   `claude-sonnet-5-5` / `medium`) with `--output-format json`: the brief is
   the envelope's `result`, an unusable envelope is a backend failure, and the
-  envelope's usage is appended to `claude_usage.jsonl` (best-effort). The
+  envelope's usage is appended to `claude_usage.jsonl` (best-effort; a failed
+  call that still printed an envelope is logged as `outcome: error`). The
   stamped generator id stays the CLI-level `claude-deep-search` per R1. The
   other backend is `codex exec` with web search enabled
   (`--skip-git-repo-check`: components inherit an arbitrary cwd); it

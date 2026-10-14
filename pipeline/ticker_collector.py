@@ -51,7 +51,7 @@ from pathlib import Path
 
 import yaml
 
-from pipeline.claude_cli import EnvelopeError, collect_command, collect_output
+from pipeline.claude_cli import EnvelopeError, collect_command, collect_failed, collect_output
 from pipeline.common import (
     LOG_FIELD_SEPARATOR,
     SESSIONS,
@@ -258,6 +258,7 @@ def default_runner(
             f"backend '{backend}' timed out after {int(timeout)}s"
         ) from exc
     if proc.returncode != 0:
+        collect_failed(backend, proc.stdout, component="ticker_collector")
         reason = _first_line(proc.stderr or proc.stdout) or "no output"
         raise CollectorError(f"backend '{backend}' exited {proc.returncode}: {reason}")
     try:

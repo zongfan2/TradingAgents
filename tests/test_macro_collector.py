@@ -569,16 +569,36 @@ def test_default_runner_unwraps_envelope_and_records_usage(tmp_path, monkeypatch
     assert record["effort"] == "low"
     assert record["cache_read_input_tokens"] == 900
     assert record["total_cost_usd"] == 0.12
+    assert record["outcome"] == "ok"
 
 
 @pytest.mark.unit
-def test_default_runner_rejects_an_unusable_claude_envelope(monkeypatch):
+def test_default_runner_rejects_an_unusable_claude_envelope(tmp_path, monkeypatch):
+    log = tmp_path / "usage.jsonl"
+    monkeypatch.setenv("TRADINGAGENTS_CLAUDE_USAGE_LOG", str(log))
+
     def fake_run(cmd, **kwargs):
         return subprocess.CompletedProcess(cmd, 0, stdout="plain text, no envelope", stderr="")
 
     monkeypatch.setattr(macro_collector.subprocess, "run", fake_run)
     with pytest.raises(CollectorError, match="invalid JSON envelope"):
         macro_collector.default_runner("claude", "PROMPT")
+    assert not log.exists()  # no envelope, no usage to report — never invented
+
+
+@pytest.mark.unit
+def test_default_runner_logs_usage_of_an_envelope_without_result_text(tmp_path, monkeypatch):
+    log = tmp_path / "usage.jsonl"
+    monkeypatch.setenv("TRADINGAGENTS_CLAUDE_USAGE_LOG", str(log))
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, stdout=claude_envelope(result=None), stderr="")
+
+    monkeypatch.setattr(macro_collector.subprocess, "run", fake_run)
+    with pytest.raises(CollectorError, match="missing result text"):
+        macro_collector.default_runner("claude", "PROMPT")
+    record = json.loads(log.read_text())
+    assert (record["component"], record["outcome"]) == ("macro_collector", "error")
 
 
 @pytest.mark.unit

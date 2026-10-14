@@ -31,7 +31,7 @@ All commands run from the repo root with the project venv (`.venv/bin/python`).
   - `claude` CLI — default backend for **both** roles, on different pinned
     models: collection (macro briefs, pool nomination, ticker briefs) on
     `claude-sonnet-5-5` / effort `medium`, evaluation (identity
-    `claude-eval`) on `claude-opus-5-5` / effort `high`. Every call is a
+    `claude-eval`) on `claude-opus-5-5` / effort `medium`. Every call is a
     hermetic web-only `claude -p` (no hooks, plugins, MCP servers or
     CLAUDE.md from your interactive setup) and appends its token usage to
     `~/.tradingagents/claude_usage.jsonl`.
@@ -252,7 +252,7 @@ axis at a time**, and let ≥ 2 weeks of slots accumulate before judging.
 | Volume confirmation (5d/20d ratio, else demote to watch) | 1.2 | `TRADINGAGENTS_VOLUME_CONFIRM_RATIO` |
 | Plan sizing risk | `risk_pct` ~1%, validator bounds 0.1–2.0 | validator constant (ledger contract) |
 | Adapter caps | per-order 15% equity, gross 100%, total risk 5%, ≤ 10 positions, ≤ 10 orders/slot, ≤ 2 tranches, ≥ 3 days apart, per-ticker 20%, pyramid-up only | code defaults (`execution_adapter.AdapterSettings`) — no env |
-| Backend roles (D20) | collect=`claude` on `claude-sonnet-5-5`/`medium`, eval=`claude` on `claude-opus-5-5`/`high` | `TRADINGAGENTS_COLLECT_BACKEND` / `TRADINGAGENTS_EVAL_BACKEND`; `TRADINGAGENTS_CLAUDE_{COLLECT,EVAL}_{MODEL,EFFORT}` (roles must not share a model; per-run `--backend` overrides) |
+| Backend roles (D20) | collect=`claude` on `claude-sonnet-5-5`/`medium`, eval=`claude` on `claude-opus-5-5`/`medium` | `TRADINGAGENTS_COLLECT_BACKEND` / `TRADINGAGENTS_EVAL_BACKEND`; `TRADINGAGENTS_CLAUDE_{COLLECT,EVAL}_{MODEL,EFFORT}` (roles must not share a model; per-run `--backend` overrides) |
 
 Raising the trigger threshold cuts quota spend and sample size; lowering it
 floods slots (the 30-run budget then drops catalyst runs). Entry/exit
@@ -303,7 +303,8 @@ override a hash match).
 **Subscription quota exhaustion.** Under D20 collection *and* evals burn
 the Claude quota (D19 had moved collection to Codex after Claude's monthly
 cap was hit once). Watch `~/.tradingagents/claude_usage.jsonl` (one line per
-call: component, model, effort, tokens, `total_cost_usd`) for the trend.
+call: component, model, effort, `outcome` ok/error, tokens, `total_cost_usd`)
+for the trend — a run of `error` lines is the earliest sign of a limit.
 Symptoms: evaluator exit 3 / collector exit 1 with a backend CLI error.
 Options: wait it out and backfill with `--date` (collectors skip
 already-collected dates; `--force` to redo); move collection back to Codex
