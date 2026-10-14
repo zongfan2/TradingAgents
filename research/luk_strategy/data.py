@@ -242,7 +242,10 @@ def fetch_daily(
     # reference for detecting adjustment changes, even for symbols that moved between batches.
     old_close = None
     if todo and not raw and any(cache.glob("batch_*.pkl")):
-        old_close = load_daily_long(root, skip_unreadable=True)[["symbol", "date", "close"]]
+        try:
+            old_close = load_daily_long(root, skip_unreadable=True)[["symbol", "date", "close"]]
+        except FileNotFoundError:  # every previous batch unreadable: no baseline to compare
+            old_close = None
     # Drop batch files beyond the current batch count (left over from a longer symbol list):
     # load_daily_long reads every batch_*.pkl and keeps the LAST duplicate, so a stale
     # high-numbered file would silently override fresh rows with old adjustments.

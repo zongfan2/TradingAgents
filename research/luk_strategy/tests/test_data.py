@@ -346,6 +346,26 @@ def test_fetch_daily_survives_interrupted_write_and_truncated_batch(tmp_path, mo
         data.load_daily_long(tmp_path)
 
 
+def test_fetch_daily_recovers_when_every_cached_batch_is_unreadable(tmp_path, monkeypatch):
+    """Codex P2 (round 3): with no readable batch left there is no comparison baseline,
+    but the scheduled downloads must still run."""
+    dates = pd.bdate_range("2024-01-02", periods=3)
+    _write_batch(tmp_path, 0, _long_series("AAA", dates, 10.0, 1e6))
+    path = tmp_path / "daily" / "batch_0000.pkl"
+    path.write_bytes(path.read_bytes()[:20])
+    calls = []
+
+    class _Client:
+        def get_stock_bars(self, req):
+            calls.append(tuple(req.symbol_or_symbols))
+            return SimpleNamespace(df=None)
+
+    monkeypatch.setattr(data, "_data_client", lambda: _Client())
+    data.fetch_daily(["AAA"], date(2016, 1, 1), date(2024, 6, 28), cache=tmp_path)
+    assert calls == [("AAA",)]
+    assert pd.read_pickle(path)["start"] == "2016-01-01"
+
+
 def test_load_daily_panel_carries_raw_open_without_back_fill(tmp_path):
     dates = pd.bdate_range("2024-01-02", periods=30)
     adj = pd.concat(
