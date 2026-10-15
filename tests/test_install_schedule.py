@@ -598,6 +598,25 @@ def test_install_windows_tasks_writes_utf16_xml_and_never_spawns(
 
 
 @pytest.mark.unit
+def test_install_windows_tasks_rejects_unsafe_distro_with_exit_2(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("TRADINGAGENTS_STATE_DIR", str(tmp_path / "state"))
+    output_dir = tmp_path / "tasks"
+    exit_code = install_schedule.main(
+        [
+            "--target", "windows-tasks",
+            "--output-dir", str(output_dir),
+            "--host-tz", SHANGHAI_TZ,
+            "--year", str(YEAR),
+            "--wsl-distro", "Ubuntu 24.04",
+            "--wsl-user", WSL_USER,
+        ]
+    )
+    assert exit_code == 2
+    assert "unsafe WSL distro" in capsys.readouterr().err
+    assert not output_dir.exists()
+
+
+@pytest.mark.unit
 def test_default_target_follows_the_host(monkeypatch):
     monkeypatch.setenv("WSL_DISTRO_NAME", DISTRO)
     assert install_schedule.default_target() == "windows-tasks"

@@ -145,7 +145,7 @@ def build_session_plist(
         ],
         "WorkingDirectory": str(REPO_ROOT),
         "EnvironmentVariables": {"PATH": job_path(config)},
-        "StartCalendarInterval":[{"Hour": h, "Minute": m} for h, m in fire_times],
+        "StartCalendarInterval": [{"Hour": h, "Minute": m} for h, m in fire_times],
         "RunAtLoad": False,
         "StandardOutPath": str(config.state_dir / f"launchd.{session}.out.log"),
         "StandardErrorPath": str(config.state_dir / f"launchd.{session}.err.log"),
@@ -340,11 +340,13 @@ def install_windows_tasks(
     config: PipelineConfig, host_tz: str, year: int, output_dir: Path, distro: str, user: str
 ) -> list[Path]:
     """Write the task XML atomically as UTF-16 (schtasks rejects UTF-8 task
-    XML); never runs schtasks. Creates ``state_dir`` for the job logs."""
+    XML); never runs schtasks. Creates ``state_dir`` for the job logs.
+    Everything is generated (and validated) before anything is written."""
+    tasks = generate_windows_tasks(config, host_tz, year, distro, user)
     output_dir.mkdir(parents=True, exist_ok=True)
     config.state_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
-    for filename, xml_text in generate_windows_tasks(config, host_tz, year, distro, user).items():
+    for filename, xml_text in tasks.items():
         path = output_dir / filename
         document = '\ufeff<?xml version="1.0" encoding="UTF-16"?>\n' + xml_text + "\n"
         atomic_write(path, document, encoding="utf-16-le")
@@ -451,7 +453,11 @@ def _main_windows_tasks(args: argparse.Namespace, config: PipelineConfig, host_t
         return 2
     user = args.wsl_user or getpass.getuser()
     output_dir = args.output_dir or config.state_dir / DEFAULT_WINDOWS_TASKS_SUBDIR
-    written = install_windows_tasks(config, host_tz, year, output_dir, distro, user)
+    try:
+        written = install_windows_tasks(config, host_tz, year, output_dir, distro, user)
+    except ValueError as exc:
+        print(f"install-schedule: error: {exc}", file=sys.stderr)
+        return 2
     print("\nWrote:")
     for path in written:
         print(f"  {path}")
