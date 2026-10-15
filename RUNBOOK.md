@@ -109,6 +109,46 @@ notifies (once per session/day) if a weekday slot has not started by
 slot_time + 1 h. Changing `TRADINGAGENTS_SLOT_TIME_CN/US` requires re-running
 the installer — plists and gate are both generated from config.
 
+### 3a. Schedule install on the Windows server (WSL)
+
+Since 2026-10-15 production runs on the Windows server's WSL distro
+(`Ubuntu-24.04`, checkout `/mnt/d/Projects/TradingAgents`). Under WSL the
+installer defaults to `--target windows-tasks`: WSL only runs while something
+starts it, so Windows Task Scheduler is the trigger. From a WSL shell in the
+repo root:
+
+```bash
+.venv/bin/python -m pipeline.install_schedule --print-schedule
+.venv/bin/python -m pipeline.install_schedule
+```
+
+It writes `pipeline.{cn,us,watchdog}.xml` (UTF-16, as `schtasks` requires) to
+`~/.tradingagents/windows-tasks/` and prints the registration commands, which
+it never runs itself:
+
+```bash
+schtasks.exe /Create /TN '\TradingAgents\pipeline.cn' /XML "$(wslpath -w ~/.tradingagents/windows-tasks/pipeline.cn.xml)" /F
+```
+
+On this host (`Asia/Shanghai`, which the Windows timezone must match —
+`tzutil.exe /g` shows `China Standard Time`):
+
+- `cn`: **08:30**.
+- `us`: **20:30 and 21:30** (EDT / EST renderings; the wrapper gate no-ops
+  the wrong one).
+- watchdog: hourly on the hour.
+
+Each task runs `conhost.exe --headless wsl.exe … /bin/sh -c "<job>"`, so no
+console window appears, and appends to
+`~/.tradingagents/scheduler.<job>.{out,err}.log`. Tasks run only while the
+Windows user `Zzz` is logged on (a locked screen is fine) and wake the machine
+from sleep. Inspect or remove them with:
+
+```bash
+schtasks.exe /Query /TN '\TradingAgents\pipeline.us' /V /FO LIST
+schtasks.exe /Delete /TN '\TradingAgents\pipeline.us' /F
+```
+
 ## 4. First manual slot
 
 Run one slot by hand (no window gate) and watch it:
@@ -132,6 +172,7 @@ Where to look:
 | Per-session status (rewritten after every state change) | `~/.tradingagents/pipeline_status.<session>.json` |
 | Orchestrator log (size-rotated) | `~/.tradingagents/orchestrator.log` |
 | launchd stdout/stderr | `~/.tradingagents/launchd.<session>.{out,err}.log` (+ `launchd.watchdog.*`) |
+| Windows-task stdout/stderr (WSL server) | `~/.tradingagents/scheduler.<session>.{out,err}.log` (+ `scheduler.watchdog.*`) |
 | Component logs | `~/.tradingagents/collector.log`, `analysis_runner.log`, `execution_adapter.log` |
 | Slot lock (double-fire dedupe) | `~/.tradingagents/locks/<session>-<date>.lock` |
 | Outputs | `macro_briefs/`, `ticker_briefs/`, `pools/`, `ledger/` under `~/.tradingagents/` |

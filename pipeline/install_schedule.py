@@ -1,7 +1,8 @@
-"""launchd schedule installer for the pipeline slots (specs/orchestrator.md).
+"""Schedule installer for the pipeline slots (specs/orchestrator.md): launchd
+plists on macOS, Windows Task Scheduler tasks on a WSL host.
 
-Config is the single source of truth: this script *generates* the launchd
-plists and relies on the orchestrator's wrapper gate (``orchestrator slot``,
+Config is the single source of truth: this script *generates* the scheduler
+jobs and relies on the orchestrator's wrapper gate (``orchestrator slot``,
 slot_time ± 15 min evaluated in the session tz) — nothing is hard-coded twice.
 Changing ``slot_time`` requires re-running this script (it prints that
 reminder).
@@ -19,10 +20,14 @@ The installer writes plists to ``~/Library/LaunchAgents`` but **never** runs
 from __future__ import annotations
 
 import argparse
+import getpass
 import os
 import plistlib
+import re
+import shlex
 import shutil
 import sys
+import xml.etree.ElementTree as ET
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -86,19 +91,28 @@ WATCHDOG_LABEL = f"{LABEL_PREFIX}.watchdog"
 #: (found 2026-08-24); the watchdog crashed identically, so nothing alerted.
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-#: Baseline PATH for launchd jobs. launchd gives agents a minimal PATH
+#: Baseline PATH for scheduled jobs. launchd gives agents a minimal PATH
 #: (/usr/bin:/bin:/usr/sbin:/sbin) that misses nvm/homebrew-installed CLIs —
 #: the 2026-08-24 us slot lost its whole collection layer to "codex not found
-#: on PATH". launchd_path() resolves the backend CLIs' actual directories at
-#: install time and bakes them into the plist's EnvironmentVariables.
+#: on PATH" — and a wsl.exe-launched job gets no login profile, so
+#: ~/.local/bin is missing there too. job_path() resolves the configured
+#: backend CLIs' actual directories at install time and bakes them in.
 _STANDARD_PATH_DIRS = ("/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin")
-_REQUIRED_CLIS = ("codex", "claude")
 
 
-def launchd_path() -> str:
-    """PATH for the generated plists: backend-CLI dirs first, then standard dirs."""
+def backend_clis(config: PipelineConfig) -> list[str]:
+    """The CLIs the configured D19/D20 backend roles invoke, deduped."""
+    clis: list[str] = []
+    for backend in (config.collect_backend, config.eval_backend):
+        if backend not in clis:
+            clis.append(backend)
+    return clis
+
+
+def job_path(config: PipelineConfig) -> str:
+    """PATH for the generated jobs: backend-CLI dirs first, then standard dirs."""
     dirs: list[str] = []
-    for cli in _REQUIRED_CLIS:
+    for cli in backend_clis(config):
         found = shutil.which(cli)
         if found:
             # Keep the symlink's own directory (e.g. nvm's bin/) — resolving
@@ -130,8 +144,8 @@ def build_session_plist(
             session,
         ],
         "WorkingDirectory": str(REPO_ROOT),
-        "EnvironmentVariables": {"PATH": launchd_path()},
-        "StartCalendarInterval": [{"Hour": h, "Minute": m} for h, m in fire_times],
+        "EnvironmentVariables": {"PATH": job_path(config)},
+        "StartCalendarInterval":[{"Hour": h, "Minute": m} for h, m in fire_times],
         "RunAtLoad": False,
         "StandardOutPath": str(config.state_dir / f"launchd.{session}.out.log"),
         "StandardErrorPath": str(config.state_dir / f"launchd.{session}.err.log"),
@@ -148,7 +162,7 @@ def build_watchdog_plist(config: PipelineConfig) -> dict:
             "watchdog",
         ],
         "WorkingDirectory": str(REPO_ROOT),
-        "EnvironmentVariables": {"PATH": launchd_path()},
+        "EnvironmentVariables": {"PATH": job_path(config)},
         "StartInterval": WATCHDOG_INTERVAL_S,
         "RunAtLoad": False,
         "StandardOutPath": str(config.state_dir / "launchd.watchdog.out.log"),
@@ -170,9 +184,179 @@ def generate_plists(config: PipelineConfig, host_tz: str, year: int) -> dict[str
     return plists
 
 
-def format_schedule(config: PipelineConfig, host_tz: str, year: int) -> str:
+# ---------------------------------------------------------------------------
+# Windows Task Scheduler target (WSL host)
+# ---------------------------------------------------------------------------
+#
+# On a WSL host the Linux side cannot schedule itself: the distro only runs
+# while something keeps it up, so a Linux timer misses every slot after a
+# reboot or an idle shutdown. Windows Task Scheduler is the trigger instead —
+# it starts WSL on demand. Each task runs
+#   conhost.exe --headless wsl.exe -d <distro> -u <user> --cd <repo>
+#       --exec /bin/sh -c "exec env PATH=... <python> -m pipeline.orchestrator ..."
+# conhost --headless keeps a multi-hour slot from holding a console window on
+# the desktop; the job's own redirection keeps stdout/stderr (wsl.exe output
+# would otherwise vanish). Triggers are host-local wall times, so the Windows
+# timezone must equal ``host_tz`` (the installer prints that reminder).
+
+TASK_FOLDER = "\\TradingAgents\\"
+TASK_NAME_PREFIX = "pipeline"
+CONHOST_EXE = r"C:\Windows\System32\conhost.exe"
+WSL_EXE = r"C:\Windows\System32\wsl.exe"
+TASK_XML_NS = "http://schemas.microsoft.com/windows/2004/02/mit/task"
+#: A slot's component timeouts sum well past an hour (analysis_runner alone
+#: is 7200 s); the limit only bounds a hung wsl.exe.
+SLOT_TASK_TIME_LIMIT = "PT8H"
+WATCHDOG_TASK_TIME_LIMIT = "PT15M"
+DEFAULT_WINDOWS_TASKS_SUBDIR = "windows-tasks"
+_WSL_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def default_target() -> str:
+    """``windows-tasks`` under WSL (``WSL_DISTRO_NAME`` is set by wsl.exe), else launchd."""
+    return "windows-tasks" if os.environ.get("WSL_DISTRO_NAME") else "launchd"
+
+
+def windows_task_name(job: str) -> str:
+    return f"{TASK_NAME_PREFIX}.{job}"
+
+
+def wsl_job_arguments(
+    config: PipelineConfig, orchestrator_args: Sequence[str], log_stem: str, distro: str, user: str
+) -> str:
+    """The conhost.exe argument string that runs one orchestrator command in WSL.
+
+    The sh script travels as ONE double-quoted wsl.exe argument, so it must
+    not contain a double quote itself; its own pieces are shell-quoted.
+    """
+    for label, value in (("WSL distro", distro), ("WSL user", user)):
+        if not _WSL_NAME_RE.match(value):
+            raise ValueError(f"unsafe {label} {value!r} — expected [A-Za-z0-9._-]+")
+    out_log = config.state_dir / f"scheduler.{log_stem}.out.log"
+    err_log = config.state_dir / f"scheduler.{log_stem}.err.log"
+    command = [str(config.python_executable), "-m", "pipeline.orchestrator", *orchestrator_args]
+    script = (
+        f"exec env PATH={shlex.quote(job_path(config))} "
+        + " ".join(shlex.quote(part) for part in command)
+        + f" >>{shlex.quote(str(out_log))} 2>>{shlex.quote(str(err_log))}"
+    )
+    repo = str(REPO_ROOT)
+    if '"' in script or '"' in repo:
+        raise ValueError(
+            "a path in the scheduled command contains a double quote — it cannot be "
+            "passed through wsl.exe as one quoted argument"
+        )
+    return (
+        f'--headless "{WSL_EXE}" -d {distro} -u {user} --cd "{repo}" '
+        f'--exec /bin/sh -c "{script}"'
+    )
+
+
+def _calendar_trigger(parent: ET.Element, year: int, hour: int, minute: int) -> ET.Element:
+    trigger = ET.SubElement(parent, "CalendarTrigger")
+    ET.SubElement(trigger, "StartBoundary").text = f"{year}-01-01T{hour:02d}:{minute:02d}:00"
+    ET.SubElement(trigger, "Enabled").text = "true"
+    ET.SubElement(ET.SubElement(trigger, "ScheduleByDay"), "DaysInterval").text = "1"
+    return trigger
+
+
+def build_windows_task(
+    description: str,
+    arguments: str,
+    fire_times: Sequence[tuple[int, int]],
+    year: int,
+    time_limit: str,
+    repeat_hourly: bool = False,
+) -> str:
+    """One Task Scheduler 1.2 task definition (XML text, no declaration)."""
+    task = ET.Element("Task", {"version": "1.2", "xmlns": TASK_XML_NS})
+    ET.SubElement(ET.SubElement(task, "RegistrationInfo"), "Description").text = description
+    triggers = ET.SubElement(task, "Triggers")
+    for hour, minute in fire_times:
+        trigger = _calendar_trigger(triggers, year, hour, minute)
+        if repeat_hourly:
+            repetition = ET.Element("Repetition")
+            ET.SubElement(repetition, "Interval").text = "PT1H"
+            ET.SubElement(repetition, "Duration").text = "P1D"
+            ET.SubElement(repetition, "StopAtDurationEnd").text = "false"
+            # Repetition must precede StartBoundary in the schema.
+            trigger.insert(0, repetition)
+    principal = ET.SubElement(ET.SubElement(task, "Principals"), "Principal", {"id": "Author"})
+    # WSL distros are per-user and need the user's logon session.
+    ET.SubElement(principal, "LogonType").text = "InteractiveToken"
+    ET.SubElement(principal, "RunLevel").text = "LeastPrivilege"
+    settings = ET.SubElement(task, "Settings")
+    for tag, text in (
+        ("MultipleInstancesPolicy", "IgnoreNew"),
+        ("DisallowStartIfOnBatteries", "false"),
+        ("StopIfGoingOnBatteries", "false"),
+        # A late start would land outside the wrapper window anyway; the
+        # watchdog reports the missed slot.
+        ("StartWhenAvailable", "false"),
+        ("WakeToRun", "true"),
+        ("ExecutionTimeLimit", time_limit),
+        ("Enabled", "true"),
+    ):
+        ET.SubElement(settings, tag).text = text
+    exec_node = ET.SubElement(ET.SubElement(task, "Actions", {"Context": "Author"}), "Exec")
+    ET.SubElement(exec_node, "Command").text = CONHOST_EXE
+    ET.SubElement(exec_node, "Arguments").text = arguments
+    ET.indent(task)
+    return ET.tostring(task, encoding="unicode")
+
+
+def generate_windows_tasks(
+    config: PipelineConfig, host_tz: str, year: int, distro: str, user: str
+) -> dict[str, str]:
+    """``{filename: task XML}`` for both sessions + the hourly watchdog."""
+    tasks: dict[str, str] = {}
+    for session in SESSIONS:
+        fire_times = session_fire_times(
+            session, config.sessions[session].slot_time, host_tz, year
+        )
+        arguments = wsl_job_arguments(
+            config, ["slot", "--session", session], session, distro, user
+        )
+        tasks[f"{windows_task_name(session)}.xml"] = build_windows_task(
+            f"TradingAgents {session} slot (generated by pipeline.install_schedule)",
+            arguments,
+            fire_times,
+            year,
+            SLOT_TASK_TIME_LIMIT,
+        )
+    arguments = wsl_job_arguments(config, ["watchdog"], "watchdog", distro, user)
+    tasks[f"{windows_task_name('watchdog')}.xml"] = build_windows_task(
+        "TradingAgents missed-slot watchdog (generated by pipeline.install_schedule)",
+        arguments,
+        [(0, 0)],
+        year,
+        WATCHDOG_TASK_TIME_LIMIT,
+        repeat_hourly=True,
+    )
+    return tasks
+
+
+def install_windows_tasks(
+    config: PipelineConfig, host_tz: str, year: int, output_dir: Path, distro: str, user: str
+) -> list[Path]:
+    """Write the task XML atomically as UTF-16 (schtasks rejects UTF-8 task
+    XML); never runs schtasks. Creates ``state_dir`` for the job logs."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    config.state_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    for filename, xml_text in generate_windows_tasks(config, host_tz, year, distro, user).items():
+        path = output_dir / filename
+        document = '\ufeff<?xml version="1.0" encoding="UTF-16"?>\n' + xml_text + "\n"
+        atomic_write(path, document, encoding="utf-16-le")
+        written.append(path)
+    return written
+
+
+def format_schedule(
+    config: PipelineConfig, host_tz: str, year: int, target: str = "launchd"
+) -> str:
     """Human-readable effective fire times (``--print-schedule``)."""
-    lines = [f"Effective launchd fire times (host {host_tz}, enumerated over {year}):"]
+    lines = [f"Effective {target} fire times (host {host_tz}, enumerated over {year}):"]
     for session in SESSIONS:
         slot_time = config.sessions[session].slot_time
         fire_times = session_fire_times(session, slot_time, host_tz, year)
@@ -210,7 +394,26 @@ def install(config: PipelineConfig, host_tz: str, year: int, output_dir: Path) -
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m pipeline.install_schedule",
-        description="Generate launchd plists for the pipeline slots (never runs launchctl).",
+        description=(
+            "Generate launchd plists or Windows Task Scheduler tasks (WSL host) for the "
+            "pipeline slots (never runs launchctl/schtasks)."
+        ),
+    )
+    parser.add_argument(
+        "--target",
+        choices=("launchd", "windows-tasks"),
+        default=None,
+        help="scheduler to generate for (default: windows-tasks under WSL, else launchd)",
+    )
+    parser.add_argument(
+        "--wsl-distro",
+        default=None,
+        help="windows-tasks: WSL distro to run in (default: $WSL_DISTRO_NAME)",
+    )
+    parser.add_argument(
+        "--wsl-user",
+        default=None,
+        help="windows-tasks: WSL user to run as (default: the current user)",
     )
     parser.add_argument(
         "--print-schedule",
@@ -231,10 +434,43 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=DEFAULT_LAUNCH_AGENTS_DIR,
-        help="where to write the plists (default: ~/Library/LaunchAgents)",
+        default=None,
+        help=(
+            "where to write the jobs (default: ~/Library/LaunchAgents for launchd, "
+            f"<state_dir>/{DEFAULT_WINDOWS_TASKS_SUBDIR} for windows-tasks)"
+        ),
     )
     return parser
+
+
+def _main_windows_tasks(args: argparse.Namespace, config: PipelineConfig, host_tz: str,
+                        year: int) -> int:
+    distro = args.wsl_distro or os.environ.get("WSL_DISTRO_NAME")
+    if not distro:
+        print("install-schedule: error: not under WSL — pass --wsl-distro", file=sys.stderr)
+        return 2
+    user = args.wsl_user or getpass.getuser()
+    output_dir = args.output_dir or config.state_dir / DEFAULT_WINDOWS_TASKS_SUBDIR
+    written = install_windows_tasks(config, host_tz, year, output_dir, distro, user)
+    print("\nWrote:")
+    for path in written:
+        print(f"  {path}")
+    print("\nNot registered automatically — run when ready (from a WSL shell):")
+    for path in written:
+        print(
+            f"  schtasks.exe /Create /TN '{TASK_FOLDER}{path.stem}' "
+            f'/XML "$(wslpath -w {shlex.quote(str(path))})" /F'
+        )
+    print(
+        f"\nThe triggers are wall times in {host_tz}: the Windows timezone must match "
+        "(check with `tzutil.exe /g`). Tasks run only while the Windows user is logged on "
+        "(a locked screen is fine)."
+    )
+    print(
+        "\nReminder: changing sessions.*.slot_time requires re-running this installer "
+        "(the tasks and the wrapper window are generated from config)."
+    )
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -244,12 +480,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     config = load_config()
     host_tz = args.host_tz or host_timezone_name()
     year = args.year or datetime.now().year
+    target = args.target or default_target()
 
-    print(format_schedule(config, host_tz, year))
+    print(format_schedule(config, host_tz, year, target))
     if args.print_schedule:
         return 0
+    if target == "windows-tasks":
+        return _main_windows_tasks(args, config, host_tz, year)
 
-    written = install(config, host_tz, year, args.output_dir)
+    written = install(config, host_tz, year, args.output_dir or DEFAULT_LAUNCH_AGENTS_DIR)
     print("\nWrote:")
     for path in written:
         print(f"  {path}")

@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 # ---------------------------------------------------------------------------
 
 
-def atomic_write(path: str | Path, content: str) -> Path:
+def atomic_write(path: str | Path, content: str, encoding: str = "utf-8") -> Path:
     """Write ``content`` to ``path`` atomically (temp file in the same
     directory + ``os.replace``). Killing the process mid-write can never leave
     a partial file at ``path``.
@@ -32,7 +32,7 @@ def atomic_write(path: str | Path, content: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "w", encoding=encoding) as handle:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())

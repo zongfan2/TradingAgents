@@ -106,7 +106,8 @@ def test_install_writes_parseable_plists_and_never_runs_launchctl(
     monkeypatch.setattr(subprocess_module, "Popen", forbidden)
 
     exit_code = install_schedule.main(
-        ["--output-dir", str(output_dir), "--host-tz", HOST_TZ, "--year", str(YEAR)]
+        ["--target", "launchd", "--output-dir", str(output_dir),
+         "--host-tz", HOST_TZ, "--year", str(YEAR)]
     )
     assert exit_code == 0
     assert launchctl_calls == []
@@ -139,7 +140,8 @@ def test_install_creates_state_dir_for_launchd_log_paths(tmp_path, monkeypatch, 
     monkeypatch.setenv("TRADINGAGENTS_STATE_DIR", str(state_dir))
     output_dir = tmp_path / "LaunchAgents"
     exit_code = install_schedule.main(
-        ["--output-dir", str(output_dir), "--host-tz", HOST_TZ, "--year", str(YEAR)]
+        ["--target", "launchd", "--output-dir", str(output_dir),
+         "--host-tz", HOST_TZ, "--year", str(YEAR)]
     )
     assert exit_code == 0
     assert state_dir.is_dir()
@@ -158,7 +160,7 @@ def test_install_creates_state_dir_for_launchd_log_paths(tmp_path, monkeypatch, 
 def test_print_schedule_matches_generated_plists(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("TRADINGAGENTS_STATE_DIR", str(tmp_path / "state"))
     exit_code = install_schedule.main(
-        ["--print-schedule", "--host-tz", HOST_TZ, "--year", str(YEAR)]
+        ["--target", "launchd", "--print-schedule", "--host-tz", HOST_TZ, "--year", str(YEAR)]
     )
     assert exit_code == 0
     out = capsys.readouterr().out
@@ -416,3 +418,188 @@ def test_plists_bake_backend_cli_dirs_into_path(monkeypatch, tmp_path):
         path = plist["EnvironmentVariables"]["PATH"]
         assert path.startswith(str(fake_bin))
         assert "/usr/bin" in path and "/bin" in path
+
+
+@pytest.mark.unit
+def test_job_path_requires_only_the_configured_backend_clis(monkeypatch, tmp_path, capsys):
+    # D20: both roles default to claude, so a host without codex (the WSL
+    # server) must not be warned about a CLI the pipeline never invokes.
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    claude = fake_bin / "claude"
+    claude.write_text("#!/bin/sh\n")
+    claude.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:/usr/bin:/bin")
+    config = make_config(tmp_path)
+    assert install_schedule.job_path(config).startswith(str(fake_bin))
+    assert "codex" not in capsys.readouterr().err
+
+    codex_config = make_config(tmp_path, collect_backend="codex")
+    install_schedule.job_path(codex_config)
+    assert "'codex' not found" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Windows Task Scheduler target (WSL host)
+# ---------------------------------------------------------------------------
+
+TASK_NS = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
+SHANGHAI_TZ = "Asia/Shanghai"
+DISTRO = "Ubuntu-24.04"
+WSL_USER = "zongfan"
+
+
+def parse_task(xml_text):
+    import xml.etree.ElementTree as ET
+
+    return ET.fromstring(xml_text)
+
+
+def task_arguments(root):
+    return root.find("t:Actions/t:Exec/t:Arguments", TASK_NS).text
+
+
+@pytest.mark.unit
+def test_windows_tasks_cover_sessions_and_watchdog_on_shanghai_host(tmp_path):
+    config = make_config(tmp_path)
+    tasks = install_schedule.generate_windows_tasks(
+        config, SHANGHAI_TZ, YEAR, distro=DISTRO, user=WSL_USER
+    )
+    assert sorted(tasks) == [
+        "pipeline.cn.xml",
+        "pipeline.us.xml",
+        "pipeline.watchdog.xml",
+    ]
+
+    def trigger_times(name):
+        root = parse_task(tasks[name])
+        boundaries = [
+            node.text
+            for node in root.findall("t:Triggers/t:CalendarTrigger/t:StartBoundary", TASK_NS)
+        ]
+        return [b.split("T", 1)[1] for b in boundaries]
+
+    # 08:30 Shanghai on a Shanghai host: one rendering.
+    assert trigger_times("pipeline.cn.xml") == ["08:30:00"]
+    # 08:30 New York = 20:30 (EDT) / 21:30 (EST) Shanghai; the wrapper gate
+    # turns the wrong-season fire into a no-op.
+    assert trigger_times("pipeline.us.xml") == ["20:30:00", "21:30:00"]
+
+    watchdog = parse_task(tasks["pipeline.watchdog.xml"])
+    interval = watchdog.find(
+        "t:Triggers/t:CalendarTrigger/t:Repetition/t:Interval", TASK_NS
+    ).text
+    assert interval == "PT1H"
+    assert "pipeline.orchestrator watchdog" in task_arguments(watchdog)
+
+
+@pytest.mark.unit
+def test_windows_task_runs_the_orchestrator_slot_inside_wsl(tmp_path):
+    config = make_config(tmp_path)
+    root = parse_task(
+        install_schedule.generate_windows_tasks(
+            config, SHANGHAI_TZ, YEAR, distro=DISTRO, user=WSL_USER
+        )["pipeline.cn.xml"]
+    )
+    command = root.find("t:Actions/t:Exec/t:Command", TASK_NS).text
+    # conhost --headless keeps a multi-hour slot from holding a console
+    # window open on the desktop.
+    assert command == r"C:\Windows\System32\conhost.exe"
+    args = task_arguments(root)
+    assert args.startswith(r'--headless "C:\Windows\System32\wsl.exe" ')
+    assert f"-d {DISTRO} -u {WSL_USER} " in args
+    assert f'--cd "{install_schedule.REPO_ROOT}" ' in args
+    assert "--exec /bin/sh -c " in args
+    assert "pipeline.orchestrator slot --session cn" in args
+    assert str(config.python_executable) in args
+    # The script is one double-quoted wsl argument: no other double quotes.
+    script = args.split("--exec /bin/sh -c ", 1)[1]
+    assert script.startswith('"') and script.endswith('"') and script.count('"') == 2
+    # stdout/stderr land in state_dir (wsl.exe output would otherwise vanish).
+    assert f"{config.state_dir}/scheduler.cn.out.log" in script
+    assert f"{config.state_dir}/scheduler.cn.err.log" in script
+
+
+@pytest.mark.unit
+def test_windows_task_settings_never_overlap_and_allow_long_slots(tmp_path):
+    config = make_config(tmp_path)
+    tasks = install_schedule.generate_windows_tasks(
+        config, SHANGHAI_TZ, YEAR, distro=DISTRO, user=WSL_USER
+    )
+    for name, limit in (("pipeline.us.xml", "PT8H"), ("pipeline.watchdog.xml", "PT15M")):
+        settings = parse_task(tasks[name]).find("t:Settings", TASK_NS)
+        assert settings.find("t:MultipleInstancesPolicy", TASK_NS).text == "IgnoreNew"
+        assert settings.find("t:ExecutionTimeLimit", TASK_NS).text == limit
+        assert settings.find("t:DisallowStartIfOnBatteries", TASK_NS).text == "false"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("distro", "user"),
+    [("Ubuntu 24.04", WSL_USER), (DISTRO, "zong fan"), (DISTRO, 'a"b'), ("", WSL_USER)],
+)
+def test_windows_task_rejects_unsafe_distro_or_user(tmp_path, distro, user):
+    with pytest.raises(ValueError):
+        install_schedule.generate_windows_tasks(
+            make_config(tmp_path), SHANGHAI_TZ, YEAR, distro=distro, user=user
+        )
+
+
+@pytest.mark.unit
+def test_windows_task_rejects_paths_that_break_the_quoted_script(tmp_path):
+    config = make_config(tmp_path / 'we"ird')
+    with pytest.raises(ValueError, match="double quote"):
+        install_schedule.generate_windows_tasks(
+            config, SHANGHAI_TZ, YEAR, distro=DISTRO, user=WSL_USER
+        )
+
+
+@pytest.mark.unit
+def test_install_windows_tasks_writes_utf16_xml_and_never_spawns(
+    tmp_path, monkeypatch, capsys
+):
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("TRADINGAGENTS_STATE_DIR", str(state_dir))
+    import subprocess as subprocess_module
+
+    def forbidden(*args, **kwargs):  # pragma: no cover - failure path
+        raise AssertionError("installer must never spawn subprocesses")
+
+    monkeypatch.setattr(subprocess_module, "run", forbidden)
+    monkeypatch.setattr(subprocess_module, "Popen", forbidden)
+
+    output_dir = tmp_path / "tasks"
+    exit_code = install_schedule.main(
+        [
+            "--target", "windows-tasks",
+            "--output-dir", str(output_dir),
+            "--host-tz", SHANGHAI_TZ,
+            "--year", str(YEAR),
+            "--wsl-distro", DISTRO,
+            "--wsl-user", WSL_USER,
+        ]
+    )
+    assert exit_code == 0
+    assert state_dir.is_dir()
+    names = sorted(p.name for p in output_dir.iterdir())
+    assert names == ["pipeline.cn.xml", "pipeline.us.xml", "pipeline.watchdog.xml"]
+    raw = (output_dir / "pipeline.cn.xml").read_bytes()
+    # schtasks rejects UTF-8 task XML ("unable to switch the encoding").
+    assert raw.startswith(b"\xff\xfe")
+    text = raw.decode("utf-16")
+    assert text.startswith('<?xml version="1.0" encoding="UTF-16"?>')
+    parse_task(text.split("?>", 1)[1])
+
+    out = capsys.readouterr().out
+    assert out.count("schtasks.exe /Create") == 3
+    assert r"\TradingAgents\pipeline.cn" in out
+    assert "launchctl" not in out
+    assert "re-running this installer" in out
+
+
+@pytest.mark.unit
+def test_default_target_follows_the_host(monkeypatch):
+    monkeypatch.setenv("WSL_DISTRO_NAME", DISTRO)
+    assert install_schedule.default_target() == "windows-tasks"
+    monkeypatch.delenv("WSL_DISTRO_NAME")
+    assert install_schedule.default_target() == "launchd"

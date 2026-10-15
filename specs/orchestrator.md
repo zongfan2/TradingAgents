@@ -32,6 +32,18 @@ state — no schedule entries are ever created or deleted by code.
     filenames, ledger rows, and the weekday gate) is the current date in the
     session's timezone at fire time — a cn slot firing Sunday 18:30/19:30
     Chicago time IS Monday's Shanghai session.
+  - **Targets**: launchd plists on macOS; on a WSL host (2026-10-15 server
+    migration) Windows Task Scheduler tasks instead, because WSL only runs
+    while something starts it — a Linux-side timer would miss slots after a
+    reboot or idle shutdown. Each task runs `conhost.exe --headless wsl.exe
+    -d <distro> -u <user> --cd <repo> --exec /bin/sh -c "<job>"` with the
+    same wrapper command, a baked PATH of the configured backend CLIs, and
+    stdout/stderr appended to `<state_dir>/scheduler.<job>.{out,err}.log`.
+    Settings: one instance at a time (`IgnoreNew`), no late catch-up start,
+    wake to run, runs while the Windows user is logged on. Trigger times are
+    host-local, so the Windows timezone must equal the host tz used for the
+    enumeration. The installer writes the XML and prints the `schtasks`
+    commands; it never registers them itself.
   - **watchdog**: fires hourly; if a session's expected slot has not *started*
     by `slot_time` + 1h on its weekday (per the status file), send one
     notification for that session/day. This catches sleep/wake-coalesced
@@ -157,7 +169,8 @@ summary is assembled in planned-job order.
 
 ## Non-goals
 
-- No cron support documented beyond launchd (macOS is the target machine).
+- No cron/systemd support: launchd (macOS) and Windows Task Scheduler (WSL
+  host) are the only generated schedulers.
 - No retries beyond each component's own retry logic (manual `--from` covers
   recovery).
 
@@ -174,7 +187,11 @@ summary is assembled in planned-job order.
    evaluated in the session's tz and rejects other hours; the slot date and
    weekday gate resolve in the session's tz (Sunday-evening Chicago fire ⇒
    Monday cn slot); `--print-schedule` matches the generated files;
-   double-fire dedupe via the lockfile.
+   double-fire dedupe via the lockfile. The Windows-task target emits UTF-16
+   task XML (cn 08:30; us 20:30 and 21:30 on an Asia/Shanghai host; hourly
+   watchdog), runs `orchestrator slot`/`watchdog` inside the named distro and
+   user from the repo root, rejects unsafe distro/user names and quoted
+   paths, and never spawns `schtasks`.
 3. Watchdog: a fixture day with no started slot by `slot_time`+1h notifies
    exactly once; a started slot suppresses it.
 4. Settle: fixture ledger + prices produce contract-valid outcomes rows;
