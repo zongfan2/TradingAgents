@@ -142,7 +142,12 @@ Each task runs `conhost.exe --headless wsl.exe … /bin/sh -c "<job>"`, so no
 console window appears, and appends to
 `~/.tradingagents/scheduler.<job>.{out,err}.log`. Tasks run only while the
 Windows user `Zzz` is logged on (a locked screen is fine) and wake the machine
-from sleep. Inspect or remove them with:
+from sleep. Notifications (failures, the watchdog's missed-slot alert, the
+slot summary) appear as Windows toasts. They need WSL→Windows interop, and on
+this systemd distro that only survives boots because of
+`/etc/binfmt.d/WSLInterop.conf` (`:WSLInterop:M::MZ::/init:PF`; see
+microsoft/WSL#8843). Without it, every `.exe` fails with "Exec format error"
+and notifications degrade to log-only. Inspect or remove the tasks with:
 
 ```bash
 schtasks.exe /Query /TN '\TradingAgents\pipeline.us' /V /FO LIST

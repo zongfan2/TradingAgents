@@ -98,6 +98,16 @@ def _isolate_claude_usage_log(_hermetic_tradingagents_env, monkeypatch, tmp_path
     monkeypatch.setenv("TRADINGAGENTS_CLAUDE_USAGE_LOG", str(tmp_path / "claude_usage.jsonl"))
 
 
+@pytest.fixture(autouse=True)
+def _no_desktop_notifications(monkeypatch):
+    """A Notifier built without an injected runner would really run osascript
+    (macOS) or pop a Windows toast (WSL). Tests that care inject their own
+    runner; every other one gets a runner that delivers nothing."""
+    from pipeline import orchestrator
+
+    monkeypatch.setattr(orchestrator, "default_osascript_runner", lambda argv: 0)
+
+
 # The developer's real review archive (claude_review's default report dir),
 # resolved at import, before any fixture can sandbox HOME. By 2026-10-14 tests
 # that omitted report_dir had filed 500+ fake runs/bbbb… records there.

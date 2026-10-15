@@ -125,14 +125,19 @@ webui reads both.
 
 ## Notifications
 
-- macOS notification (`osascript`) on: any component `failed`/`timeout`, any
+- Desktop notification on: any component `failed`/`timeout`, any
   eval `fail` verdict, any broker `rejected`/`canceled` surfaced by refresh,
   the watchdog's missed-slot alert, and (always) an end-of-slot summary —
-  plans produced, orders submitted/dry-run, pairs run, failures.
+  plans produced, orders submitted/dry-run, pairs run, failures. On macOS
+  it is `osascript` `display notification`; under WSL (`WSL_DISTRO_NAME`
+  set) it is a Windows toast shown through Windows PowerShell over WSL
+  interop. The script is passed `-EncodedCommand`, and the text is inserted
+  as XML text nodes. Both are desktop-only: an alert raised while nobody is
+  at the machine is seen on return.
 - Dedup: at most one notification per (component, slot, reason); the watchdog
   fires at most once per session/day.
-- An `osascript` failure degrades to log-only — notifications can never fail
-  a slot.
+- A notifier failure (missing `osascript`/PowerShell, non-zero exit) degrades
+  to log-only — notifications can never fail a slot.
 - Config `notifications_enabled` (default true).
 
 ## Requirements

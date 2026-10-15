@@ -34,7 +34,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from pipeline.common import SESSION_TZ, SESSIONS, atomic_write
-from pipeline.config import PipelineConfig, load_config, parse_slot_time
+from pipeline.config import BACKEND_CHOICES, PipelineConfig, load_config, parse_slot_time
 
 LABEL_PREFIX = "com.tradingagents.pipeline"
 WATCHDOG_INTERVAL_S = 3600
@@ -110,9 +110,15 @@ def backend_clis(config: PipelineConfig) -> list[str]:
 
 
 def job_path(config: PipelineConfig) -> str:
-    """PATH for the generated jobs: backend-CLI dirs first, then standard dirs."""
+    """PATH for the generated jobs: backend-CLI dirs first, then standard dirs.
+
+    Every selectable backend CLI that is installed goes in, so switching
+    ``TRADINGAGENTS_COLLECT_BACKEND``/``EVAL_BACKEND`` in ``.env`` later needs
+    no re-install; only a *configured* backend that is missing warns.
+    """
     dirs: list[str] = []
-    for cli in backend_clis(config):
+    configured = backend_clis(config)
+    for cli in [*configured, *(c for c in BACKEND_CHOICES if c not in configured)]:
         found = shutil.which(cli)
         if found:
             # Keep the symlink's own directory (e.g. nvm's bin/) — resolving
@@ -121,7 +127,7 @@ def job_path(config: PipelineConfig) -> str:
             parent = str(Path(found).parent)
             if parent not in dirs:
                 dirs.append(parent)
-        else:
+        elif cli in configured:
             print(f"install-schedule: warning: {cli!r} not found on the current PATH — "
                   "scheduled runs will fail to invoke it", file=sys.stderr)
     for d in _STANDARD_PATH_DIRS:

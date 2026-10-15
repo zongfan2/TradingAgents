@@ -439,6 +439,21 @@ def test_job_path_requires_only_the_configured_backend_clis(monkeypatch, tmp_pat
     assert "'codex' not found" in capsys.readouterr().err
 
 
+@pytest.mark.unit
+def test_job_path_keeps_installed_unconfigured_backends(monkeypatch, tmp_path):
+    # Switching TRADINGAGENTS_*_BACKEND in .env later must not need a
+    # re-install: an installed codex stays on PATH even while unconfigured.
+    claude_bin, codex_bin = tmp_path / "claude-bin", tmp_path / "codex-bin"
+    for directory, cli in ((claude_bin, "claude"), (codex_bin, "codex")):
+        directory.mkdir()
+        exe = directory / cli
+        exe.write_text("#!/bin/sh\n")
+        exe.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{codex_bin}:{claude_bin}:/usr/bin:/bin")
+    dirs = install_schedule.job_path(make_config(tmp_path)).split(":")
+    assert dirs[:2] == [str(claude_bin), str(codex_bin)]  # configured first
+
+
 # ---------------------------------------------------------------------------
 # Windows Task Scheduler target (WSL host)
 # ---------------------------------------------------------------------------

@@ -30,6 +30,7 @@ Design points implemented here:
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import json
 import logging
@@ -429,10 +430,17 @@ def orchestrator_log_path(config: PipelineConfig) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Notifications (osascript via injectable runner)
+# Notifications (osascript / Windows toast via injectable runner)
 # ---------------------------------------------------------------------------
 
 OsascriptRunner = Callable[[Sequence[str]], int]
+
+#: Windows PowerShell through WSL interop; the scheduled job's PATH carries no
+#: Windows directories, so the path is absolute.
+WSL_POWERSHELL = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+#: PowerShell's own AppUserModelID: toasts need a registered app id, and this
+#: one exists on every Windows 10/11 install.
+_POWERSHELL_APP_ID = r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe"
 
 
 def default_osascript_runner(argv: Sequence[str]) -> int:
@@ -444,10 +452,55 @@ def _applescript_str(text: str) -> str:
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-class Notifier:
-    """macOS ``display notification`` with per-(component, slot, reason) dedup.
+def _powershell_str(text: str) -> str:
+    return "'" + text.replace("'", "''") + "'"
 
-    An osascript failure degrades to log-only — notifications can never fail a
+
+def default_notification_platform() -> str:
+    """``wsl`` when running inside WSL (wsl.exe sets ``WSL_DISTRO_NAME`` for
+    every process it starts, scheduled jobs included), else ``macos``."""
+    return "wsl" if os.environ.get("WSL_DISTRO_NAME") else "macos"
+
+
+def notification_argv(platform: str, title: str, message: str) -> list[str]:
+    """The command that shows one desktop notification on ``platform``.
+
+    WSL: a Windows toast via PowerShell. The script travels base64-encoded
+    (``-EncodedCommand``) so no command-line quoting is involved, and the text
+    is inserted as XML text nodes, never parsed as markup.
+    """
+    if platform == "macos":
+        script = (
+            f"display notification {_applescript_str(message)} "
+            f"with title {_applescript_str(title)}"
+        )
+        return ["osascript", "-e", script]
+    if platform == "wsl":
+        script = "\n".join(
+            [
+                "$ErrorActionPreference = 'Stop'",
+                "$null = [Windows.UI.Notifications.ToastNotificationManager, "
+                "Windows.UI.Notifications, ContentType = WindowsRuntime]",
+                "$xml = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent("
+                "[Windows.UI.Notifications.ToastTemplateType]::ToastText02)",
+                "$nodes = $xml.GetElementsByTagName('text')",
+                f"$null = $nodes.Item(0).AppendChild($xml.CreateTextNode({_powershell_str(title)}))",
+                f"$null = $nodes.Item(1).AppendChild($xml.CreateTextNode({_powershell_str(message)}))",
+                f"[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("
+                f"{_powershell_str(_POWERSHELL_APP_ID)}).Show("
+                "[Windows.UI.Notifications.ToastNotification]::new($xml))",
+            ]
+        )
+        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        return [WSL_POWERSHELL, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded]
+    raise ValueError(f"unknown notification platform {platform!r}")
+
+
+class Notifier:
+    """Desktop notification — macOS ``display notification`` or, under WSL, a
+    Windows toast — with per-(component, slot, reason) dedup.
+
+    A notifier failure degrades to log-only — notifications can never fail a
     slot. ``enabled=False`` (config ``notifications_enabled``) is log-only too.
     """
 
@@ -455,9 +508,11 @@ class Notifier:
         self,
         enabled: bool = True,
         runner: OsascriptRunner | None = None,
+        platform: str | None = None,
     ) -> None:
         self.enabled = enabled
         self._runner = runner or default_osascript_runner
+        self.platform = platform or default_notification_platform()
         self._sent: set[tuple] = set()
         self.delivered: list[tuple[str, str]] = []
 
@@ -469,17 +524,19 @@ class Notifier:
         logger.info("notification [%s] %s", title, message)
         if not self.enabled:
             return False
-        script = (
-            f"display notification {_applescript_str(message)} "
-            f"with title {_applescript_str(title)}"
-        )
         try:
-            returncode = self._runner(["osascript", "-e", script])
-        except Exception as exc:  # osascript failure degrades to log-only
-            logger.warning("osascript failed (%s) — notification degraded to log-only", exc)
+            returncode = self._runner(notification_argv(self.platform, title, message))
+        except Exception as exc:  # notifier failure degrades to log-only
+            logger.warning(
+                "%s notifier failed (%s) — notification degraded to log-only", self.platform, exc
+            )
             return False
         if returncode != 0:
-            logger.warning("osascript exited %d — notification degraded to log-only", returncode)
+            logger.warning(
+                "%s notifier exited %d — notification degraded to log-only",
+                self.platform,
+                returncode,
+            )
             return False
         self.delivered.append((title, message))
         return True

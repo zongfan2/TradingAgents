@@ -157,7 +157,9 @@ def recording_notifier():
         sent.append(argv)
         return 0
 
-    return orchestrator.Notifier(enabled=True, runner=osascript), sent
+    # Pinned to macOS so message assertions read plain argv text on any host
+    # (under WSL the toast script travels base64-encoded).
+    return orchestrator.Notifier(enabled=True, runner=osascript, platform="macos"), sent
 
 
 def write_eval(config, session, slot_date, verdict="pass", flags=0):
@@ -923,6 +925,57 @@ def test_osascript_failure_degrades_to_log_only():
 
     notifier = orchestrator.Notifier(enabled=True, runner=lambda argv: 1)
     assert notifier.notify("t", "m") is False
+
+
+def decode_toast_script(argv):
+    import base64
+
+    assert argv[0] == orchestrator.WSL_POWERSHELL
+    assert argv[argv.index("-EncodedCommand") - 1] == "-NonInteractive"
+    return base64.b64decode(argv[argv.index("-EncodedCommand") + 1]).decode("utf-16-le")
+
+
+@pytest.mark.unit
+def test_wsl_notification_is_a_windows_toast_with_quoted_text():
+    sent = []
+    notifier = orchestrator.Notifier(
+        enabled=True, runner=lambda argv: sent.append(argv) or 0, platform="wsl"
+    )
+    assert notifier.notify("[TradingAgents pipeline] it's", "cn slot <b>&amp; \"late\"") is True
+    script = decode_toast_script(sent[0])
+    # Text goes in as single-quoted PowerShell literals ('' escapes ') and
+    # becomes XML text nodes, so markup in a message is shown, not parsed.
+    assert "CreateTextNode('[TradingAgents pipeline] it''s')" in script
+    assert "CreateTextNode('cn slot <b>&amp; \"late\"')" in script
+    assert "ToastNotificationManager]::CreateToastNotifier(" in script
+    assert notifier.delivered == [("[TradingAgents pipeline] it's", "cn slot <b>&amp; \"late\"")]
+
+
+@pytest.mark.unit
+def test_watchdog_alert_reaches_the_windows_toast_under_wsl(tmp_path, monkeypatch):
+    # The missed-slot alert must not be log-only on the WSL server, where
+    # there is no osascript (review of 4fcff6a).
+    monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu-24.04")
+    sent = []
+    monkeypatch.setattr(
+        orchestrator, "default_osascript_runner", lambda argv: sent.append(argv) or 0
+    )
+    config = make_config(tmp_path)
+    # Monday 18:00 UTC: only the us slot is past its deadline and missing.
+    now = datetime(2026, 1, 5, 18, 0, tzinfo=timezone.utc)
+    orchestrator.run_watchdog(config, clock=lambda: now)
+    assert len(sent) == 1
+    assert "us slot for 2026-01-05 has not started" in decode_toast_script(sent[0])
+
+
+@pytest.mark.unit
+def test_notification_platform_follows_the_host(monkeypatch):
+    monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu-24.04")
+    assert orchestrator.Notifier().platform == "wsl"
+    monkeypatch.delenv("WSL_DISTRO_NAME")
+    assert orchestrator.Notifier().platform == "macos"
+    with pytest.raises(ValueError):
+        orchestrator.notification_argv("plan9", "t", "m")
 
 
 @pytest.mark.unit
