@@ -48,25 +48,6 @@ def _dummy_api_keys(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _isolate_pipeline_backends(monkeypatch, tmp_path):
-    """Strip the D19/D20 backend-role env overrides so every test sees the
-    shipped defaults (claude on both roles: Sonnet collects, Opus evaluates)
-    unless it sets them explicitly — ambient developer environments must not
-    skew backend-resolution tests. The claude usage log goes to a temp file so
-    no test appends to the real ``~/.tradingagents``."""
-    for env_var in (
-        "TRADINGAGENTS_COLLECT_BACKEND",
-        "TRADINGAGENTS_EVAL_BACKEND",
-        "TRADINGAGENTS_CLAUDE_COLLECT_MODEL",
-        "TRADINGAGENTS_CLAUDE_COLLECT_EFFORT",
-        "TRADINGAGENTS_CLAUDE_EVAL_MODEL",
-        "TRADINGAGENTS_CLAUDE_EVAL_EFFORT",
-    ):
-        monkeypatch.delenv(env_var, raising=False)
-    monkeypatch.setenv("TRADINGAGENTS_CLAUDE_USAGE_LOG", str(tmp_path / "claude_usage.jsonl"))
-
-
-@pytest.fixture(autouse=True)
 def _isolate_config():
     """Reset the global dataflows config before and after each test.
 
@@ -106,6 +87,15 @@ def _hermetic_tradingagents_env(monkeypatch):
         if key.startswith("TRADINGAGENTS_"):
             monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("TRADINGAGENTS_SKIP_DOTENV", "1")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_claude_usage_log(_hermetic_tradingagents_env, monkeypatch, tmp_path):
+    """Route the D20 claude usage log to a per-test temp file. It requests the
+    env strip above so the redirect is always set after it: autouse fixtures
+    carry no ordering guarantee between themselves, and the strip would remove
+    the redirect. The HOME sandbox below is the second line of defence."""
+    monkeypatch.setenv("TRADINGAGENTS_CLAUDE_USAGE_LOG", str(tmp_path / "claude_usage.jsonl"))
 
 
 # The developer's real review archive (claude_review's default report dir),
