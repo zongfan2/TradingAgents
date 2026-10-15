@@ -210,9 +210,9 @@ TASK_NAME_PREFIX = "pipeline"
 CONHOST_EXE = r"C:\Windows\System32\conhost.exe"
 WSL_EXE = r"C:\Windows\System32\wsl.exe"
 TASK_XML_NS = "http://schemas.microsoft.com/windows/2004/02/mit/task"
-#: A slot's component timeouts sum well past an hour (analysis_runner alone
-#: is 7200 s); the limit only bounds a hung wsl.exe.
-SLOT_TASK_TIME_LIMIT = "PT8H"
+#: Headroom over the summed component timeouts: the slot-task limit only
+#: bounds a hung wsl.exe and must never cut a legitimate slot short.
+SLOT_TASK_TIME_MARGIN_S = 3600
 WATCHDOG_TASK_TIME_LIMIT = "PT15M"
 DEFAULT_WINDOWS_TASKS_SUBDIR = "windows-tasks"
 _WSL_NAME_RE = re.compile(r"[A-Za-z0-9._-]+")
@@ -221,6 +221,14 @@ _WSL_NAME_RE = re.compile(r"[A-Za-z0-9._-]+")
 def default_target() -> str:
     """``windows-tasks`` under WSL (``WSL_DISTRO_NAME`` is set by wsl.exe), else launchd."""
     return "windows-tasks" if os.environ.get("WSL_DISTRO_NAME") else "launchd"
+
+
+def slot_task_time_limit(config: PipelineConfig) -> str:
+    """ISO-8601 Task Scheduler limit for a slot task: every configured
+    component timeout run back to back, plus a margin. Derived from config so
+    a raised ``TRADINGAGENTS_TIMEOUT_*`` can never let Task Scheduler kill a
+    slot that is still within its own budgets (re-install after changing one)."""
+    return f"PT{sum(config.component_timeouts.values()) + SLOT_TASK_TIME_MARGIN_S}S"
 
 
 def windows_task_name(job: str) -> str:
@@ -328,7 +336,7 @@ def generate_windows_tasks(
             arguments,
             fire_times,
             year,
-            SLOT_TASK_TIME_LIMIT,
+            slot_task_time_limit(config),
         )
     arguments = wsl_job_arguments(config, ["watchdog"], "watchdog", distro, user)
     tasks[f"{windows_task_name('watchdog')}.xml"] = build_windows_task(
@@ -479,8 +487,9 @@ def _main_windows_tasks(args: argparse.Namespace, config: PipelineConfig, host_t
         "(a locked screen is fine)."
     )
     print(
-        "\nReminder: changing sessions.*.slot_time requires re-running this installer "
-        "(the tasks and the wrapper window are generated from config)."
+        "\nReminder: changing sessions.*.slot_time or a TRADINGAGENTS_TIMEOUT_* budget "
+        "requires re-running this installer (the tasks, their time limit and the wrapper "
+        "window are generated from config)."
     )
     return 0
 

@@ -541,11 +541,27 @@ def test_windows_task_settings_never_overlap_and_allow_long_slots(tmp_path):
     tasks = install_schedule.generate_windows_tasks(
         config, SHANGHAI_TZ, YEAR, distro=DISTRO, user=WSL_USER
     )
-    for name, limit in (("pipeline.us.xml", "PT8H"), ("pipeline.watchdog.xml", "PT15M")):
+    slot_limit = f"PT{sum(config.component_timeouts.values()) + 3600}S"
+    for name, limit in (("pipeline.us.xml", slot_limit), ("pipeline.watchdog.xml", "PT15M")):
         settings = parse_task(tasks[name]).find("t:Settings", TASK_NS)
         assert settings.find("t:MultipleInstancesPolicy", TASK_NS).text == "IgnoreNew"
         assert settings.find("t:ExecutionTimeLimit", TASK_NS).text == limit
         assert settings.find("t:DisallowStartIfOnBatteries", TASK_NS).text == "false"
+
+
+@pytest.mark.unit
+def test_slot_task_time_limit_follows_configured_component_timeouts(tmp_path):
+    # A raised TRADINGAGENTS_TIMEOUT_* must never let Task Scheduler kill a
+    # slot still inside its own budgets (review of 2666854).
+    timeouts = dict(make_config(tmp_path).component_timeouts, analysis_runner=30000)
+    config = make_config(tmp_path, component_timeouts=timeouts)
+    tasks = install_schedule.generate_windows_tasks(
+        config, SHANGHAI_TZ, YEAR, distro=DISTRO, user=WSL_USER
+    )
+    for name in ("pipeline.cn.xml", "pipeline.us.xml"):
+        limit = parse_task(tasks[name]).find("t:Settings/t:ExecutionTimeLimit", TASK_NS).text
+        seconds = int(re.fullmatch(r"PT(\d+)S", limit).group(1))
+        assert seconds > sum(timeouts.values())
 
 
 @pytest.mark.unit

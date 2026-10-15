@@ -37,10 +37,13 @@ state — no schedule entries are ever created or deleted by code.
     while something starts it — a Linux-side timer would miss slots after a
     reboot or idle shutdown. Each task runs `conhost.exe --headless wsl.exe
     -d <distro> -u <user> --cd <repo> --exec /bin/sh -c "<job>"` with the
-    same wrapper command, a baked PATH of the configured backend CLIs, and
+    same wrapper command, a baked PATH holding every installed backend CLI
+    (configured ones first; only a missing configured one warns), and
     stdout/stderr appended to `<state_dir>/scheduler.<job>.{out,err}.log`.
     Settings: one instance at a time (`IgnoreNew`), no late catch-up start,
-    wake to run, runs while the Windows user is logged on. Trigger times are
+    wake to run, runs while the Windows user is logged on; a slot task's
+    time limit is the sum of the configured component timeouts plus 1 h
+    (re-install after raising a `TRADINGAGENTS_TIMEOUT_*`). Trigger times are
     host-local, so the Windows timezone must equal the host tz used for the
     enumeration. The installer writes the XML and prints the `schtasks`
     commands; it never registers them itself.
