@@ -3,8 +3,9 @@
 This is a local research fork of [TauricResearch/TradingAgents](https://github.com/TauricResearch/TradingAgents)
 used to compare LLM backends (DeepSeek V4 / Claude Sonnet 5 / GPT-5.6) on one
 multi-agent trading pipeline, and to build a **macro-brief subsystem** around it.
-Multiple coding agents (Claude Code, Codex) work in this repo. **Specs are the
-source of truth for cross-agent work: see [`specs/README.md`](specs/README.md).**
+Claude Code leads development in this repo; independent review runs as separate,
+isolated Claude sessions. **Specs are the source of truth for cross-agent work:
+see [`specs/README.md`](specs/README.md).**
 
 ## Layout
 
@@ -50,14 +51,19 @@ Environment lives in `.venv` (Python 3.14, `pip install -e .`). API keys are in
   `tests/test_structured_agents.py` guards both. Run `ruff` before finishing.
 - Upstream behavior is not changed unless a spec says so.
 
-## Codex-Claude hybrid workflow
+## Claude-led workflow
 
-- **Codex — primary builder** owns production edits, tests, specs, contract-first
+- **Claude Code — primary builder** owns production edits, tests, specs, contract-first
   changes, deterministic verification, and final integration.
-- **Claude Code — independent verifier** reviews coherent risky changes from an
-  isolated worktree and returns reports for Codex to assess; it does not edit
-  the primary worktree. Claude receives only Read capability; it does not run shell commands
-  or inspect the primary checkout.
+- **Independent Claude review — verifier** is a separate, fresh Claude session
+  launched by `devtools.verification.claude_review`, never the builder's own
+  session. It reviews coherent risky changes from an isolated worktree and returns
+  reports for the builder to assess; it does not edit the primary worktree. The
+  reviewer receives only Read capability; it does not run shell commands or inspect
+  the primary checkout. The builder must not grade its own work in place of this
+  review.
+- Codex is no longer part of the development loop. Codex `Builder` entries in
+  existing specs and docs are historical.
 
 Run the deterministic gate for every completed change and before handoff:
 

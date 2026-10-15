@@ -19,22 +19,31 @@ def test_ci_uses_offline_verifier_for_tests_and_lint():
 
 
 @pytest.mark.unit
-def test_agent_guide_declares_hybrid_roles_and_required_gate():
+def test_agent_guide_declares_claude_led_roles_and_required_gate():
     guide = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
-    assert "Codex — primary builder" in guide
-    assert "Claude Code — independent verifier" in guide
+    normalized_guide = " ".join(guide.split())
+    assert "Claude Code — primary builder" in guide
+    assert "Independent Claude review — verifier" in guide
+    assert "Codex — primary builder" not in guide
+    assert "never the builder's own session" in normalized_guide
     assert "python -m devtools.verification.offline --only all" in guide
     assert "two or more" in guide
     assert "pipeline/contracts/" in guide
     assert "~/.tradingagents/verification/" in guide
-    assert "returns reports for Codex to assess" in guide
     assert "or patches" not in guide
     assert (
-        "isolated worktree and returns reports for Codex to assess; it does not edit "
-        "the primary worktree" in " ".join(guide.split())
+        "isolated worktree and returns reports for the builder to assess; it does not "
+        "edit the primary worktree" in normalized_guide
     )
     assert "only Read capability" in guide
     assert "does not run shell commands" in guide
+
+
+@pytest.mark.unit
+def test_review_packet_names_claude_builder_not_codex():
+    source = (ROOT / "devtools/verification/claude_review.py").read_text(encoding="utf-8")
+    assert "Codex is the builder" not in source
+    assert "The Claude Code builder session is the builder and integrator" in source
 
 
 @pytest.mark.unit

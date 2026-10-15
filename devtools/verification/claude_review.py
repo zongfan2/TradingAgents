@@ -236,8 +236,10 @@ def build_review_packet(
     return f"""# Independent Claude Code review packet
 
 ## Roles and authority
-- Codex is the builder and integrator. It owns fixes and evaluates findings.
-- Claude Code is the independent verifier. Review the committed change only.
+- The Claude Code builder session is the builder and integrator. It owns fixes and
+  evaluates findings.
+- You are a separate, independent Claude Code verifier session, not the builder.
+  Review the committed change only.
 - User is the sole authority for waivers and external-integration authorization.
 
 ## Immutable review identity

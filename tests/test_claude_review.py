@@ -331,8 +331,8 @@ def test_packet_contains_required_context_policy_and_exact_schema(tmp_path, monk
         "complex bug: retry semantics changed",
         "Layer 1 deterministic gate completed.",
         "invalid output returned exit 0",
-        "Codex",
-        "Claude Code",
+        "Claude Code builder session",
+        "independent Claude Code verifier session",
         "User",
         "governing component specs",
         "data contracts",
@@ -348,6 +348,7 @@ def test_packet_contains_required_context_policy_and_exact_schema(tmp_path, monk
     for expected in required:
         assert expected in packet
     assert str(tmp_path) not in packet
+    assert "Codex" not in packet
     assert "must-not-leak" not in packet
     assert "file-must-not-leak" not in packet
 
