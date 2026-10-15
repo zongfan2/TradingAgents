@@ -134,9 +134,14 @@ On this host (`Asia/Shanghai`, which the Windows timezone must match —
 `tzutil.exe /g` shows `China Standard Time`):
 
 - `cn`: **08:30**.
-- `us`: **20:30 and 21:30** (EDT / EST renderings; the wrapper gate no-ops
-  the wrong one).
+- `us`: `.env` sets `TRADINGAGENTS_SLOT_TIME_US=05:30` (New York), so
+  **17:30 and 18:30** (EDT / EST renderings; the wrapper gate no-ops the
+  wrong one). The default 08:30 would give 20:30 and 21:30.
 - watchdog: hourly on the hour.
+
+Run the installer from a login shell (`ssh dev`, or `bash -l`). A non-login
+shell has no `~/.local/bin` on PATH, so the installer warns `'claude' not
+found` and bakes a PATH under which every scheduled collection fails.
 
 Each task runs `conhost.exe --headless wsl.exe … /bin/sh -c "<job>"`, so no
 console window appears, and appends to
