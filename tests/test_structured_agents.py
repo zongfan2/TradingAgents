@@ -7,11 +7,14 @@ behavior we added for the Trader, Research Manager, and Sentiment Analyst
 so they share the same deterministic output shape.
 """
 
+import socket
 from unittest.mock import MagicMock
 
 import pytest
+from curl_cffi.curl import Curl
 from pydantic import ValidationError
 
+from tradingagents.agents.analysts import sentiment_analyst
 from tradingagents.agents.analysts.sentiment_analyst import create_sentiment_analyst
 from tradingagents.agents.managers.research_manager import create_research_manager
 from tradingagents.agents.schemas import (
@@ -338,6 +341,13 @@ class TestRenderSentimentReport:
             )
 
 
+# Canned pre-fetched source blocks. Ticker-free, so they cannot satisfy the
+# ticker assertion on their own.
+_CANNED_NEWS = "canned news: supplier deal announced"
+_CANNED_STOCKTWITS = "canned stocktwits: 3 bullish, 1 bearish"
+_CANNED_REDDIT = "canned reddit: earnings thread on r/stocks"
+
+
 def _make_sentiment_state():
     return {
         "company_of_interest": "NVDA",
@@ -365,8 +375,41 @@ def _structured_sentiment_llm(captured: dict, report: SentimentReport | None = N
     return llm
 
 
+def _prompt_section(prompt, source: str) -> str:
+    """Text the prompt fences between <start_of_{source}> and <end_of_{source}>."""
+    text = "\n".join(m.content for m in prompt)
+    start, end = f"<start_of_{source}>", f"<end_of_{source}>"
+    assert start in text and end in text, f"prompt has no {source} section"
+    return text.split(start, 1)[1].split(end, 1)[0]
+
+
 @pytest.mark.unit
 class TestSentimentAnalystAgent:
+    @pytest.fixture(autouse=True)
+    def _no_network(self, monkeypatch):
+        """Fail any test here that reaches for the network.
+
+        Every fetcher degrades ordinary errors to a placeholder string, so the
+        guard raises pytest.fail's BaseException, which they cannot swallow.
+        yfinance talks through curl_cffi (libcurl), which bypasses Python
+        sockets, hence its own hook.
+        """
+        def blocked(*args, **kwargs):
+            pytest.fail(f"unit test attempted network access: {args!r}")
+
+        monkeypatch.setattr(socket, "getaddrinfo", blocked)
+        monkeypatch.setattr(socket.socket, "connect", blocked)
+        monkeypatch.setattr(Curl, "perform", blocked)
+
+    @pytest.fixture(autouse=True)
+    def _canned_sources(self, monkeypatch):
+        """Serve canned blocks where the analyst looks its fetchers up."""
+        monkeypatch.setattr(sentiment_analyst.get_news, "func", lambda *a, **k: _CANNED_NEWS)
+        monkeypatch.setattr(
+            sentiment_analyst, "fetch_stocktwits_messages", lambda *a, **k: _CANNED_STOCKTWITS
+        )
+        monkeypatch.setattr(sentiment_analyst, "fetch_reddit_posts", lambda *a, **k: _CANNED_REDDIT)
+
     def test_structured_path_produces_rendered_markdown(self):
         captured = {}
         report = SentimentReport(
@@ -390,6 +433,13 @@ class TestSentimentAnalystAgent:
         captured = {}
         create_sentiment_analyst(_structured_sentiment_llm(captured))(_make_sentiment_state())
         assert any("NVDA" in str(m) for m in captured["prompt"])
+
+    def test_prefetched_sources_land_in_their_prompt_sections(self):
+        captured = {}
+        create_sentiment_analyst(_structured_sentiment_llm(captured))(_make_sentiment_state())
+        assert _CANNED_NEWS in _prompt_section(captured["prompt"], "news")
+        assert _CANNED_STOCKTWITS in _prompt_section(captured["prompt"], "stocktwits")
+        assert _CANNED_REDDIT in _prompt_section(captured["prompt"], "reddit")
 
     def test_falls_back_to_freetext_when_structured_unavailable(self):
         plain = "**Overall Sentiment:** **Bearish** (Score: 3.0/10)\n**Confidence:** Low\n\nLimited data."
