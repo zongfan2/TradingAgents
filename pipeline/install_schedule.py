@@ -209,7 +209,7 @@ TASK_XML_NS = "http://schemas.microsoft.com/windows/2004/02/mit/task"
 SLOT_TASK_TIME_LIMIT = "PT8H"
 WATCHDOG_TASK_TIME_LIMIT = "PT15M"
 DEFAULT_WINDOWS_TASKS_SUBDIR = "windows-tasks"
-_WSL_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_WSL_NAME_RE = re.compile(r"[A-Za-z0-9._-]+")
 
 
 def default_target() -> str:
@@ -230,7 +230,7 @@ def wsl_job_arguments(
     not contain a double quote itself; its own pieces are shell-quoted.
     """
     for label, value in (("WSL distro", distro), ("WSL user", user)):
-        if not _WSL_NAME_RE.match(value):
+        if not _WSL_NAME_RE.fullmatch(value):
             raise ValueError(f"unsafe {label} {value!r} — expected [A-Za-z0-9._-]+")
     out_log = config.state_dir / f"scheduler.{log_stem}.out.log"
     err_log = config.state_dir / f"scheduler.{log_stem}.err.log"

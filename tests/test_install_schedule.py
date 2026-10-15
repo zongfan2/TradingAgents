@@ -536,7 +536,14 @@ def test_windows_task_settings_never_overlap_and_allow_long_slots(tmp_path):
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("distro", "user"),
-    [("Ubuntu 24.04", WSL_USER), (DISTRO, "zong fan"), (DISTRO, 'a"b'), ("", WSL_USER)],
+    [
+        ("Ubuntu 24.04", WSL_USER),
+        (DISTRO, "zong fan"),
+        (DISTRO, 'a"b'),
+        ("", WSL_USER),
+        (f"{DISTRO}\n", WSL_USER),
+        (DISTRO, f"{WSL_USER}\n"),
+    ],
 )
 def test_windows_task_rejects_unsafe_distro_or_user(tmp_path, distro, user):
     with pytest.raises(ValueError):
