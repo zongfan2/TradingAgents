@@ -70,6 +70,10 @@ LOG_KEEP = 5
 HISTORY_LIMIT = 20
 #: Watchdog: alert when a weekday slot has not started by slot_time + 1h.
 WATCHDOG_GRACE = timedelta(hours=1)
+#: Slot field present while a deferred execution has the slot re-opened
+#: (set by reopen_finished_slot, removed by finish_slot). Its presence on an
+#: unfinished slot marks an execute that died before re-finishing.
+REOPENED_KEY = "reopened_for_execution"
 
 Clock = Callable[[], datetime]
 
@@ -597,8 +601,9 @@ class StatusFile:
         """Load the on-disk slot and clear its ``finished_at`` so the deferred
         execution step can run inside it. ``False`` (file untouched) unless
         the file holds this session and date's slot that is either finished
-        or was left re-opened by an interrupted execution (step 7 still
-        ``running`` — the caller holds the slot lock, so nothing else is)."""
+        or still carries :data:`REOPENED_KEY` from an execute that died at
+        any point before re-finishing (the caller holds the slot lock, so
+        no execute is alive)."""
         with self._lock:
             try:
                 data = json.loads(self.path.read_text(encoding="utf-8"))
@@ -612,13 +617,12 @@ class StatusFile:
                 or not isinstance(data.get("components"), dict)
             ):
                 return False
-            step7 = data["components"].get("execution_adapter")
-            interrupted = isinstance(step7, dict) and step7.get("status") == "running"
-            if not slot.get("finished_at") and not interrupted:
+            if not slot.get("finished_at") and not slot.get(REOPENED_KEY):
                 return False
             history = data.get("history")
             data["history"] = history[-HISTORY_LIMIT:] if isinstance(history, list) else []
             slot["finished_at"] = None
+            slot[REOPENED_KEY] = True
             self._data = data
             self._write()
             return True
@@ -626,6 +630,7 @@ class StatusFile:
     def finish_slot(self, finished_at: str) -> None:
         with self._lock:
             assert self._data is not None, "start_slot() before finish_slot()"
+            self._data["slot"].pop(REOPENED_KEY, None)
             self._data["slot"]["finished_at"] = finished_at
             completed = {**self._data["slot"], "components": dict(self._data["components"])}
             history = list(self._data["history"])
@@ -990,12 +995,14 @@ class Orchestrator:
                 )
             if record.get("error"):
                 message += f"; {record['error']}"
+            # Re-finish before the (up to 15 s) notifier subprocess: the
+            # status file must not depend on surviving it.
+            self.status.finish_slot(to_utc_iso(self.clock()))
             self.notifier.notify(
                 "TradingAgents pipeline",
                 message,
                 dedup_key=("summary", (self.session, self.slot_date.isoformat()), "execution"),
             )
-            self.status.finish_slot(to_utc_iso(self.clock()))
             return 1 if status in ("failed", "timeout") else 0
         finally:
             release_slot_lock(lock)
@@ -1424,15 +1431,20 @@ def execute_slot(
         return 0
 
 
-def _slot_components(config: PipelineConfig, session: str, date_iso: str) -> dict[str, Any]:
-    """The status file's components when it holds ``date_iso``'s slot, else ``{}``."""
+def _slot_data(config: PipelineConfig, session: str, date_iso: str) -> dict[str, Any]:
+    """The status file's content when it holds ``date_iso``'s slot, else ``{}``."""
     try:
         data = json.loads(status_file_path(config, session).read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError):
         return {}
-    if not isinstance(data, dict) or (data.get("slot") or {}).get("date") != date_iso:
+    if not isinstance(data, dict) or not isinstance(data.get("slot"), dict):
         return {}
-    components = data.get("components")
+    return data if data["slot"].get("date") == date_iso else {}
+
+
+def _slot_components(config: PipelineConfig, session: str, date_iso: str) -> dict[str, Any]:
+    """The status file's components when it holds ``date_iso``'s slot, else ``{}``."""
+    components = _slot_data(config, session, date_iso).get("components")
     return components if isinstance(components, dict) else {}
 
 
@@ -1523,18 +1535,20 @@ def _alertable_days(session: str, at_time: str, now: datetime) -> list[date]:
 def _watch_deferred_execution(
     config: PipelineConfig, execution_time: str, now: datetime, notifier: Notifier
 ) -> None:
-    """Alert once when a us slot's step 7 is still the deferral skip at
-    ``execution_time`` + 1h — the execute job never ran (or never got past
-    its gates) — or still ``running`` then: far past the adapter's own
-    timeout, so the execute process was killed. A slot that never started
-    is the missed-slot alert's job."""
+    """Alert once when, at ``execution_time`` + 1h, a us slot's step 7 is
+    still the deferral skip — the execute job never ran (or never got past
+    its gates) — or the slot is still re-opened for execution: far past the
+    adapter's own timeout, so the execute process died before re-finishing.
+    A slot that never started is the missed-slot alert's job."""
     for slot_day in _alertable_days("us", execution_time, now):
         date_iso = slot_day.isoformat()
-        step7 = _slot_components(config, "us", date_iso).get("execution_adapter", {})
+        slot = _slot_data(config, "us", date_iso)
+        step7 = (slot.get("components") or {}).get("execution_adapter", {})
         deferred = step7.get("status") == "skipped" and str(step7.get("error") or "").startswith(
             "deferred"
         )
-        if not deferred and step7.get("status") != "running":
+        stuck = bool((slot.get("slot") or {}).get(REOPENED_KEY))
+        if not deferred and not stuck:
             continue
         marker = config.state_dir / "watchdog" / f"us-{date_iso}.execution.notified"
         if marker.exists():
@@ -1556,7 +1570,8 @@ def _watch_deferred_execution(
             "watchdog",
             "missed-execution",
             "-",
-            f"step 7 still {step7.get('status')} at {execution_time}+1h",
+            ("step 7 still deferred" if deferred else "slot still re-opened for execution")
+            + f" at {execution_time}+1h",
         )
 
 

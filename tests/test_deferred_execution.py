@@ -494,9 +494,73 @@ def test_execute_recovers_a_killed_execution_once_the_lock_is_gone(tmp_path):
 
 
 @pytest.mark.unit
-def test_reopen_refuses_a_killed_slot_without_a_running_step7(tmp_path):
+def test_reopen_refuses_a_killed_slot_that_was_never_reopened(tmp_path):
     config = deferred_config(tmp_path)
     status = orchestrator.StatusFile(orchestrator.status_file_path(config, "us"))
     status.start_slot("us", SLOT_DATE, "2026-01-05T10:30:00Z")
     status.update_component("analysis_runner", {"status": "running"})  # slot killed here
     assert not orchestrator.StatusFile(status.path).reopen_finished_slot("us", SLOT_DATE)
+
+
+class Killed(BaseException):
+    """Stands in for the process dying (not an Exception: nothing catches it)."""
+
+
+def dying_notifier():
+    def osascript(argv):
+        raise Killed
+
+    return orchestrator.Notifier(enabled=True, runner=osascript, platform="macos")
+
+
+@pytest.mark.unit
+def test_killed_after_step7_failed_but_before_refinish_is_alerted_and_recoverable(tmp_path):
+    """Review of 9af8ad6 (low): death in the failure-notification gap left a
+    terminal step 7 on an unfinished slot that nothing covered."""
+    config = deferred_config(tmp_path)
+    finished_slot(config)
+    runner = FakeRunner({"execution_adapter": orchestrator.RunResult(1, stderr="boom\n")})
+    with pytest.raises(Killed):
+        make_orch(config, runner, dying_notifier()).run_execution()
+    status = read_status(config, "us")
+    assert status["slot"]["finished_at"] is None
+    assert status["slot"][orchestrator.REOPENED_KEY] is True
+    assert status["components"]["execution_adapter"]["status"] == "failed"
+
+    notifier, sent = recording_notifier()
+    orchestrator.run_watchdog(config, clock=lambda: LATE, notifier=notifier)
+    assert len(us_execution_alerts(sent)) == 1
+
+    runner = FakeRunner()
+    assert make_orch(config, runner).run_execution() == 0
+    assert names(runner) == ["execution_adapter"]
+    status = read_status(config, "us")
+    assert status["slot"]["finished_at"] is not None
+    assert orchestrator.REOPENED_KEY not in status["slot"]
+    assert len(status["history"]) == 1
+    assert status["history"][-1]["components"]["execution_adapter"]["status"] == "ok"
+    assert orchestrator.REOPENED_KEY not in status["history"][-1]
+
+
+@pytest.mark.unit
+def test_killed_right_after_reopen_is_recoverable(tmp_path):
+    config = deferred_config(tmp_path)
+    finished_slot(config)
+    status = orchestrator.StatusFile(orchestrator.status_file_path(config, "us"))
+    assert status.reopen_finished_slot("us", SLOT_DATE)  # then the process died
+    runner = FakeRunner()
+    assert make_orch(config, runner).run_execution() == 0
+    assert names(runner) == ["execution_adapter"]
+    assert len(read_status(config, "us")["history"]) == 1
+
+
+@pytest.mark.unit
+def test_slot_is_refinished_before_the_summary_notification(tmp_path):
+    config = deferred_config(tmp_path)
+    finished_slot(config)
+    with pytest.raises(Killed):
+        make_orch(config, FakeRunner(), dying_notifier()).run_execution()
+    status = read_status(config, "us")
+    assert status["slot"]["finished_at"] is not None
+    assert status["components"]["execution_adapter"]["status"] == "ok"
+    assert orchestrator.REOPENED_KEY not in status["slot"]
