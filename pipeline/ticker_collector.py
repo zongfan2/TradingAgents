@@ -68,6 +68,7 @@ from pipeline.contracts.base import ContractError
 from pipeline.contracts.briefs import (
     TickerBriefMeta,
     parse_ticker_brief,
+    reconcile_sources_count,
     split_frontmatter,
     validate_ticker_brief_path,
 )
@@ -473,7 +474,7 @@ def _validate(text: str, target: Path, generator: str) -> TickerBriefMeta:
 def _generate_validated(
     runner: Runner, backend: str, prompt: str, target: Path, generator: str
 ) -> tuple[str, TickerBriefMeta, int]:
-    text = runner(backend, prompt)
+    text = reconcile_sources_count(runner(backend, prompt))
     try:
         return text, _validate(text, target, generator), 1
     except ContractError as first:
@@ -482,7 +483,9 @@ def _generate_validated(
             target,
             len(first.errors),
         )
-        text = runner(backend, build_retry_prompt(prompt, first.errors))
+        text = reconcile_sources_count(
+            runner(backend, build_retry_prompt(prompt, first.errors))
+        )
         try:
             return text, _validate(text, target, generator), 2
         except ContractError as second:

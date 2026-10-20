@@ -335,12 +335,40 @@ def test_ticker_directory_mismatch_rejected_with_exactly_one_retry(dirs):
 def test_retry_with_valid_brief_recovers(dirs):
     brief_dir, pool_dir = dirs
     write_pool(pool_dir, core=("NVDA",), opportunity=())
-    bad = make_ticker_brief(sources_count=99)  # sources_count ≠ body count
+    bad = make_ticker_brief(n_urls=4)  # below the 5-citation floor
     fake = FakeBackend({"NVDA": [bad, make_ticker_brief()]})
     summary = collect_all("us", as_of=AS_OF, runner=fake)
     assert summary.written == 1
     assert summary.outcomes[0].attempts == 2
     assert (brief_dir / "NVDA" / f"{DATE}.md").read_text(encoding="utf-8") == make_ticker_brief()
+
+
+@pytest.mark.unit
+def test_miscounted_sources_count_is_reconciled_not_retried(dirs):
+    brief_dir, pool_dir = dirs
+    write_pool(pool_dir, core=("NVDA",), opportunity=())
+    miscounted = make_ticker_brief(n_urls=6, sources_count=5)  # model counted one short
+    fake = FakeBackend({"NVDA": [miscounted]})
+    summary = collect_all("us", as_of=AS_OF, runner=fake)
+    assert summary.written == 1
+    outcome = summary.outcomes[0]
+    assert outcome.attempts == 1 and outcome.sources_count == 6
+    written = (brief_dir / "NVDA" / f"{DATE}.md").read_text(encoding="utf-8")
+    assert written == make_ticker_brief(n_urls=6)  # only the count line changed
+    assert f"{DATE} | us | NVDA | 6 | 7.5 | written" in collector_log(brief_dir)
+
+
+@pytest.mark.unit
+def test_reconciled_sources_count_still_enforces_the_citation_floor(dirs):
+    brief_dir, pool_dir = dirs
+    write_pool(pool_dir, core=("NVDA",), opportunity=())
+    # Claims the floor but cites only 4: the body count decides, both attempts fail.
+    thin = make_ticker_brief(n_urls=4, sources_count=5)
+    fake = FakeBackend({"NVDA": [thin, thin]})
+    summary = collect_all("us", as_of=AS_OF, runner=fake)
+    assert summary.written == 0
+    assert "only 4 distinct citation URLs" in summary.failed[0].reason
+    assert not (brief_dir / "NVDA" / f"{DATE}.md").exists()
 
 
 # ---------------------------------------------------------------------------

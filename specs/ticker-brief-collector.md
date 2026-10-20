@@ -31,6 +31,10 @@ state is created or deleted anywhere.
 - **R4 — Validate before write**: the ticker contract's hard requirements
   (5 sections + Impact line, ≥ 5 body-counted citations, frontmatter/filename
   agreement, word bounds 250–2000) with the standard retry-once-then-fail.
+  Before validating each attempt the collector overwrites a single
+  top-level frontmatter `sources_count:` line with the body-counted citation
+  total (same rule as macro collector R3), so a model miscount never
+  discards a brief; the ≥ 5 floor still applies to the body count.
 - **R5 — Atomic + idempotent**: per-ticker temp+rename; existing same-day
   brief ⇒ skip unless `--force`.
 - **R6 — Partial success is success**: exit 0 when ≥ 1 requested brief was

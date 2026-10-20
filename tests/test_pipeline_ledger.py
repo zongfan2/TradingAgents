@@ -120,6 +120,30 @@ def test_sell_is_schema_and_hygiene_only():
 
 
 @pytest.mark.unit
+def test_sell_targets_need_not_ascend():
+    # Bearish targets are written nearest-first (descending): valid for SELL.
+    sell = make_plan(action="SELL", entry_zone=[560.0, 615.0], stop=646.33,
+                     targets=[518.0, 500.39])
+    assert ledger.validate_trade_plan(sell, LAST_CLOSE, ATR14) == []
+    ascending = make_plan(action="SELL", targets=[500.39, 518.0])
+    assert ledger.validate_trade_plan(ascending, LAST_CLOSE, ATR14) == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["SELL", "HOLD"])
+def test_non_buy_targets_still_reject_duplicates_and_bad_prices(action):
+    dup = ledger.validate_trade_plan(make_plan(action=action, targets=[500.0, 500.0]),
+                                     LAST_CLOSE, ATR14)
+    assert any("contain duplicates" in v for v in dup), dup
+    bad = ledger.validate_trade_plan(make_plan(action=action, targets=[518.0, NAN]),
+                                     LAST_CLOSE, ATR14)
+    assert any("non-finite" in v for v in bad), bad
+    many = ledger.validate_trade_plan(make_plan(action=action, targets=[3.0, 2.0, 1.0]),
+                                      LAST_CLOSE, ATR14)
+    assert any("1-2 entries" in v for v in many), many
+
+
+@pytest.mark.unit
 def test_hold_is_trivially_valid_but_hygiene_still_applies():
     hold = ledger.TradePlan.model_validate({"action": "HOLD", "conviction": 0.5})
     assert ledger.validate_trade_plan(hold, LAST_CLOSE, ATR14) == []

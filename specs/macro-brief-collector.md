@@ -55,7 +55,10 @@ The robust version below replaces this one-liner.
   match the filename; `generator` matches the invoked backend; all 7 sections
   present in order; ≥ 8 distinct citation URLs **counted from the body** (and
   frontmatter `sources_count` equals that body count — never trust the
-  self-reported number); `**Impact**:` lines present in sections 1–6; word
+  self-reported number: before validating each attempt the collector
+  overwrites a single top-level `sources_count:` line with the body count,
+  so a model miscount never discards a brief; the floor still applies to the
+  body count); `**Impact**:` lines present in sections 1–6; word
   count within 500–2500 (hard bounds; additionally warn when outside the
   800–1500 target). On validation failure: retry once with the validator's
   error list appended to the prompt; then fail.

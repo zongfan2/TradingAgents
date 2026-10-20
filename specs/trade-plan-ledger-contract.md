@@ -24,7 +24,7 @@ it never talks to the broker itself), and the webui (read-only renderer).
   "add_rationale": null,            // required non-empty when add_intent — the NEW information justifying the add
   "entry_zone": [280.0, 285.0],     // required for BUY; optional for SELL; absent for HOLD
   "stop": 268.0,
-  "targets": [301.0, 315.0],        // 1-2 targets, ascending for BUY
+  "targets": [301.0, 315.0],        // 1-2 targets, ascending for BUY (any order for SELL)
   "horizon_days": 10,
   "invalidation": "daily close below the weekly mid-band",
   "sizing": {"risk_pct": 1.0},
@@ -55,7 +55,9 @@ analysis date from the same OHLCV series the market analyst was served;
   broker-blind; they are the execution adapter's S5 duties.
 - HOLD: trivially valid.
 - Numeric hygiene (all actions): every price finite and > 0; `entry_zone[0] ≤
-  entry_zone[1]`; targets strictly ascending, no duplicates; conviction in
+  entry_zone[1]`; targets have no duplicates, and BUY targets are strictly
+  ascending (SELL targets are typically written nearest-first, i.e.
+  descending, and no consumer reads them); conviction in
   [0, 1]; NaN/Inf anywhere ⇒ invalid.
 - Any violation ⇒ `plan_valid: false`: the decision stands as a directional
   opinion, the report is flagged, and the plan is never executable.

@@ -100,7 +100,7 @@ def validate_trade_plan(plan: TradePlan, last_close: float, atr14: float) -> lis
     """Deterministic contract checks; returns the complete violation list.
 
     Contract rules: numeric hygiene for all actions (finite positive prices,
-    ordered entry zone, strictly ascending unique targets, conviction in
+    ordered entry zone, unique targets — strictly ascending for BUY — conviction in
     [0, 1], NaN/Inf anywhere ⇒ invalid, ``add_rationale`` required non-empty
     when ``add_intent``); BUY level checks against ``last_close``/``ATR14``;
     SELL is schema + hygiene only (broker-state checks are the execution
@@ -125,8 +125,14 @@ def validate_trade_plan(plan: TradePlan, last_close: float, atr14: float) -> lis
             violations.append(f"targets must have 1-2 entries, got {len(plan.targets)}")
         if any(not _finite_price(price) for price in plan.targets):
             violations.append(f"targets {plan.targets} contain a non-finite/non-positive price")
-        elif any(a >= b for a, b in zip(plan.targets, plan.targets[1:], strict=False)):
-            violations.append(f"targets {plan.targets} not strictly ascending (no duplicates)")
+        elif plan.action == "BUY":
+            if any(a >= b for a, b in zip(plan.targets, plan.targets[1:], strict=False)):
+                violations.append(f"targets {plan.targets} not strictly ascending (no duplicates)")
+        elif len(set(plan.targets)) != len(plan.targets):
+            # SELL/HOLD: bearish targets are naturally written nearest-first
+            # (descending); no consumer reads non-BUY targets, so only
+            # duplicates are a hygiene violation.
+            violations.append(f"targets {plan.targets} contain duplicates")
     if plan.sizing is not None and not _finite(plan.sizing.risk_pct):
         violations.append(f"sizing.risk_pct {plan.sizing.risk_pct} is not finite")
     if plan.add_intent and not (plan.add_rationale or "").strip():

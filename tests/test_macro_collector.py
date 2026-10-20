@@ -211,6 +211,15 @@ def test_retry_with_valid_brief_recovers(brief_dir):
 
 
 @pytest.mark.unit
+def test_miscounted_sources_count_is_reconciled_not_retried(brief_dir):
+    runner = FakeRunner([make_brief(n_urls=22, sources_count=21)])
+    result = collect("us", as_of=AS_OF, runner=runner)
+    assert result.outcome == "written"
+    assert result.attempts == 1 and result.sources_count == 22
+    assert result.path.read_text(encoding="utf-8") == make_brief(n_urls=22)
+
+
+@pytest.mark.unit
 def test_generator_mismatch_is_a_validation_error(brief_dir):
     wrong = make_brief(generator="codex-deep-search")  # backend is claude
     runner = FakeRunner([wrong, make_brief()])

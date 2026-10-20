@@ -93,6 +93,10 @@ _HEADING_RE = re.compile(r"^##\s+(.*?)\s*$", re.MULTILINE)
 _IMPACT_RE = re.compile(r"^\*\*Impact\*\*:\s*(bullish|bearish|neutral|mixed)\s*[—–-]\s*\S")
 _CITATION_RE = re.compile(r"\[[^\]]*\]\(\s*(https?://[^)\s]+)\s*\)")
 _FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*\r?\n?(.*)\Z", re.DOTALL)
+#: A top-level ``sources_count:`` line; group 1 is its value (comment included).
+_SOURCES_COUNT_LINE_RE = re.compile(
+    r"^sources_count:[ \t]*([^\r\n]*?)[ \t]*(?=\r?$)", re.MULTILINE
+)
 
 # ---------------------------------------------------------------------------
 # Frontmatter models
@@ -170,6 +174,34 @@ def count_body_citations(body: str) -> int:
     Consumers never trust the self-reported ``sources_count``.
     """
     return len(set(_CITATION_RE.findall(body)))
+
+
+def reconcile_sources_count(text: str) -> str:
+    """Collector pre-validation step: overwrite the model's self-reported
+    ``sources_count`` with the count taken from the body.
+
+    Models miscount their own citations (typically off by one), and the
+    collector used to discard otherwise valid briefs over it. Only a single
+    top-level ``sources_count:`` line inside well-formed frontmatter is
+    rewritten; anything else is returned unchanged so the validator reports
+    it. The citation floor is unaffected — it is checked on the body count.
+    """
+    match = _FRONTMATTER_RE.match(text)
+    if not match:
+        return text
+    raw_start, raw_end = match.span(1)
+    raw = match.group(1)
+    lines = list(_SOURCES_COUNT_LINE_RE.finditer(raw))
+    if len(lines) != 1:
+        return text
+    line = lines[0]
+    distinct = count_body_citations(match.group(2))
+    reported = line.group(1)
+    if reported == str(distinct):
+        return text
+    logger.info("sources_count %r reconciled to %d counted from the body", reported, distinct)
+    new_raw = f"{raw[: line.start()]}sources_count: {distinct}{raw[line.end() :]}"
+    return f"{text[:raw_start]}{new_raw}{text[raw_end:]}"
 
 
 def _section_spans(body: str) -> list[tuple[str, int, int]]:

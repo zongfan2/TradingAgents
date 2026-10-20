@@ -169,6 +169,65 @@ def test_macro_sources_count_must_match_body_count():
 
 
 @pytest.mark.unit
+def test_reconcile_sources_count_rewrites_only_the_count_line():
+    text = macro_text(n_urls=9, sources_count=14)
+    fixed = briefs.reconcile_sources_count(text)
+    assert fixed == macro_text(n_urls=9)
+    meta, _ = briefs.parse_macro_brief(fixed)
+    assert meta.sources_count == 9
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("value", ["14  # my count", "'14'", "", "many"])
+def test_reconcile_sources_count_replaces_any_value(value):
+    text = ticker_text(n_urls=6).replace("sources_count: 6", f"sources_count: {value}")
+    assert briefs.reconcile_sources_count(text) == ticker_text(n_urls=6)
+
+
+@pytest.mark.unit
+def test_reconcile_sources_count_keeps_crlf_line_endings():
+    text = ticker_text(n_urls=6, sources_count=5).replace("\n", "\r\n")
+    fixed = briefs.reconcile_sources_count(text)
+    assert fixed == ticker_text(n_urls=6).replace("\n", "\r\n")
+
+
+@pytest.mark.unit
+def test_reconcile_sources_count_matching_count_is_identity():
+    text = ticker_text(n_urls=6)
+    assert briefs.reconcile_sources_count(text) is text
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        # no frontmatter at all
+        lambda t: t.split("---\n", 2)[2],
+        # unterminated frontmatter
+        lambda t: t.replace("\n---\n", "\n", 1).replace("---\n", "---\n", 1),
+        # field missing: the validator must still report it
+        lambda t: t.replace("sources_count: 9\n", ""),
+        # duplicated key: ambiguous, leave for the validator
+        lambda t: t.replace("sources_count: 9\n", "sources_count: 9\nsources_count: 9\n"),
+        # indented (not top-level) key
+        lambda t: t.replace("sources_count: 9\n", "  sources_count: 9\n"),
+    ],
+)
+def test_reconcile_sources_count_leaves_unusual_frontmatter_alone(mutate):
+    text = mutate(ticker_text(n_urls=6, sources_count=9))
+    assert briefs.reconcile_sources_count(text) == text
+
+
+@pytest.mark.unit
+def test_reconcile_sources_count_ignores_body_lines():
+    # A body line that looks like the key is not frontmatter.
+    text = ticker_text(n_urls=6, sources_count=9) + "\nsources_count: 1\n"
+    fixed = briefs.reconcile_sources_count(text)
+    assert fixed.endswith("\nsources_count: 1\n")
+    assert "sources_count: 6\n" in fixed.split("---", 2)[1]
+
+
+@pytest.mark.unit
 def test_macro_duplicate_urls_count_once():
     # 8 distinct URLs, one cited twice: still 8 distinct — valid.
     meta, _ = briefs.parse_macro_brief(macro_text(n_urls=8, dup_first_url=True))
