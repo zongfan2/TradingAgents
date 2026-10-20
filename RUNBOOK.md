@@ -122,7 +122,8 @@ repo root:
 .venv/bin/python -m pipeline.install_schedule
 ```
 
-It writes `pipeline.{cn,us,watchdog}.xml` (UTF-16, as `schtasks` requires) to
+It writes `pipeline.{cn,us,watchdog}.xml` — plus `pipeline.us-execution.xml`
+when `TRADINGAGENTS_EXECUTION_TIME_US` is set — (UTF-16, as `schtasks` requires) to
 `~/.tradingagents/windows-tasks/` and prints the registration commands, which
 it never runs itself:
 
@@ -137,6 +138,16 @@ On this host (`Asia/Shanghai`, which the Windows timezone must match —
 - `us`: `.env` sets `TRADINGAGENTS_SLOT_TIME_US=05:30` (New York), so
   **17:30 and 18:30** (EDT / EST renderings; the wrapper gate no-ops the
   wrong one). The default 08:30 would give 20:30 and 21:30.
+- `us-execution`: `.env` sets `TRADINGAGENTS_EXECUTION_TIME_US=09:45` (New
+  York), so **21:45 and 22:45**. The 05:30 us slot records step 7 as
+  `skipped — deferred to the execution task`; this task runs
+  `orchestrator execute`, which submits in the finished slot once IEX quotes
+  are fresh. Alpaca's default IEX feed has no quotes before ~09:20 New York,
+  so an inline step 7 at ~07:00 skipped every order as `stale-quote`
+  (specs/orchestrator.md "Deferred us execution"). If the slot is still
+  running or never ran, execute skips and notifies; the watchdog alerts once
+  if step 7 is still deferred at 10:45. Manual run:
+  `.venv/bin/python -m pipeline.orchestrator execute --now [--date YYYY-MM-DD]`.
 - watchdog: hourly on the hour.
 
 Run the installer from a login shell (`ssh dev`, or `bash -l`). A non-login

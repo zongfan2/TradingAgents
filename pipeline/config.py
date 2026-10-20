@@ -65,12 +65,20 @@ def parse_slot_time(slot_time: str) -> tuple[int, int]:
 
 @dataclass(frozen=True)
 class SessionSchedule:
-    """Per-session scheduling knobs (``sessions.{cn,us}.slot_time``)."""
+    """Per-session scheduling knobs (``sessions.{cn,us}.slot_time``).
+
+    ``execution_time`` (us only, market-local ``HH:MM``) defers slot step 7
+    to a separate ``orchestrator execute`` job — specs/orchestrator.md
+    "Deferred us execution". ``None`` keeps step 7 inline.
+    """
 
     slot_time: str = DEFAULT_SLOT_TIME
+    execution_time: str | None = None
 
     def __post_init__(self) -> None:
         parse_slot_time(self.slot_time)  # validate eagerly
+        if self.execution_time is not None:
+            parse_slot_time(self.execution_time)
 
 
 def _default_state_dir() -> Path:
@@ -143,6 +151,8 @@ class PipelineConfig:
         for session in ("cn", "us"):
             if session not in self.sessions:
                 raise ValueError(f"sessions config missing required session {session!r}")
+        if self.sessions["cn"].execution_time is not None:
+            raise ValueError("execution_time is us-only — the adapter never runs for cn")
 
 
 def _env_bool(raw: str | None, default: bool) -> bool:
@@ -165,7 +175,13 @@ def load_config(env: Mapping[str, str] | None = None) -> PipelineConfig:
 
     sessions = {
         session: SessionSchedule(
-            env.get(f"TRADINGAGENTS_SLOT_TIME_{session.upper()}") or DEFAULT_SLOT_TIME
+            env.get(f"TRADINGAGENTS_SLOT_TIME_{session.upper()}") or DEFAULT_SLOT_TIME,
+            # us only: the adapter is us-only, so cn has no execution job.
+            execution_time=(
+                (env.get("TRADINGAGENTS_EXECUTION_TIME_US") or "").strip() or None
+                if session == "us"
+                else None
+            ),
         )
         for session in ("cn", "us")
     }

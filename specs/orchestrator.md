@@ -60,6 +60,59 @@ state — no schedule entries are ever created or deleted by code.
 - The user accepted that the cn slot's analysis tail may finish shortly after
   the 09:30 open.
 
+## Deferred us execution (2026-10-20)
+
+Alpaca's default quote feed for this account is IEX, which carries no
+quotes before ~09:20 New York. A us slot at 05:30 reaches step 7 around
+06:45–07:30, when the newest quote is the prior day's close, so the
+adapter's S8 `stale-quote` guard skipped every order (35/35 in 2026-10).
+The guard is correct and stays at 15 min; execution moves instead.
+
+- Config `sessions.us.execution_time` (env `TRADINGAGENTS_EXECUTION_TIME_US`,
+  `HH:MM` New York, unset by default). Unset ⇒ step 7 runs inline as before.
+  Set (the server uses `09:45`) ⇒ **every us slot run except
+  `--only execution_adapter` records step 7 as `skipped` with error
+  `deferred to the execution task (<time> America/New_York)`**, and a
+  separate scheduled job runs `orchestrator execute` at that time.
+- `execute` (wrapper): the same ± 15 min window and weekday gate as `slot`,
+  evaluated against `execution_time` in New York; slot date = today in New
+  York. It takes the **same slot lock** (`us-<date>.lock`), so it can never
+  overlap the slot or itself. Then:
+  - The day's us slot must be **finished** (status file `slot.date` = today
+    and `slot.finished_at` set). Otherwise ⇒ no adapter call; one
+    notification and one `orchestrator.log` line (`execution_adapter
+    skipped`, reason "us slot … not finished"); exit 1. The status file is
+    not touched.
+  - The lock is held by another process ⇒ if the status file shows step 7
+    `running` it is a double fire (exit 0, silent); otherwise the slot itself
+    is still running ⇒ notify + log as above, exit 0 (never write the file
+    another process owns).
+  - Otherwise it re-opens the finished slot (`finished_at` back to null — the
+    "a finished slot never contains `running`" rule keeps holding), runs
+    step 7 exactly as the inline path (same argv, timeout, outcome mapping,
+    failure notifications), sends an execution summary notification, and
+    finishes the slot again. The re-finish **replaces** the slot's existing
+    `history` entry (same date + session + `started_at`) instead of
+    appending a second one.
+  - `execute --now [--date D]` is the manual path: no window/weekday gate,
+    everything else identical.
+- The step-7 barrier rule is unchanged in substance: a finished slot has
+  already recorded the macro-eval outcome.
+- The end-of-slot summary reads `orders deferred to <time>` instead of
+  `orders n/a` when step 7 was deferred.
+- Watchdog: when `execution_time` is set, a weekday us slot whose step 7 is
+  still the `deferred …` skip at `execution_time` + 1h notifies once
+  (marker `us-<date>.execution.notified`). A slot that never started is
+  already covered by the missed-slot alert.
+- Install script: with `execution_time` set it also generates a
+  `us-execution` job (launchd label `com.tradingagents.pipeline.us-execution`;
+  Windows task `pipeline.us-execution`, logs `scheduler.us-execution.*`)
+  running `orchestrator execute`, fire times enumerated exactly like a slot's;
+  the Windows task's time limit is the adapter timeout plus 1 h.
+- Out of scope: settle's `execution_adapter refresh` (close re-submissions)
+  still runs at slot time and so is subject to the same pre-market
+  `stale-quote` skip; with no open positions this has no effect yet.
+
 ## Slot sequence
 
 | # | Step | On failure |
@@ -71,7 +124,7 @@ state — no schedule entries are ever created or deleted by code.
 | 4 | ticker collectors (fan-out, concurrency-capped) | per-ticker isolation (collector R6) |
 | 5 | ticker evaluators — every collected **core** brief + every would-trigger opportunity brief | continue, `missing` gating |
 | 6 | analysis runner (incl. A/B pairs) | per-run isolation (runner R3) |
-| 7 | execution adapter `submit` (`us` slot only) | per-order isolation (adapter R4) |
+| 7 | execution adapter `submit` (`us` slot only; deferred to the `execute` job when `execution_time` is set — see above) | per-order isolation (adapter R4) |
 | 8 | notifications + final status write | — |
 
 Steps 1 and 3 run in parallel (independent). **Step 6 does not start until the
@@ -201,9 +254,17 @@ summary is assembled in planned-job order.
    user from the repo root, rejects unsafe distro/user names and quoted
    paths, and never spawns `schtasks`.
 3. Watchdog: a fixture day with no started slot by `slot_time`+1h notifies
-   exactly once; a started slot suppresses it.
+   exactly once; a started slot suppresses it. With `execution_time` set, a
+   still-deferred step 7 at `execution_time`+1h notifies exactly once.
 4. Settle: fixture ledger + prices produce contract-valid outcomes rows;
    plan-replay first-touch and ambiguity cases covered; settle performs zero
    broker calls when the adapter refresh is stubbed out (verified by the fake).
 5. Status file survives kill mid-slot (readable, shows the failed component);
    cn and us slots running concurrently leave both files intact.
+6. Deferred execution: with `execution_time` set the slot skips step 7 as
+   deferred (also via `--from`, never via `--only execution_adapter`);
+   `execute` runs only inside its window on weekdays, runs step 7 only on a
+   finished slot of the same date, re-opens and re-finishes the slot with a
+   single history entry, and on an unfinished slot or a held lock never
+   calls the adapter or writes the status file. Unset ⇒ unchanged inline
+   behavior and no extra scheduler job.

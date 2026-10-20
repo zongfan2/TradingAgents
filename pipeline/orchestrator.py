@@ -593,12 +593,45 @@ class StatusFile:
                 return {}
             return {name: dict(rec) for name, rec in self._data["components"].items()}
 
+    def reopen_finished_slot(self, session: str, slot_date: date) -> bool:
+        """Load the on-disk slot and clear its ``finished_at`` so the deferred
+        execution step can run inside it. ``False`` (file untouched) unless
+        the file holds a *finished* slot for exactly this session and date."""
+        with self._lock:
+            try:
+                data = json.loads(self.path.read_text(encoding="utf-8"))
+            except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError):
+                return False
+            slot = data.get("slot") if isinstance(data, dict) else None
+            if (
+                not isinstance(slot, dict)
+                or slot.get("session") != session
+                or slot.get("date") != slot_date.isoformat()
+                or not slot.get("finished_at")
+                or not isinstance(data.get("components"), dict)
+            ):
+                return False
+            history = data.get("history")
+            data["history"] = history[-HISTORY_LIMIT:] if isinstance(history, list) else []
+            slot["finished_at"] = None
+            self._data = data
+            self._write()
+            return True
+
     def finish_slot(self, finished_at: str) -> None:
         with self._lock:
             assert self._data is not None, "start_slot() before finish_slot()"
             self._data["slot"]["finished_at"] = finished_at
             completed = {**self._data["slot"], "components": dict(self._data["components"])}
-            self._data["history"] = (self._data["history"] + [completed])[-HISTORY_LIMIT:]
+            history = list(self._data["history"])
+            # A re-opened slot (deferred execution) replaces its own entry.
+            if history and all(
+                history[-1].get(key) == completed[key] for key in ("date", "session", "started_at")
+            ):
+                history[-1] = completed
+            else:
+                history.append(completed)
+            self._data["history"] = history[-HISTORY_LIMIT:]
             self._write()
 
     def _write(self) -> None:
@@ -651,6 +684,18 @@ class Orchestrator:
         self._analysis_counts: dict[str, int] | None = None
         #: Step 7's parsed adapter-summary counts for the same notification.
         self._execution_counts: dict[str, int] | None = None
+        #: Set by run_slot: step 7 is left to the ``execute`` job.
+        self._defer_execution = False
+
+    @property
+    def execution_time(self) -> str | None:
+        """us ``execution_time`` (deferred step 7), else ``None``."""
+        if self.session != "us":
+            return None
+        return self.config.sessions[self.session].execution_time
+
+    def _deferral_reason(self) -> str:
+        return f"deferred to the execution task ({self.execution_time} {SESSION_TZ['us']})"
 
     # -- selection (R3) -----------------------------------------------------
 
@@ -679,6 +724,9 @@ class Orchestrator:
         """
         selected = self._select(only, from_step)
         by_step = {c.step: c for c in selected}
+        # Only an explicit --only execution_adapter runs step 7 inline when a
+        # deferred execution job is configured (specs/orchestrator.md).
+        self._defer_execution = self.execution_time is not None and only != "execution_adapter"
         lock = acquire_slot_lock(self.config, self.session, self.slot_date)
         try:
             self.status.start_slot(self.session, self.slot_date, to_utc_iso(self.clock()))
@@ -736,6 +784,9 @@ class Orchestrator:
 
         if component.us_only and self.session != "us":
             self._record_skip(name, started_iso, "us slot only")
+            return
+        if name == "execution_adapter" and self._defer_execution:
+            self._record_skip(name, started_iso, self._deferral_reason())
             return
         if component.build_argv is None:
             self._record_skip(name, started_iso, component.placeholder_reason)
@@ -879,6 +930,8 @@ class Orchestrator:
                     f"orders {self._execution_counts['submitted']} live"
                     f"/{self._execution_counts['dry_run']} dry-run"
                 )
+            elif self._defer_execution:
+                orders_text = f"orders deferred to {self.execution_time}"
             else:
                 orders_text = "orders n/a"
             counts = self._analysis_counts
@@ -898,6 +951,64 @@ class Orchestrator:
         )
         self.status.finish_slot(to_utc_iso(self.clock()))
         return 1 if problems else 0
+
+
+    # -- deferred execution (specs/orchestrator.md "Deferred us execution") --
+
+    def run_execution(self) -> int:
+        """Run step 7 inside the day's already-finished us slot.
+
+        Raises :class:`SlotLockHeld` when the slot (or another ``execute``)
+        holds the lock. Returns 1 when the slot has not finished (nothing is
+        run and the status file is untouched) or step 7 failed/timed out.
+        """
+        if self.session != "us":
+            raise ValueError("execute is us-only — the adapter never runs for cn")
+        component = next((c for c in self.registry if c.name == "execution_adapter"), None)
+        if component is None:
+            raise ValueError("registry has no execution_adapter component")
+        self._defer_execution = False
+        lock = acquire_slot_lock(self.config, self.session, self.slot_date)
+        try:
+            if not self.status.reopen_finished_slot(self.session, self.slot_date):
+                self._report_unfinished_slot()
+                return 1
+            self._run_component(component)
+            record = self.status.components_snapshot().get(component.name, {})
+            status = record.get("status", "failed")
+            message = f"execution {self.session} {self.slot_date.isoformat()}: {status}"
+            if self._execution_counts is not None:
+                counts = self._execution_counts
+                message += (
+                    f"; orders {counts['submitted']} live/{counts['dry_run']} dry-run, "
+                    f"{counts['skipped']} skipped"
+                )
+            if record.get("error"):
+                message += f"; {record['error']}"
+            self.notifier.notify(
+                "TradingAgents pipeline",
+                message,
+                dedup_key=("summary", (self.session, self.slot_date.isoformat()), "execution"),
+            )
+            self.status.finish_slot(to_utc_iso(self.clock()))
+            return 1 if status in ("failed", "timeout") else 0
+        finally:
+            release_slot_lock(lock)
+
+    def _report_unfinished_slot(self) -> None:
+        """Execution time arrived but the day's slot is missing or still
+        running: never run the adapter, never write the status file."""
+        reason = (
+            f"us slot for {self.slot_date.isoformat()} not finished at execution time "
+            "— execution skipped"
+        )
+        logger.warning(reason)
+        self._log_component("execution_adapter", "skipped", 0.0, reason)
+        self.notifier.notify(
+            "TradingAgents pipeline",
+            reason,
+            dedup_key=("execution_adapter", (self.session, self.slot_date.isoformat()), "unfinished"),
+        )
 
 
 def _one_line_reason(result: RunResult, limit: int = 300) -> str:
@@ -1232,6 +1343,83 @@ def run_slot_if_due(
         return 0
 
 
+def run_execution_if_due(
+    config: PipelineConfig,
+    *,
+    clock: Clock | None = None,
+    registry: Iterable[Component] | None = None,
+    runner: Runner | None = None,
+    notifier: Notifier | None = None,
+) -> int:
+    """The ``execute`` job wrapper: us ``execution_time`` ± 15 min window and
+    weekday gate (New York), then step 7 in the day's finished slot."""
+    clock = clock or _utc_now
+    now = clock()
+    execution_time = config.sessions["us"].execution_time
+    if execution_time is None:
+        logger.info("no us execution_time configured — step 7 runs inline; exiting")
+        return 0
+    if not within_slot_window("us", execution_time, now):
+        logger.info(
+            "outside us execution window (%s ± %dmin in %s) — exiting",
+            execution_time,
+            SLOT_WINDOW_MINUTES,
+            SESSION_TZ["us"],
+        )
+        return 0
+    slot_day = session_date("us", now)
+    if slot_day.weekday() >= 5:
+        logger.info("us %s is a weekend in %s — exiting", slot_day, SESSION_TZ["us"])
+        return 0
+    return execute_slot(
+        config, slot_day, clock=clock, registry=registry, runner=runner, notifier=notifier
+    )
+
+
+def execute_slot(
+    config: PipelineConfig,
+    slot_day: date,
+    *,
+    clock: Clock | None = None,
+    registry: Iterable[Component] | None = None,
+    runner: Runner | None = None,
+    notifier: Notifier | None = None,
+) -> int:
+    """Run deferred step 7 for ``slot_day``; a held lock never touches the
+    status file another process owns."""
+    orchestrator = Orchestrator(
+        config,
+        "us",
+        slot_date=slot_day,
+        registry=registry,
+        runner=runner,
+        notifier=notifier,
+        clock=clock,
+    )
+    try:
+        return orchestrator.run_execution()
+    except SlotLockHeld as exc:
+        step7 = _slot_components(config, "us", slot_day.isoformat()).get("execution_adapter", {})
+        if step7.get("status") == "running":
+            logger.info("%s — execution already running, double fire deduped", exc)
+            return 0
+        logger.info("%s — the us slot is still running", exc)
+        orchestrator._report_unfinished_slot()
+        return 0
+
+
+def _slot_components(config: PipelineConfig, session: str, date_iso: str) -> dict[str, Any]:
+    """The status file's components when it holds ``date_iso``'s slot, else ``{}``."""
+    try:
+        data = json.loads(status_file_path(config, session).read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+    if not isinstance(data, dict) or (data.get("slot") or {}).get("date") != date_iso:
+        return {}
+    components = data.get("components")
+    return components if isinstance(components, dict) else {}
+
+
 def _slot_started(config: PipelineConfig, session: str, date_iso: str) -> bool:
     try:
         data = json.loads(status_file_path(config, session).read_text(encoding="utf-8"))
@@ -1258,25 +1446,8 @@ def run_watchdog(
     notifier = notifier or Notifier(enabled=config.notifications_enabled)
     now = clock()
     for session in SESSIONS:
-        zone = ZoneInfo(SESSION_TZ[session])
-        local = now.astimezone(zone)
         slot_time = config.sessions[session].slot_time
-        hour, minute = parse_slot_time(slot_time)
-        # A slot within WATCHDOG_GRACE of midnight has its deadline on the
-        # NEXT calendar day, so yesterday's slot must be checked too: a slot
-        # day is alertable from its deadline until the end of the deadline's
-        # own calendar day (for normal slots that is the slot day itself,
-        # matching the original all-day alert window).
-        for day_offset in (0, -1):
-            slot_day = local.date() + timedelta(days=day_offset)
-            if slot_day.weekday() >= 5:  # weekday of the SLOT day, session-local
-                continue
-            deadline = (
-                datetime(slot_day.year, slot_day.month, slot_day.day, hour, minute, tzinfo=zone)
-                + WATCHDOG_GRACE
-            )
-            if local < deadline or local.date() != deadline.date():
-                continue
+        for slot_day in _alertable_days(session, slot_time, now):
             date_iso = slot_day.isoformat()
             if _slot_started(config, session, date_iso):
                 continue
@@ -1302,7 +1473,72 @@ def run_watchdog(
                 "-",
                 f"not started by {slot_time}+1h",
             )
+    execution_time = config.sessions["us"].execution_time
+    if execution_time is not None:
+        _watch_deferred_execution(config, execution_time, now, notifier)
     return 0
+
+
+def _alertable_days(session: str, at_time: str, now: datetime) -> list[date]:
+    """Weekday session-local days whose ``at_time`` + grace deadline has passed.
+
+    A time within WATCHDOG_GRACE of midnight has its deadline on the NEXT
+    calendar day, so yesterday must be checked too: a day is alertable from
+    its deadline until the end of the deadline's own calendar day (for normal
+    times that is the day itself, matching the original all-day alert window).
+    """
+    zone = ZoneInfo(SESSION_TZ[session])
+    local = now.astimezone(zone)
+    hour, minute = parse_slot_time(at_time)
+    days: list[date] = []
+    for day_offset in (0, -1):
+        day = local.date() + timedelta(days=day_offset)
+        if day.weekday() >= 5:  # weekday of the SLOT day, session-local
+            continue
+        deadline = (
+            datetime(day.year, day.month, day.day, hour, minute, tzinfo=zone) + WATCHDOG_GRACE
+        )
+        if local < deadline or local.date() != deadline.date():
+            continue
+        days.append(day)
+    return days
+
+
+def _watch_deferred_execution(
+    config: PipelineConfig, execution_time: str, now: datetime, notifier: Notifier
+) -> None:
+    """Alert once when a us slot's step 7 is still the deferral skip at
+    ``execution_time`` + 1h — the execute job never ran (or never got past
+    its gates). A slot that never started is the missed-slot alert's job."""
+    for slot_day in _alertable_days("us", execution_time, now):
+        date_iso = slot_day.isoformat()
+        step7 = _slot_components(config, "us", date_iso).get("execution_adapter", {})
+        if step7.get("status") != "skipped" or not str(step7.get("error") or "").startswith(
+            "deferred"
+        ):
+            continue
+        marker = config.state_dir / "watchdog" / f"us-{date_iso}.execution.notified"
+        if marker.exists():
+            continue
+        notifier.notify(
+            "TradingAgents pipeline",
+            f"us execution for {date_iso} has not run by {execution_time}+1h "
+            f"({SESSION_TZ['us']})",
+            dedup_key=("watchdog", ("us", date_iso), "missed-execution"),
+        )
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(to_utc_iso(now), encoding="utf-8")
+        rotate_log(orchestrator_log_path(config))
+        append_log_line(
+            orchestrator_log_path(config),
+            to_utc_iso(now),
+            "us",
+            date_iso,
+            "watchdog",
+            "missed-execution",
+            "-",
+            f"step 7 still deferred at {execution_time}+1h",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1335,6 +1571,21 @@ def build_parser() -> argparse.ArgumentParser:
     slot.add_argument("--session", required=True, choices=sorted(SESSIONS))
 
     sub.add_parser("watchdog", help="hourly missed-slot check")
+
+    execute = sub.add_parser(
+        "execute",
+        help="us execution job: execution_time window + weekday gate, then the "
+        "deferred step 7 in the day's finished slot",
+    )
+    execute.add_argument(
+        "--now",
+        action="store_true",
+        help="manual: skip the window/weekday gate (every other rule still applies)",
+    )
+    execute.add_argument(
+        "--date", type=date.fromisoformat, default=None,
+        help="with --now: slot date (default: today in New York)",
+    )
     return parser
 
 
@@ -1377,6 +1628,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
     if args.command == "slot":
         return run_slot_if_due(config, args.session)
+    if args.command == "execute":
+        if args.date is not None and not args.now:
+            print("error: --date requires --now", file=sys.stderr)
+            return 2
+        if args.now:
+            return execute_slot(config, args.date or session_date("us", _utc_now()))
+        return run_execution_if_due(config)
     return run_watchdog(config)
 
 
