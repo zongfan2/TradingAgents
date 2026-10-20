@@ -564,3 +564,67 @@ def test_slot_is_refinished_before_the_summary_notification(tmp_path):
     assert status["slot"]["finished_at"] is not None
     assert status["components"]["execution_adapter"]["status"] == "ok"
     assert orchestrator.REOPENED_KEY not in status["slot"]
+
+
+# ---------------------------------------------------------------------------
+# A real kill leaves the lock behind (review a282b60, low)
+# ---------------------------------------------------------------------------
+
+
+def reopened_with_step7(config, record):
+    """A re-opened slot whose execute died with ``record`` as step 7 and the
+    lock still held (a real kill never runs ``finally``)."""
+    finished_slot(config)
+    status = orchestrator.StatusFile(orchestrator.status_file_path(config, "us"))
+    assert status.reopen_finished_slot("us", SLOT_DATE)
+    if record is not None:
+        status.update_component("execution_adapter", record)
+    return orchestrator.acquire_slot_lock(config, "us", SLOT_DATE)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "record",
+    [
+        None,  # killed right after the reopen write: still the deferred skip
+        {"status": "failed", "error": "exit 1"},  # killed in the failure notifier
+        {"status": "ok", "error": None},
+    ],
+)
+def test_killed_execute_lock_is_named_never_reported_as_a_running_slot(
+    tmp_path, capsys, record
+):
+    config = deferred_config(tmp_path)
+    lock = reopened_with_step7(config, record)
+    before = status_bytes(config)
+    runner = FakeRunner()
+    notifier, sent = recording_notifier()
+    kwargs = {"clock": lambda: IN_WINDOW, "registry": full_fake_registry(), "runner": runner,
+              "notifier": notifier}
+    assert orchestrator.execute_slot(config, SLOT_DATE, manual=True, **kwargs) == 1
+    assert f"remove {lock}" in capsys.readouterr().err
+    assert orchestrator.execute_slot(config, SLOT_DATE, **kwargs) == 0
+    assert names(runner) == [] and sent == []
+    assert status_bytes(config) == before
+    # Once the operator removes the stale lock, recovery completes.
+    orchestrator.release_slot_lock(lock)
+    assert make_orch(config, FakeRunner()).run_execution() == 0
+    status = read_status(config, "us")
+    assert status["slot"]["finished_at"] is not None and len(status["history"]) == 1
+
+
+@pytest.mark.unit
+def test_lock_held_between_refinish_and_release_is_not_a_false_alert(tmp_path):
+    config = deferred_config(tmp_path)
+    finished_slot(config)
+    make_orch(config, FakeRunner()).run_execution()  # finished, step 7 ok
+    lock = orchestrator.acquire_slot_lock(config, "us", SLOT_DATE)
+    try:
+        notifier, sent = recording_notifier()
+        assert orchestrator.execute_slot(
+            config, SLOT_DATE, clock=lambda: IN_WINDOW, registry=full_fake_registry(),
+            runner=FakeRunner(), notifier=notifier,
+        ) == 0
+        assert sent == []
+    finally:
+        orchestrator.release_slot_lock(lock)

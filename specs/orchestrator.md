@@ -86,10 +86,12 @@ The guard is correct and stays at 15 min; execution moves instead.
     notification and one `orchestrator.log` line (`execution_adapter
     skipped`, reason "us slot … not finished"); exit 1. The status file is
     not touched.
-  - The lock is held by another process ⇒ if the status file shows step 7
-    `running` it is a double fire (exit 0, warning log naming the lock — a
-    killed execute leaves the same state; `execute --now` exits 1 and prints
-    the lock path to remove instead); otherwise the slot itself
+  - The lock is held by another process ⇒ classified by the slot record,
+    never by step 7: a slot that is finished or marked
+    `reopened_for_execution` can only be held by an execute — alive (double
+    fire) or killed at any point, since a real kill leaves the lock behind —
+    so exit 0 with a warning log naming the lock (`execute --now` exits 1 and
+    prints the lock path to remove instead); otherwise the slot itself
     is still running ⇒ notify + log as above, exit 0 (never write the file
     another process owns).
   - Otherwise it re-opens the finished slot (`finished_at` back to null and

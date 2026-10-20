@@ -1399,9 +1399,14 @@ def execute_slot(
     manual: bool = False,
 ) -> int:
     """Run deferred step 7 for ``slot_day``; a held lock never touches the
-    status file another process owns. ``manual`` (``execute --now``) makes
-    a lock held by a running-or-killed execution exit 1 with the lock path
-    instead of the scheduled double fire's silent exit 0."""
+    status file another process owns.
+
+    The held lock is classified by the slot record, never by step 7: a slot
+    that is finished or marked re-opened can only be held by an execute
+    (alive, or killed at any point — a real kill leaves the lock behind) ⇒
+    warning naming the lock, and ``manual`` (``execute --now``) exits 1 with
+    it; anything else is the slot itself still running ⇒ the unfinished-slot
+    report."""
     orchestrator = Orchestrator(
         config,
         "us",
@@ -1414,12 +1419,13 @@ def execute_slot(
     try:
         return orchestrator.run_execution()
     except SlotLockHeld as exc:
-        step7 = _slot_components(config, "us", slot_day.isoformat()).get("execution_adapter", {})
-        if step7.get("status") == "running":
+        slot = _slot_data(config, "us", slot_day.isoformat()).get("slot") or {}
+        if slot.get("finished_at") or slot.get(REOPENED_KEY):
             lock_path = slot_lock_path(config, "us", slot_day)
             message = (
-                f"{exc} — step 7 is 'running'; if no execute process is alive it was "
-                f"killed: remove {lock_path} and run `execute --now` again"
+                f"{exc} — held by an execute run; if no `pipeline.orchestrator execute` "
+                f"process is alive it was killed: remove {lock_path} and run "
+                "`execute --now` again"
             )
             if manual:
                 print(message, file=sys.stderr)
