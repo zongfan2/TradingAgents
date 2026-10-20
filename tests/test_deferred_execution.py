@@ -432,3 +432,71 @@ def test_launchd_execution_plist_and_printed_schedule(tmp_path):
     assert (8, 45) in hours
     text = install_schedule.format_schedule(config, "Asia/Shanghai", 2026, "windows-tasks")
     assert "us-execution: execution_time 09:45 America/New_York -> host 21:45, 22:45" in text
+
+
+# ---------------------------------------------------------------------------
+# An execute run killed mid-step-7 (review 98e9d6c, low)
+# ---------------------------------------------------------------------------
+
+
+def killed_execute(config):
+    """A finished slot, re-opened by an execute that died with step 7
+    'running' and its lock file left behind."""
+    finished_slot(config)
+    status = orchestrator.StatusFile(orchestrator.status_file_path(config, "us"))
+    assert status.reopen_finished_slot("us", SLOT_DATE)
+    status.update_component("execution_adapter", {"status": "running", "started_at": "x",
+                                                  "finished_at": None, "duration_s": None,
+                                                  "error": None})
+    return orchestrator.acquire_slot_lock(config, "us", SLOT_DATE)
+
+
+@pytest.mark.unit
+def test_watchdog_alerts_once_on_a_killed_execution(tmp_path):
+    config = deferred_config(tmp_path)
+    killed_execute(config)
+    notifier, sent = recording_notifier()
+    orchestrator.run_watchdog(config, clock=lambda: LATE, notifier=notifier)
+    assert len(us_execution_alerts(sent)) == 1
+    assert "has not completed" in us_execution_alerts(sent)[0]
+    notifier2, sent2 = recording_notifier()
+    orchestrator.run_watchdog(config, clock=lambda: LATE, notifier=notifier2)
+    assert us_execution_alerts(sent2) == []
+
+
+@pytest.mark.unit
+def test_manual_execute_on_a_stale_running_lock_says_how_to_recover(tmp_path, capsys):
+    config = deferred_config(tmp_path)
+    lock = killed_execute(config)
+    runner = FakeRunner()
+    notifier, sent = recording_notifier()
+    kwargs = {"clock": lambda: IN_WINDOW, "registry": full_fake_registry(), "runner": runner,
+              "notifier": notifier}
+    assert orchestrator.execute_slot(config, SLOT_DATE, manual=True, **kwargs) == 1
+    assert f"remove {lock}" in capsys.readouterr().err
+    # The scheduled path stays a silent double-fire exit.
+    assert orchestrator.execute_slot(config, SLOT_DATE, **kwargs) == 0
+    assert names(runner) == [] and sent == []
+
+
+@pytest.mark.unit
+def test_execute_recovers_a_killed_execution_once_the_lock_is_gone(tmp_path):
+    config = deferred_config(tmp_path)
+    lock = killed_execute(config)
+    orchestrator.release_slot_lock(lock)
+    runner = FakeRunner()
+    assert make_orch(config, runner).run_execution() == 0
+    assert names(runner) == ["execution_adapter"]
+    status = read_status(config, "us")
+    assert status["components"]["execution_adapter"]["status"] == "ok"
+    assert status["slot"]["finished_at"] is not None
+    assert len(status["history"]) == 1
+
+
+@pytest.mark.unit
+def test_reopen_refuses_a_killed_slot_without_a_running_step7(tmp_path):
+    config = deferred_config(tmp_path)
+    status = orchestrator.StatusFile(orchestrator.status_file_path(config, "us"))
+    status.start_slot("us", SLOT_DATE, "2026-01-05T10:30:00Z")
+    status.update_component("analysis_runner", {"status": "running"})  # slot killed here
+    assert not orchestrator.StatusFile(status.path).reopen_finished_slot("us", SLOT_DATE)

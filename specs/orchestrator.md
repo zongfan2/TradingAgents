@@ -79,12 +79,16 @@ The guard is correct and stays at 15 min; execution moves instead.
   York. It takes the **same slot lock** (`us-<date>.lock`), so it can never
   overlap the slot or itself. Then:
   - The day's us slot must be **finished** (status file `slot.date` = today
-    and `slot.finished_at` set). Otherwise ⇒ no adapter call; one
+    and `slot.finished_at` set) — or left re-opened by a killed `execute`
+    (`finished_at` null with step 7 still `running`; holding the lock proves
+    no execute is alive, and the adapter's S4 dedupe makes the re-run safe). Otherwise ⇒ no adapter call; one
     notification and one `orchestrator.log` line (`execution_adapter
     skipped`, reason "us slot … not finished"); exit 1. The status file is
     not touched.
   - The lock is held by another process ⇒ if the status file shows step 7
-    `running` it is a double fire (exit 0, silent); otherwise the slot itself
+    `running` it is a double fire (exit 0, warning log naming the lock — a
+    killed execute leaves the same state; `execute --now` exits 1 and prints
+    the lock path to remove instead); otherwise the slot itself
     is still running ⇒ notify + log as above, exit 0 (never write the file
     another process owns).
   - Otherwise it re-opens the finished slot (`finished_at` back to null — the
@@ -101,7 +105,9 @@ The guard is correct and stays at 15 min; execution moves instead.
 - The end-of-slot summary reads `orders deferred to <time>` instead of
   `orders n/a` when step 7 was deferred.
 - Watchdog: when `execution_time` is set, a weekday us slot whose step 7 is
-  still the `deferred …` skip at `execution_time` + 1h notifies once
+  still the `deferred …` skip — or still `running`, i.e. a killed execute,
+  since the adapter's own timeout is 15 min — at `execution_time` + 1h
+  notifies once
   (marker `us-<date>.execution.notified`). A slot that never started is
   already covered by the missed-slot alert.
 - Install script: with `execution_time` set it also generates a
@@ -266,5 +272,7 @@ summary is assembled in planned-job order.
    `execute` runs only inside its window on weekdays, runs step 7 only on a
    finished slot of the same date, re-opens and re-finishes the slot with a
    single history entry, and on an unfinished slot or a held lock never
-   calls the adapter or writes the status file. Unset ⇒ unchanged inline
+   calls the adapter or writes the status file; a killed execute is alerted
+   by the watchdog and recovered by `execute --now` once its lock is gone.
+   Unset ⇒ unchanged inline
    behavior and no extra scheduler job.

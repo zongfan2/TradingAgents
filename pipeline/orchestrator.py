@@ -596,7 +596,9 @@ class StatusFile:
     def reopen_finished_slot(self, session: str, slot_date: date) -> bool:
         """Load the on-disk slot and clear its ``finished_at`` so the deferred
         execution step can run inside it. ``False`` (file untouched) unless
-        the file holds a *finished* slot for exactly this session and date."""
+        the file holds this session and date's slot that is either finished
+        or was left re-opened by an interrupted execution (step 7 still
+        ``running`` — the caller holds the slot lock, so nothing else is)."""
         with self._lock:
             try:
                 data = json.loads(self.path.read_text(encoding="utf-8"))
@@ -607,9 +609,12 @@ class StatusFile:
                 not isinstance(slot, dict)
                 or slot.get("session") != session
                 or slot.get("date") != slot_date.isoformat()
-                or not slot.get("finished_at")
                 or not isinstance(data.get("components"), dict)
             ):
+                return False
+            step7 = data["components"].get("execution_adapter")
+            interrupted = isinstance(step7, dict) and step7.get("status") == "running"
+            if not slot.get("finished_at") and not interrupted:
                 return False
             history = data.get("history")
             data["history"] = history[-HISTORY_LIMIT:] if isinstance(history, list) else []
@@ -1384,9 +1389,12 @@ def execute_slot(
     registry: Iterable[Component] | None = None,
     runner: Runner | None = None,
     notifier: Notifier | None = None,
+    manual: bool = False,
 ) -> int:
     """Run deferred step 7 for ``slot_day``; a held lock never touches the
-    status file another process owns."""
+    status file another process owns. ``manual`` (``execute --now``) makes
+    a lock held by a running-or-killed execution exit 1 with the lock path
+    instead of the scheduled double fire's silent exit 0."""
     orchestrator = Orchestrator(
         config,
         "us",
@@ -1401,7 +1409,15 @@ def execute_slot(
     except SlotLockHeld as exc:
         step7 = _slot_components(config, "us", slot_day.isoformat()).get("execution_adapter", {})
         if step7.get("status") == "running":
-            logger.info("%s — execution already running, double fire deduped", exc)
+            lock_path = slot_lock_path(config, "us", slot_day)
+            message = (
+                f"{exc} — step 7 is 'running'; if no execute process is alive it was "
+                f"killed: remove {lock_path} and run `execute --now` again"
+            )
+            if manual:
+                print(message, file=sys.stderr)
+                return 1
+            logger.warning(message)
             return 0
         logger.info("%s — the us slot is still running", exc)
         orchestrator._report_unfinished_slot()
@@ -1509,20 +1525,23 @@ def _watch_deferred_execution(
 ) -> None:
     """Alert once when a us slot's step 7 is still the deferral skip at
     ``execution_time`` + 1h — the execute job never ran (or never got past
-    its gates). A slot that never started is the missed-slot alert's job."""
+    its gates) — or still ``running`` then: far past the adapter's own
+    timeout, so the execute process was killed. A slot that never started
+    is the missed-slot alert's job."""
     for slot_day in _alertable_days("us", execution_time, now):
         date_iso = slot_day.isoformat()
         step7 = _slot_components(config, "us", date_iso).get("execution_adapter", {})
-        if step7.get("status") != "skipped" or not str(step7.get("error") or "").startswith(
+        deferred = step7.get("status") == "skipped" and str(step7.get("error") or "").startswith(
             "deferred"
-        ):
+        )
+        if not deferred and step7.get("status") != "running":
             continue
         marker = config.state_dir / "watchdog" / f"us-{date_iso}.execution.notified"
         if marker.exists():
             continue
         notifier.notify(
             "TradingAgents pipeline",
-            f"us execution for {date_iso} has not run by {execution_time}+1h "
+            f"us execution for {date_iso} has not completed by {execution_time}+1h "
             f"({SESSION_TZ['us']})",
             dedup_key=("watchdog", ("us", date_iso), "missed-execution"),
         )
@@ -1537,7 +1556,7 @@ def _watch_deferred_execution(
             "watchdog",
             "missed-execution",
             "-",
-            f"step 7 still deferred at {execution_time}+1h",
+            f"step 7 still {step7.get('status')} at {execution_time}+1h",
         )
 
 
@@ -1633,7 +1652,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("error: --date requires --now", file=sys.stderr)
             return 2
         if args.now:
-            return execute_slot(config, args.date or session_date("us", _utc_now()))
+            return execute_slot(
+                config, args.date or session_date("us", _utc_now()), manual=True
+            )
         return run_execution_if_due(config)
     return run_watchdog(config)
 

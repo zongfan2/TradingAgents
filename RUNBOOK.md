@@ -146,8 +146,13 @@ On this host (`Asia/Shanghai`, which the Windows timezone must match —
   so an inline step 7 at ~07:00 skipped every order as `stale-quote`
   (specs/orchestrator.md "Deferred us execution"). If the slot is still
   running or never ran, execute skips and notifies; the watchdog alerts once
-  if step 7 is still deferred at 10:45. Manual run:
+  if step 7 is still deferred (or stuck `running`) at 10:45. Manual run:
   `.venv/bin/python -m pipeline.orchestrator execute --now [--date YYYY-MM-DD]`.
+  If an execute was killed (sleep, shutdown, `wsl --shutdown`), its lock
+  `~/.tradingagents/locks/us-<date>.lock` stays for up to 12 h and
+  `execute --now` exits 1 naming it: confirm no `pipeline.orchestrator
+  execute` process is alive, delete the lock, and run `execute --now` again
+  (S4 dedupe keeps the re-run from double-submitting).
 - watchdog: hourly on the hour.
 
 Run the installer from a login shell (`ssh dev`, or `bash -l`). A non-login
