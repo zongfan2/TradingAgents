@@ -181,10 +181,13 @@ TRADINGAGENTS_LARK_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/<tok
 TRADINGAGENTS_LARK_WEBHOOK_SECRET=<signing secret>
 ```
 
-Every job reads `.env` at start, so no re-install is needed. A Lark failure
-(bad token, `code 19021` sign mismatch, network) is logged as `lark notifier
-failed (...)` in `scheduler.<job>.err.log` and never affects the slot or the
-toast. If the bot uses keyword security instead, the keyword
+Write the values unquoted, with no trailing comment. Every job reads `.env`
+at start, so no re-install is needed. A Lark failure (bad token, `code 19021`
+sign mismatch, network) is logged as `lark notifier failed (...)` in
+`scheduler.<job>.err.log` and never affects the slot or the toast. A
+malformed value (quoted, commented, `http://`, a secret without a URL)
+disables only Lark: each job logs `Lark notifications disabled: …` and runs
+on with toasts. If the bot uses keyword security instead, the keyword
 `TradingAgents` matches every message (it is the first line).
 
 Inspect or remove the tasks with:

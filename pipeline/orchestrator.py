@@ -505,7 +505,11 @@ def notification_argv(platform: str, title: str, message: str) -> list[str]:
 
 #: ``(url, body, timeout) -> (http status, response body)``.
 HttpPost = Callable[[str, bytes, float], tuple[int, bytes]]
+#: Per-socket-operation timeout handed to the HTTP stack.
 LARK_TIMEOUT_S = 10.0
+#: Hard bound on the whole delivery (DNS included) as seen by the slot: the
+#: POST runs on a daemon thread that is abandoned past this.
+LARK_DEADLINE_S = 15.0
 
 
 class LarkError(RuntimeError):
@@ -541,11 +545,13 @@ class LarkWebhook:
         *,
         post: HttpPost | None = None,
         clock: Callable[[], float] | None = None,
+        deadline: float = LARK_DEADLINE_S,
     ) -> None:
         self._url = url
         self._secret = secret
         self._post = post or default_http_post
         self._clock = clock or time.time
+        self._deadline = deadline
 
     def __repr__(self) -> str:
         return f"LarkWebhook(signed={self._secret is not None})"
@@ -562,12 +568,25 @@ class LarkWebhook:
             timestamp = str(int(self._clock()))
             body["timestamp"] = timestamp
             body["sign"] = lark_sign(timestamp, self._secret)
-        try:
-            status, raw = self._post(
-                self._url, json.dumps(body, ensure_ascii=False).encode("utf-8"), LARK_TIMEOUT_S
-            )
-        except Exception as exc:
-            raise LarkError(self._scrub(f"{type(exc).__name__}: {exc}")) from None
+        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        outcome: dict[str, Any] = {}
+
+        def deliver() -> None:
+            try:
+                outcome["result"] = self._post(self._url, data, LARK_TIMEOUT_S)
+            except BaseException as exc:  # noqa: BLE001 - reported by type only
+                outcome["error"] = exc
+
+        worker = threading.Thread(target=deliver, name="lark-webhook", daemon=True)
+        worker.start()
+        worker.join(self._deadline)
+        if worker.is_alive():
+            raise LarkError(f"no response within {self._deadline:.0f}s")
+        if "error" in outcome:
+            # Type only: transport errors can quote parts of the
+            # token-bearing URL that no substring scrub can anticipate.
+            raise LarkError(type(outcome["error"]).__name__)
+        status, raw = outcome["result"]
         if status != 200:
             raise LarkError(f"HTTP {status}")
         try:

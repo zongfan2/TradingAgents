@@ -212,3 +212,78 @@ def test_orchestrator_and_watchdog_use_the_configured_notifier(tmp_path, monkeyp
     orchestrator.Orchestrator(config, "us")
     orchestrator.run_watchdog(config)
     assert built == [config, config]
+
+
+# ---------------------------------------------------------------------------
+# Review of 91a4f45: partial-URL leaks, bad settings, total deadline
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_transport_error_quoting_only_the_path_never_leaks_the_token(caplog):
+    import http.client
+
+    caplog.set_level(logging.WARNING, logger="pipeline.orchestrator")
+    leak = http.client.InvalidURL(
+        "URL can't contain control characters. "
+        f"{'/open-apis/bot/v2/hook/0000-secret-token '!r} (found at least ' ')"
+    )
+    n, _ = notifier(post=FakePost(exc=leak))
+    n.notify("t", "m")
+    assert "lark notifier failed (InvalidURL)" in caplog.text
+    assert "0000-secret-token" not in caplog.text
+
+
+@pytest.mark.unit
+def test_real_stack_rejects_a_spaced_url_without_echoing_it():
+    # The URL never reaches the network: http.client refuses it locally.
+    webhook = orchestrator.LarkWebhook(URL + " ")
+    with pytest.raises(orchestrator.LarkError) as excinfo:
+        webhook("t", "m")
+    assert "0000-secret-token" not in str(excinfo.value)
+
+
+@pytest.mark.unit
+def test_a_hanging_post_is_abandoned_at_the_deadline():
+    import threading
+    import time
+
+    release = threading.Event()
+
+    def hang(url, body, timeout):
+        release.wait(5)
+        return 200, b'{"code":0}'
+
+    started = time.monotonic()
+    with pytest.raises(orchestrator.LarkError, match="no response within"):
+        orchestrator.LarkWebhook(URL, post=hang, deadline=0.2)("t", "m")
+    assert time.monotonic() - started < 2
+    release.set()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"TRADINGAGENTS_LARK_WEBHOOK_URL": f'"{URL}"'},
+        {"TRADINGAGENTS_LARK_WEBHOOK_URL": f"{URL} # team bot"},
+        {"TRADINGAGENTS_LARK_WEBHOOK_URL": "http://open.feishu.cn/hook/0000-secret-token"},
+        {"TRADINGAGENTS_LARK_WEBHOOK_SECRET": SECRET},
+        {"TRADINGAGENTS_LARK_WEBHOOK_URL": URL, "TRADINGAGENTS_LARK_WEBHOOK_SECRET": "a b"},
+    ],
+)
+def test_bad_lark_env_disables_only_lark_and_never_echoes_it(env, caplog):
+    caplog.set_level(logging.WARNING, logger="pipeline.config")
+    config = load_config(env)  # must not raise: every job would die at startup
+    assert config.lark_webhook_url is None and config.lark_webhook_secret is None
+    assert "Lark notifications disabled" in caplog.text
+    assert "0000-secret-token" not in caplog.text and SECRET not in caplog.text
+
+
+@pytest.mark.unit
+def test_watchdog_still_runs_with_a_bad_lark_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRADINGAGENTS_SKIP_DOTENV", "1")
+    monkeypatch.setenv("TRADINGAGENTS_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("TRADINGAGENTS_NOTIFICATIONS_ENABLED", "false")
+    monkeypatch.setenv("TRADINGAGENTS_LARK_WEBHOOK_URL", f'"{URL}"')
+    assert orchestrator.main(["watchdog"]) == 0

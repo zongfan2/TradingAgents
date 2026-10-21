@@ -9,6 +9,7 @@ from the environment rather than through ``tradingagents.default_config``.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import sys
@@ -51,6 +52,29 @@ DEFAULT_CLAUDE_COLLECT_MODEL = "claude-sonnet-5-5"
 DEFAULT_CLAUDE_COLLECT_EFFORT = "medium"
 DEFAULT_CLAUDE_EVAL_MODEL = "claude-opus-5-5"
 DEFAULT_CLAUDE_EVAL_EFFORT = "medium"
+
+logger = logging.getLogger("pipeline.config")
+
+#: A usable webhook URL: https, and no whitespace, control characters or
+#: quotes anywhere (a quoted or commented ``.env`` value must not reach the
+#: HTTP stack, whose errors would echo the token-bearing path).
+_WEBHOOK_URL_RE = re.compile(r"https://[^\s\x00-\x1f\x7f\"'#]+")
+
+
+def lark_settings_error(url: str | None, secret: str | None) -> str | None:
+    """Why the Lark webhook settings are unusable, else ``None``. The reason
+    never echoes either value: both are credentials."""
+    if url is not None and not _WEBHOOK_URL_RE.fullmatch(url):
+        return (
+            "lark_webhook_url must be an unquoted https:// URL with no spaces, "
+            "comments or control characters"
+        )
+    if secret is not None and url is None:
+        return "lark_webhook_secret is set without lark_webhook_url"
+    if secret is not None and (not secret.isprintable() or any(c.isspace() for c in secret)):
+        return "lark_webhook_secret contains whitespace or control characters"
+    return None
+
 
 _SLOT_TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
@@ -155,11 +179,9 @@ class PipelineConfig:
         for session in ("cn", "us"):
             if session not in self.sessions:
                 raise ValueError(f"sessions config missing required session {session!r}")
-        if self.lark_webhook_url is not None and not self.lark_webhook_url.startswith("https://"):
-            # Never echo the value: it is a credential.
-            raise ValueError("lark_webhook_url must be an https:// webhook URL")
-        if self.lark_webhook_secret is not None and self.lark_webhook_url is None:
-            raise ValueError("lark_webhook_secret is set without lark_webhook_url")
+        lark_error = lark_settings_error(self.lark_webhook_url, self.lark_webhook_secret)
+        if lark_error is not None:
+            raise ValueError(lark_error)
         if self.sessions["cn"].execution_time is not None:
             raise ValueError("execution_time is us-only — the adapter never runs for cn")
 
@@ -181,6 +203,15 @@ def load_config(env: Mapping[str, str] | None = None) -> PipelineConfig:
     def path_or_none(key: str) -> Path | None:
         raw = env.get(key)
         return Path(raw).expanduser() if raw else None
+
+    # A broken Lark setting disables only that channel: it must never stop
+    # every scheduled job (the watchdog included) at config load.
+    lark_url = (env.get("TRADINGAGENTS_LARK_WEBHOOK_URL") or "").strip() or None
+    lark_secret = (env.get("TRADINGAGENTS_LARK_WEBHOOK_SECRET") or "").strip() or None
+    lark_error = lark_settings_error(lark_url, lark_secret)
+    if lark_error is not None:
+        logger.warning("Lark notifications disabled: %s", lark_error)
+        lark_url = lark_secret = None
 
     sessions = {
         session: SessionSchedule(
@@ -213,8 +244,8 @@ def load_config(env: Mapping[str, str] | None = None) -> PipelineConfig:
         sessions=sessions,
         component_timeouts=timeouts,
         notifications_enabled=_env_bool(env.get("TRADINGAGENTS_NOTIFICATIONS_ENABLED"), True),
-        lark_webhook_url=(env.get("TRADINGAGENTS_LARK_WEBHOOK_URL") or "").strip() or None,
-        lark_webhook_secret=(env.get("TRADINGAGENTS_LARK_WEBHOOK_SECRET") or "").strip() or None,
+        lark_webhook_url=lark_url,
+        lark_webhook_secret=lark_secret,
         pool_max_staleness_days=int(env.get("TRADINGAGENTS_POOL_MAX_STALENESS_DAYS") or 3),
         python_executable=Path(env.get("TRADINGAGENTS_PIPELINE_PYTHON") or sys.executable),
         collect_backend=backend("TRADINGAGENTS_COLLECT_BACKEND", DEFAULT_COLLECT_BACKEND),

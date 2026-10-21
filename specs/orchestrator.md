@@ -206,10 +206,17 @@ webui reads both.
   the desktop channel. With `TRADINGAGENTS_LARK_WEBHOOK_SECRET` (the bot's
   signature-verification secret) the body carries `timestamp` (unix seconds)
   and `sign` = base64(HMAC-SHA256(key=`"<timestamp>\n<secret>"`, msg=empty)).
-  10 s timeout; a non-200 response or a body `code`/`StatusCode` other than 0
-  is a failure. The URL and secret are credentials: they live only in
-  `.env`, never in logs, status files, exceptions surfaced in logs, or the
-  config repr. Unset ⇒ desktop only, as before.
+  10 s per socket operation and a hard 15 s bound on the whole delivery
+  (the POST runs on a daemon thread abandoned past it); a non-200 response
+  or a body `code`/`StatusCode` other than 0 is a failure. The URL and
+  secret are credentials: they live only in `.env`, never in logs, status
+  files, the config repr, or failure reasons — a transport exception is
+  reported by its type name only, since its text can quote part of the
+  token-bearing URL. The URL must be an unquoted `https://` URL with no
+  whitespace, `#` comment, quote or control character (a secret: no
+  whitespace or control characters); an unusable setting, or a secret
+  without a URL, **disables only the Lark channel** with a config-load
+  warning — it never stops a job. Unset ⇒ desktop only, as before.
 - Dedup: at most one notification per (component, slot, reason) across all
   channels; the watchdog fires at most once per session/day.
 - A notifier failure (missing `osascript`/PowerShell, non-zero exit, a Lark
