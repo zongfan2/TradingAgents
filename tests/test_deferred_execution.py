@@ -637,6 +637,8 @@ def test_lock_held_between_refinish_and_release_is_not_a_false_alert(tmp_path):
 # Close re-submission moves to the execute job (refresh before submit)
 # ---------------------------------------------------------------------------
 
+import subprocess  # noqa: E402
+
 from pipeline import settle  # noqa: E402
 from tests.test_orchestrator import refresh_summary  # noqa: E402
 
@@ -673,19 +675,24 @@ def test_execute_runs_a_full_refresh_before_submit(tmp_path):
     [
         (orchestrator.RunResult(0, stdout=refresh_summary(
             alerts=[{"kind": "close-unfilled", "ticker": "NVDA"}]) + "\n"),
-         "warn", "1 alert(s) (close-unfilled)"),
+         "warn", "1 alert(s) (close-unfilled: NVDA)"),
         (orchestrator.RunResult(0, stdout=refresh_summary(rejected=1) + "\n"), "warn", "1 rejected"),
         (orchestrator.RunResult(0, stdout="no summary\n"), "warn", "no parseable JSON"),
         (orchestrator.RunResult(1, stderr="S1 refused\n"), "failed", "S1 refused"),
+        (subprocess.TimeoutExpired(["refresh"], 900), "timeout", "timeout after"),
     ],
 )
 def test_refresh_problems_never_block_submit(tmp_path, behavior, status, fragment):
     config = deferred_config(tmp_path)
     finished_slot(config)
     runner = FakeRunner({"execution_refresh": behavior})
-    rc = make_orch(config, runner).run_execution()
+    notifier, sent = recording_notifier()
+    rc = make_orch(config, runner, notifier).run_execution()
+    # The reason reaches the operator in the execution summary.
+    summary = [text for text in joined(sent) if "execution us 2026-01-05" in text]
+    assert len(summary) == 1 and fragment in summary[0]
     assert names(runner) == EXECUTE_CALLS  # submit still runs
     record = read_status(config, "us")["components"]["execution_refresh"]
     assert record["status"] == status and fragment in record["error"]
-    assert rc == (1 if status == "failed" else 0)
+    assert rc == (1 if status in ("failed", "timeout") else 0)
     assert read_status(config, "us")["slot"]["finished_at"] is not None

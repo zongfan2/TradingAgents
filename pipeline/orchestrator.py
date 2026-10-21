@@ -1140,7 +1140,8 @@ class Orchestrator:
             self._run_component(refresh)
             self._run_component(component)
             snapshot = self.status.components_snapshot()
-            refresh_status = snapshot.get(refresh.name, {}).get("status", "failed")
+            refresh_record = snapshot.get(refresh.name, {})
+            refresh_status = refresh_record.get("status", "failed")
             record = snapshot.get(component.name, {})
             status = record.get("status", "failed")
             message = f"execution {self.session} {self.slot_date.isoformat()}: {status}"
@@ -1151,6 +1152,10 @@ class Orchestrator:
                 )
             else:
                 message += f"; refresh {refresh_status}"
+            if refresh_record.get("error"):
+                # A warn sends no notification of its own: the reason (e.g. a
+                # close still unfilled after its one retry) must ride here.
+                message += f" ({refresh_record['error']})"
             if self._execution_counts is not None:
                 counts = self._execution_counts
                 message += (
@@ -1462,13 +1467,23 @@ def _execution_refresh_outcome(result: RunResult) -> tuple[str, str | None]:
         return "warn", "exited 0 but stdout has no parseable JSON summary line"
     alerts = summary.get("alerts") if isinstance(summary.get("alerts"), list) else []
     if counts["errors"] or counts["rejected"] or counts["canceled"] or alerts:
-        kinds = sorted({str(a.get("kind")) for a in alerts if isinstance(a, dict)})
+        # Name each alert (kind: ticker) — this text is what reaches the
+        # operator's execution summary notification.
+        named = sorted(
+            {
+                f"{a.get('kind')}: {a.get('ticker')}" if a.get("ticker") else str(a.get("kind"))
+                for a in alerts
+                if isinstance(a, dict)
+            }
+        )
         return (
             "warn",
-            f"{counts['errors']} broker error(s), {counts['rejected']} rejected, "
-            f"{counts['canceled']} canceled, {len(alerts)} alert(s)"
-            + (f" ({', '.join(kinds)})" if kinds else "")
-            + f" — {counts['close_resubmitted']} close(s) re-submitted",
+            (
+                f"{counts['errors']} broker error(s), {counts['rejected']} rejected, "
+                f"{counts['canceled']} canceled, {len(alerts)} alert(s)"
+                + (f" ({', '.join(named)})" if named else "")
+                + f" — {counts['close_resubmitted']} close(s) re-submitted"
+            )[:300],
         )
     return "ok", None
 
