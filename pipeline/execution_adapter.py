@@ -1437,11 +1437,18 @@ def run_refresh(
     broker: AlpacaBroker,
     today: date | None = None,
     clock: Clock = _utc_now,
+    close_resubmit: bool = True,
 ) -> dict:
     """The ``refresh`` entrypoint (R3): refresh rows for every non-terminal
     order, stale-entry cancels, once-only close re-submission, and the
     ``positions.json`` atomic rewrite from live broker state. Never submits
-    new entries."""
+    new entries.
+
+    ``close_resubmit=False`` (``--no-close-resubmit``) skips hygiene 2
+    entirely — no rows, no alerts: settle's pre-market refresh uses it when
+    the deferred us execution job owns re-submission, because no quote is
+    fresh enough before the open (specs/orchestrator.md "Deferred us
+    execution")."""
     account = broker.get_account()  # S1 — both entrypoints
     _require_paper(account)
     if today is None:
@@ -1608,7 +1615,7 @@ def run_refresh(
              "client_order_id": orig_cid, "reason": reason}
         )
 
-    for base in sorted(groups):
+    for base in sorted(groups) if close_resubmit else ():
         attempts = groups[base]
         attempt = max(attempts)
         cid = attempts[attempt]
@@ -1781,6 +1788,7 @@ def run_refresh(
         "entrypoint": "refresh",
         "date": date_iso,
         "session": "us",
+        "close_resubmit": close_resubmit,
         **counters,
         "alerts": alerts,
     }
@@ -1852,6 +1860,13 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="YYYY-MM-DD",
         help="reference trading date (default: today in the us session timezone)",
     )
+    refresh.add_argument(
+        "--no-close-resubmit",
+        dest="close_resubmit",
+        action="store_false",
+        help="skip the once-only close re-submission (settle's pre-market "
+        "refresh when the deferred execution job owns it)",
+    )
     return parser
 
 
@@ -1894,6 +1909,7 @@ def main(
                 broker=broker,
                 today=args.date or session_date("us"),
                 clock=clock,
+                close_resubmit=args.close_resubmit,
             )
     except KeyboardInterrupt:
         print("execution-adapter: interrupted", file=sys.stderr)

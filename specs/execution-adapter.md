@@ -128,7 +128,12 @@ included — constructs a broker client.
   (stale entry cancels, close re-submission), rewrites the `positions.json`
   snapshot from live broker state (ledger contract), and never submits new
   entries. The broker is the source of truth for positions and order states;
-  the ledger mirrors it, never the reverse.
+  the ledger mirrors it, never the reverse. `refresh --no-close-resubmit`
+  skips the close re-submission duty entirely (no rows, no alerts; the
+  once-only retry stays unspent; summary `close_resubmit: false`) — settle's
+  pre-market refresh uses it when the deferred execute job, which runs a full
+  refresh after the open, owns re-submission (orchestrator spec "Deferred us
+  execution").
 - **R4**: any broker API error on one order logs and continues to the next
   (never aborts the slot); summary line to stdout for the orchestrator.
 - **R5**: `--dry-run` flag forces S2 behavior regardless of config.

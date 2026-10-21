@@ -836,6 +836,8 @@ class Orchestrator:
         self._execution_counts: dict[str, int] | None = None
         #: Set by run_slot: step 7 is left to the ``execute`` job.
         self._defer_execution = False
+        #: The execute job's pre-submit refresh counts (run_execution only).
+        self._refresh_counts: dict[str, int] | None = None
 
     @property
     def execution_time(self) -> str | None:
@@ -985,6 +987,9 @@ class Orchestrator:
             elif name == "execution_adapter":
                 status, error = _execution_adapter_outcome(result)
                 self._execution_counts = _execution_summary_counts(result)
+            elif name == "execution_refresh":
+                status, error = _execution_refresh_outcome(result)
+                self._refresh_counts = _refresh_summary_counts(result)
             else:
                 status = "ok"
         finished = self.clock()
@@ -1108,25 +1113,44 @@ class Orchestrator:
     def run_execution(self) -> int:
         """Run step 7 inside the day's already-finished us slot.
 
+        First a full ``execution_adapter refresh`` (recorded as component
+        ``execution_refresh``): with fresh post-open quotes it owns the
+        once-only close re-submission that settle's pre-market refresh skips.
+        Its failure never blocks step 7 (submit reads live broker state).
+
         Raises :class:`SlotLockHeld` when the slot (or another ``execute``)
         holds the lock. Returns 1 when the slot has not finished (nothing is
-        run and the status file is untouched) or step 7 failed/timed out.
+        run and the status file is untouched) or either step failed/timed out.
         """
         if self.session != "us":
             raise ValueError("execute is us-only — the adapter never runs for cn")
         component = next((c for c in self.registry if c.name == "execution_adapter"), None)
         if component is None:
             raise ValueError("registry has no execution_adapter component")
+        refresh = next(
+            (c for c in self.registry if c.name == "execution_refresh"),
+            execution_refresh_component(self.config),
+        )
         self._defer_execution = False
         lock = acquire_slot_lock(self.config, self.session, self.slot_date)
         try:
             if not self.status.reopen_finished_slot(self.session, self.slot_date):
                 self._report_unfinished_slot()
                 return 1
+            self._run_component(refresh)
             self._run_component(component)
-            record = self.status.components_snapshot().get(component.name, {})
+            snapshot = self.status.components_snapshot()
+            refresh_status = snapshot.get(refresh.name, {}).get("status", "failed")
+            record = snapshot.get(component.name, {})
             status = record.get("status", "failed")
             message = f"execution {self.session} {self.slot_date.isoformat()}: {status}"
+            if self._refresh_counts is not None:
+                message += (
+                    f"; refresh {refresh_status}, closes re-submitted "
+                    f"{self._refresh_counts['close_resubmitted']}"
+                )
+            else:
+                message += f"; refresh {refresh_status}"
             if self._execution_counts is not None:
                 counts = self._execution_counts
                 message += (
@@ -1143,7 +1167,8 @@ class Orchestrator:
                 message,
                 dedup_key=("summary", (self.session, self.slot_date.isoformat()), "execution"),
             )
-            return 1 if status in ("failed", "timeout") else 0
+            failed = {"failed", "timeout"}
+            return 1 if status in failed or refresh_status in failed else 0
         finally:
             release_slot_lock(lock)
 
@@ -1397,6 +1422,72 @@ def _execution_summary_counts(result: RunResult) -> dict[str, int] | None:
         return value if isinstance(value, int) else 0
 
     return {key: count(key) for key in _EXECUTION_SUMMARY_KEYS}
+
+
+_REFRESH_SUMMARY_KEYS = (
+    "refreshed", "canceled_stale", "close_resubmitted", "rejected", "canceled", "skipped", "errors",
+)
+
+
+def _refresh_summary(result: RunResult) -> dict | None:
+    line = _last_nonempty_line(result.stdout)
+    try:
+        summary = json.loads(line) if line else None
+    except json.JSONDecodeError:
+        return None
+    return summary if isinstance(summary, dict) else None
+
+
+def _refresh_summary_counts(result: RunResult) -> dict[str, int] | None:
+    summary = _refresh_summary(result)
+    if summary is None:
+        return None
+    return {
+        key: summary[key] if isinstance(summary.get(key), int) else 0
+        for key in _REFRESH_SUMMARY_KEYS
+    }
+
+
+def _execution_refresh_outcome(result: RunResult) -> tuple[str, str | None]:
+    """Map the execute job's ``refresh`` exit 0 to component status.
+
+    Broker errors, rejected/canceled orders and adapter alerts (e.g. a close
+    still unfilled after its one re-submission) are ``warn`` with the counts
+    surfaced — the step worked, the broker state needs a look. No parseable
+    summary is a reporting gap: ``warn``, never a silent ``ok``.
+    """
+    summary = _refresh_summary(result)
+    counts = _refresh_summary_counts(result)
+    if summary is None or counts is None:
+        return "warn", "exited 0 but stdout has no parseable JSON summary line"
+    alerts = summary.get("alerts") if isinstance(summary.get("alerts"), list) else []
+    if counts["errors"] or counts["rejected"] or counts["canceled"] or alerts:
+        kinds = sorted({str(a.get("kind")) for a in alerts if isinstance(a, dict)})
+        return (
+            "warn",
+            f"{counts['errors']} broker error(s), {counts['rejected']} rejected, "
+            f"{counts['canceled']} canceled, {len(alerts)} alert(s)"
+            + (f" ({', '.join(kinds)})" if kinds else "")
+            + f" — {counts['close_resubmitted']} close(s) re-submitted",
+        )
+    return "ok", None
+
+
+def execution_refresh_component(config: PipelineConfig) -> Component:
+    """The execute job's pre-submit ``execution_adapter refresh`` (full —
+    close re-submission included). Not a slot step: run_execution only."""
+
+    def argv(ctx: SlotContext) -> list[str]:
+        return [
+            str(config.python_executable),
+            "-m",
+            "pipeline.execution_adapter",
+            "refresh",
+            "--date",
+            ctx.slot_date.isoformat(),
+        ]
+
+    return Component(7, "execution_refresh", argv)
 
 
 def _execution_adapter_outcome(result: RunResult) -> tuple[str, str | None]:

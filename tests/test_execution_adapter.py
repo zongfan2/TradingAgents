@@ -1511,6 +1511,58 @@ def test_refresh_resubmits_unfilled_close_exactly_once_under_close_2(tmp_path):
     assert summary["close_resubmitted"] == 1
 
 
+def expired_close_book(tmp_path):
+    config = make_config(tmp_path)
+    close_1 = "2026-08-06-us-NVDA-close-1"
+    append_order_row(
+        config, client_order_id=close_1, order_kind="close", tif="day", qty=50,
+        limit_price=95.0, stop_price=None, target_price=None,
+        run_id="2026-08-06-us-NVDA-brief-1", written_at="2026-08-06T13:30:00Z",
+    )
+    broker = FakeBroker(
+        broker_orders={
+            close_1: broker_order(close_1, side="sell", qty=50, limit=95.0,
+                                  status="expired", tif="day")
+        },
+        positions=[position(qty=50, avg=90.0)],
+    )
+    return config, broker
+
+
+@pytest.mark.unit
+def test_refresh_without_close_resubmit_leaves_the_retry_for_later(tmp_path):
+    """Settle's pre-market refresh when the execute job owns re-submission:
+    no submit, no skip row, no alert — the once-only retry stays unspent,
+    while the other refresh duties still run."""
+    config, broker = expired_close_book(tmp_path)
+    before = len(read_orders(config))
+    summary = ea.run_refresh(
+        config=config, settings=live_settings(), broker=broker, today=SLOT, clock=clock,
+        close_resubmit=False,
+    )
+    assert broker.submitted == []
+    assert summary["close_resubmit"] is False
+    assert summary["close_resubmitted"] == 0 and summary["skipped"] == 0
+    assert summary["alerts"] == []
+    new_rows = read_orders(config)[before:]
+    assert [r["kind"] for r in new_rows] == ["refresh"]  # status refresh still ran
+    assert (config.ledger_dir / "positions.json").exists()
+    # The later full refresh (the execute job) still gets the one retry.
+    summary = refresh(config, broker, settings=live_settings())
+    assert [spec.client_order_id for spec in broker.submitted] == ["2026-08-06-us-NVDA-close-2"]
+    assert summary["close_resubmit"] is True and summary["close_resubmitted"] == 1
+
+
+@pytest.mark.unit
+def test_cli_no_close_resubmit_flag_reaches_refresh(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("TRADINGAGENTS_STATE_DIR", str(tmp_path / "state"))
+    broker = FakeBroker()
+    assert ea.main(["refresh", "--date", DATE_ISO, "--no-close-resubmit"],
+                   broker_factory=lambda: broker) == 0
+    summary = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert summary["close_resubmit"] is False
+
+
 @pytest.mark.unit
 def test_refresh_escalates_after_second_unfilled_close_attempt(tmp_path):
     config = make_config(tmp_path)

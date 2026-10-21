@@ -119,9 +119,18 @@ The guard is correct and stays at 15 min; execution moves instead.
   Windows task `pipeline.us-execution`, logs `scheduler.us-execution.*`)
   running `orchestrator execute`, fire times enumerated exactly like a slot's;
   the Windows task's time limit is the adapter timeout plus 1 h.
-- Out of scope: settle's `execution_adapter refresh` (close re-submissions)
-  still runs at slot time and so is subject to the same pre-market
-  `stale-quote` skip; with no open positions this has no effect yet.
+- **Close re-submission moves with it (2026-10-21)**: with `execution_time`
+  set, settle's `execution_adapter refresh` (step 0, both sessions — all
+  outside US hours) passes `--no-close-resubmit`, so it never spends a
+  pre-market `stale-quote` skip row or alert on an expired close. Instead
+  `execute` first runs a full `execution_adapter refresh --date <slot date>`
+  (status component `execution_refresh`, same 900 s default timeout), which
+  re-submits closes with post-open quotes, then step 7. A refresh `failed`
+  never blocks step 7 (submit reads live broker state); broker errors,
+  rejected/canceled orders or adapter alerts (e.g. `close-unfilled`) map to
+  `warn` with the counts; no parseable summary is `warn`. The execution
+  summary notification reports the refresh status and closes re-submitted;
+  `execute` exits 1 if either step failed or timed out.
 
 ## Slot sequence
 
@@ -297,6 +306,8 @@ summary is assembled in planned-job order.
    single history entry, and on an unfinished slot or a held lock never
    calls the adapter or writes the status file; a killed execute is alerted
    by the watchdog and recovered by `execute --now` once its lock is gone.
+   `execute` runs a full refresh before submit (whose failure never blocks
+   submit) while settle's refresh then skips close re-submission.
    Unset ⇒ unchanged inline
    behavior and no extra scheduler job.
 7. Lark webhook (tests/test_lark_notify.py, fully offline — injected POST,

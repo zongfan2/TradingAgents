@@ -25,6 +25,8 @@ from tests.test_orchestrator import (
 EXEC_TIME = "09:45"
 IN_WINDOW = datetime(2026, 1, 5, 14, 45, tzinfo=timezone.utc)  # 09:45 New York
 DEFERRED = "deferred to the execution task (09:45 America/New_York)"
+#: What one execute run invokes: the full refresh, then step 7 submit.
+EXECUTE_CALLS = ["execution_refresh", "execution_adapter"]
 
 
 def deferred_config(tmp_path, execution_time=EXEC_TIME):
@@ -156,7 +158,7 @@ def test_execute_runs_step7_in_the_finished_slot_with_one_history_entry(tmp_path
     )
     notifier, sent = recording_notifier()
     assert make_orch(config, runner, notifier).run_execution() == 0
-    assert names(runner) == ["execution_adapter"]
+    assert names(runner) == EXECUTE_CALLS
 
     status = read_status(config, "us")
     assert status["slot"]["started_at"] == before["slot"]["started_at"]
@@ -170,7 +172,8 @@ def test_execute_runs_step7_in_the_finished_slot_with_one_history_entry(tmp_path
     assert len(status["history"]) == len(before["history"]) == 1
     assert status["history"][-1]["components"]["execution_adapter"]["status"] == "ok"
     assert any(
-        "execution us 2026-01-05: ok; orders 1 live/0 dry-run, 2 skipped" in text
+        "execution us 2026-01-05: ok; refresh ok, closes re-submitted 0; "
+        "orders 1 live/0 dry-run, 2 skipped" in text
         for text in joined(sent)
     )
     # The lock is released for a later manual run.
@@ -302,7 +305,7 @@ def test_execute_window_is_evaluated_in_new_york(tmp_path, now, runs):
     finished_slot(config)
     runner = FakeRunner()
     assert run_if_due(config, now, runner) == 0
-    assert (names(runner) == ["execution_adapter"]) is runs
+    assert (names(runner) == EXECUTE_CALLS) is runs
 
 
 @pytest.mark.unit
@@ -486,7 +489,7 @@ def test_execute_recovers_a_killed_execution_once_the_lock_is_gone(tmp_path):
     orchestrator.release_slot_lock(lock)
     runner = FakeRunner()
     assert make_orch(config, runner).run_execution() == 0
-    assert names(runner) == ["execution_adapter"]
+    assert names(runner) == EXECUTE_CALLS
     status = read_status(config, "us")
     assert status["components"]["execution_adapter"]["status"] == "ok"
     assert status["slot"]["finished_at"] is not None
@@ -533,7 +536,7 @@ def test_killed_after_step7_failed_but_before_refinish_is_alerted_and_recoverabl
 
     runner = FakeRunner()
     assert make_orch(config, runner).run_execution() == 0
-    assert names(runner) == ["execution_adapter"]
+    assert names(runner) == EXECUTE_CALLS
     status = read_status(config, "us")
     assert status["slot"]["finished_at"] is not None
     assert orchestrator.REOPENED_KEY not in status["slot"]
@@ -550,7 +553,7 @@ def test_killed_right_after_reopen_is_recoverable(tmp_path):
     assert status.reopen_finished_slot("us", SLOT_DATE)  # then the process died
     runner = FakeRunner()
     assert make_orch(config, runner).run_execution() == 0
-    assert names(runner) == ["execution_adapter"]
+    assert names(runner) == EXECUTE_CALLS
     assert len(read_status(config, "us")["history"]) == 1
 
 
@@ -628,3 +631,61 @@ def test_lock_held_between_refinish_and_release_is_not_a_false_alert(tmp_path):
         assert sent == []
     finally:
         orchestrator.release_slot_lock(lock)
+
+
+# ---------------------------------------------------------------------------
+# Close re-submission moves to the execute job (refresh before submit)
+# ---------------------------------------------------------------------------
+
+from pipeline import settle  # noqa: E402
+from tests.test_orchestrator import refresh_summary  # noqa: E402
+
+
+@pytest.mark.unit
+def test_settle_refresh_skips_close_resubmit_only_when_execution_is_deferred(tmp_path):
+    assert settle.refresh_argv(deferred_config(tmp_path))[-1] == "--no-close-resubmit"
+    assert settle.refresh_argv(deferred_config(tmp_path, execution_time=None))[-1] == "refresh"
+
+
+@pytest.mark.unit
+def test_execute_runs_a_full_refresh_before_submit(tmp_path):
+    config = deferred_config(tmp_path)
+    finished_slot(config)
+    runner = FakeRunner(
+        {"execution_refresh": orchestrator.RunResult(0, stdout=refresh_summary(
+            close_resubmitted=1) + "\n")}
+    )
+    notifier, sent = recording_notifier()
+    assert make_orch(config, runner, notifier).run_execution() == 0
+    assert names(runner) == EXECUTE_CALLS
+    argv = runner.calls[0][1]
+    assert argv[1:] == ["-m", "pipeline.execution_adapter", "refresh", "--date", "2026-01-05"]
+    assert "--no-close-resubmit" not in argv
+    status = read_status(config, "us")
+    assert status["components"]["execution_refresh"]["status"] == "ok"
+    assert status["history"][-1]["components"]["execution_refresh"]["status"] == "ok"
+    assert any("refresh ok, closes re-submitted 1" in text for text in joined(sent))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("behavior", "status", "fragment"),
+    [
+        (orchestrator.RunResult(0, stdout=refresh_summary(
+            alerts=[{"kind": "close-unfilled", "ticker": "NVDA"}]) + "\n"),
+         "warn", "1 alert(s) (close-unfilled)"),
+        (orchestrator.RunResult(0, stdout=refresh_summary(rejected=1) + "\n"), "warn", "1 rejected"),
+        (orchestrator.RunResult(0, stdout="no summary\n"), "warn", "no parseable JSON"),
+        (orchestrator.RunResult(1, stderr="S1 refused\n"), "failed", "S1 refused"),
+    ],
+)
+def test_refresh_problems_never_block_submit(tmp_path, behavior, status, fragment):
+    config = deferred_config(tmp_path)
+    finished_slot(config)
+    runner = FakeRunner({"execution_refresh": behavior})
+    rc = make_orch(config, runner).run_execution()
+    assert names(runner) == EXECUTE_CALLS  # submit still runs
+    record = read_status(config, "us")["components"]["execution_refresh"]
+    assert record["status"] == status and fragment in record["error"]
+    assert rc == (1 if status == "failed" else 0)
+    assert read_status(config, "us")["slot"]["finished_at"] is not None

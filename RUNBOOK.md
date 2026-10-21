@@ -141,8 +141,10 @@ On this host (`Asia/Shanghai`, which the Windows timezone must match —
 - `us-execution`: `.env` sets `TRADINGAGENTS_EXECUTION_TIME_US=09:45` (New
   York), so **21:45 and 22:45**. The 05:30 us slot records step 7 as
   `skipped — deferred to the execution task`; this task runs
-  `orchestrator execute`, which submits in the finished slot once IEX quotes
-  are fresh. Alpaca's default IEX feed has no quotes before ~09:20 New York,
+  `orchestrator execute`, which first runs a full `execution_adapter
+  refresh` (re-submitting yesterday's unfilled closes with fresh quotes —
+  settle's pre-market refresh skips that duty) and then submits in the
+  finished slot once IEX quotes are fresh. Alpaca's default IEX feed has no quotes before ~09:20 New York,
   so an inline step 7 at ~07:00 skipped every order as `stale-quote`
   (specs/orchestrator.md "Deferred us execution"). If the slot is still
   running or never ran, execute skips and notifies; the watchdog alerts once

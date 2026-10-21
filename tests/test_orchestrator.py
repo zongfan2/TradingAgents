@@ -99,6 +99,8 @@ class FakeRunner:
             module = argv[argv.index("-m") + 1]
             if module == "pipeline.evaluator" and "--batch-tickers" in argv:
                 return "ticker_evaluators"  # step 5 shares the module with step 2
+            if module == "pipeline.execution_adapter" and "refresh" in argv:
+                return "execution_refresh"  # the execute job's pre-submit refresh
             return {
                 "pipeline.settle": "settle",
                 "pipeline.macro_collector": "macro_collector",
@@ -129,6 +131,8 @@ class FakeRunner:
                 if name == "execution_adapter":
                     # Step 7 is real: same summary-line default again.
                     return orchestrator.RunResult(0, stdout=execution_summary() + "\n")
+                if name == "execution_refresh":
+                    return orchestrator.RunResult(0, stdout=refresh_summary() + "\n")
                 if name == "ticker_evaluators":
                     # Step 5 is real: same summary-line default again.
                     return orchestrator.RunResult(0, stdout=batch_eval_summary() + "\n")
@@ -1252,6 +1256,26 @@ def settle_summary(settled=0, skipped=0, refresh_ok=True, refresh_error=None, se
             "skipped": skipped,
             "refresh_ok": refresh_ok,
             "refresh_error": refresh_error,
+        }
+    )
+
+
+def refresh_summary(close_resubmitted=0, errors=0, rejected=0, canceled=0, alerts=()):
+    """An execution-adapter refresh stdout JSON summary line (adapter R3)."""
+    return json.dumps(
+        {
+            "entrypoint": "refresh",
+            "date": SLOT_DATE.isoformat(),
+            "session": "us",
+            "close_resubmit": True,
+            "refreshed": 0,
+            "canceled_stale": 0,
+            "close_resubmitted": close_resubmitted,
+            "rejected": rejected,
+            "canceled": canceled,
+            "skipped": 0,
+            "errors": errors,
+            "alerts": list(alerts),
         }
     )
 

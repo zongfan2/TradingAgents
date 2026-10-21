@@ -599,7 +599,12 @@ RefreshRunner = Callable[[Sequence[str], float], "tuple[int, str, str]"]
 
 
 def refresh_argv(config: PipelineConfig) -> list[str]:
-    return [str(config.python_executable), "-m", "pipeline.execution_adapter", "refresh"]
+    argv = [str(config.python_executable), "-m", "pipeline.execution_adapter", "refresh"]
+    if config.sessions["us"].execution_time is not None:
+        # Pre-market no quote passes S8; the deferred execute job re-submits
+        # closes after the open (specs/orchestrator.md "Deferred us execution").
+        argv.append("--no-close-resubmit")
+    return argv
 
 
 def default_refresh_runner(argv: Sequence[str], timeout: float) -> tuple[int, str, str]:
