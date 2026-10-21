@@ -299,3 +299,13 @@ summary is assembled in planned-job order.
    by the watchdog and recovered by `execute --now` once its lock is gone.
    Unset ⇒ unchanged inline
    behavior and no extra scheduler job.
+7. Lark webhook (tests/test_lark_notify.py, fully offline — injected POST,
+   socket guard on the real-stack cases): the `text` body and the
+   signature match the documented HMAC; HTTP 4xx/5xx report `HTTP <code>`
+   and a non-zero `code`/`StatusCode` reports `code <n>`; a POST past the
+   hard deadline is abandoned; desktop and Lark fail independently and
+   dedup spans both; `notifications_enabled=false` sends nothing; the URL
+   and secret never appear in logs, `LarkError` texts or reprs (transport
+   errors by type only, incl. an `InvalidURL` that quotes the path); an
+   unusable Lark env disables only Lark and the watchdog still runs; unset
+   ⇒ desktop only.
