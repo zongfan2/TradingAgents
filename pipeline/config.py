@@ -108,6 +108,10 @@ class PipelineConfig:
         default_factory=lambda: dict(DEFAULT_COMPONENT_TIMEOUTS)
     )
     notifications_enabled: bool = True
+    #: Lark/Feishu custom-bot webhook (+ optional signing secret) — a second
+    #: notification channel. Credentials: kept out of the repr.
+    lark_webhook_url: str | None = field(default=None, repr=False)
+    lark_webhook_secret: str | None = field(default=None, repr=False)
     pool_max_staleness_days: int = 3
     python_executable: Path = field(default_factory=lambda: Path(sys.executable))
     #: D19/D20 backend roles: deep-search collection vs evaluation. Validated
@@ -151,6 +155,11 @@ class PipelineConfig:
         for session in ("cn", "us"):
             if session not in self.sessions:
                 raise ValueError(f"sessions config missing required session {session!r}")
+        if self.lark_webhook_url is not None and not self.lark_webhook_url.startswith("https://"):
+            # Never echo the value: it is a credential.
+            raise ValueError("lark_webhook_url must be an https:// webhook URL")
+        if self.lark_webhook_secret is not None and self.lark_webhook_url is None:
+            raise ValueError("lark_webhook_secret is set without lark_webhook_url")
         if self.sessions["cn"].execution_time is not None:
             raise ValueError("execution_time is us-only — the adapter never runs for cn")
 
@@ -204,6 +213,8 @@ def load_config(env: Mapping[str, str] | None = None) -> PipelineConfig:
         sessions=sessions,
         component_timeouts=timeouts,
         notifications_enabled=_env_bool(env.get("TRADINGAGENTS_NOTIFICATIONS_ENABLED"), True),
+        lark_webhook_url=(env.get("TRADINGAGENTS_LARK_WEBHOOK_URL") or "").strip() or None,
+        lark_webhook_secret=(env.get("TRADINGAGENTS_LARK_WEBHOOK_SECRET") or "").strip() or None,
         pool_max_staleness_days=int(env.get("TRADINGAGENTS_POOL_MAX_STALENESS_DAYS") or 3),
         python_executable=Path(env.get("TRADINGAGENTS_PIPELINE_PYTHON") or sys.executable),
         collect_backend=backend("TRADINGAGENTS_COLLECT_BACKEND", DEFAULT_COLLECT_BACKEND),

@@ -32,6 +32,8 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -40,6 +42,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -500,12 +503,91 @@ def notification_argv(platform: str, title: str, message: str) -> list[str]:
     raise ValueError(f"unknown notification platform {platform!r}")
 
 
+#: ``(url, body, timeout) -> (http status, response body)``.
+HttpPost = Callable[[str, bytes, float], tuple[int, bytes]]
+LARK_TIMEOUT_S = 10.0
+
+
+class LarkError(RuntimeError):
+    """A Lark webhook delivery failure; its text never contains the URL."""
+
+
+def default_http_post(url: str, body: bytes, timeout: float) -> tuple[int, bytes]:
+    request = urllib.request.Request(
+        url, data=body, headers={"Content-Type": "application/json"}, method="POST"
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - https enforced by config
+        return response.status, response.read()
+
+
+def lark_sign(timestamp: str, secret: str) -> str:
+    """Lark/Feishu custom-bot signature: HMAC-SHA256 keyed by
+    ``"<timestamp>\\n<secret>"`` over an empty message, base64-encoded."""
+    key = f"{timestamp}\n{secret}".encode()
+    return base64.b64encode(hmac.new(key, b"", hashlib.sha256).digest()).decode("ascii")
+
+
+class LarkWebhook:
+    """Second notification channel: a Lark/Feishu custom-bot ``text`` message.
+
+    ``__call__`` raises :class:`LarkError` on any failure. The URL is a
+    credential, so it is scrubbed from every error text.
+    """
+
+    def __init__(
+        self,
+        url: str,
+        secret: str | None = None,
+        *,
+        post: HttpPost | None = None,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
+        self._url = url
+        self._secret = secret
+        self._post = post or default_http_post
+        self._clock = clock or time.time
+
+    def __repr__(self) -> str:
+        return f"LarkWebhook(signed={self._secret is not None})"
+
+    def _scrub(self, text: str) -> str:
+        for credential in (self._url, self._secret):
+            if credential:
+                text = text.replace(credential, "<redacted>")
+        return text
+
+    def __call__(self, title: str, message: str) -> None:
+        body: dict[str, Any] = {"msg_type": "text", "content": {"text": f"{title}\n{message}"}}
+        if self._secret:
+            timestamp = str(int(self._clock()))
+            body["timestamp"] = timestamp
+            body["sign"] = lark_sign(timestamp, self._secret)
+        try:
+            status, raw = self._post(
+                self._url, json.dumps(body, ensure_ascii=False).encode("utf-8"), LARK_TIMEOUT_S
+            )
+        except Exception as exc:
+            raise LarkError(self._scrub(f"{type(exc).__name__}: {exc}")) from None
+        if status != 200:
+            raise LarkError(f"HTTP {status}")
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise LarkError("response is not JSON") from None
+        code = payload.get("code", payload.get("StatusCode")) if isinstance(payload, dict) else None
+        if code != 0:
+            detail = payload.get("msg") or payload.get("StatusMessage") if isinstance(payload, dict) else None
+            raise LarkError(self._scrub(f"code {code}: {detail}"))
+
+
 class Notifier:
     """Desktop notification — macOS ``display notification`` or, under WSL, a
-    Windows toast — with per-(component, slot, reason) dedup.
+    Windows toast — plus the optional Lark webhook, with per-(component,
+    slot, reason) dedup across both channels.
 
-    A notifier failure degrades to log-only — notifications can never fail a
-    slot. ``enabled=False`` (config ``notifications_enabled``) is log-only too.
+    A channel failure degrades that channel to log-only; the other channel is
+    still tried, and notifications can never fail a slot. ``enabled=False``
+    (config ``notifications_enabled``) is log-only for every channel.
     """
 
     def __init__(
@@ -513,12 +595,16 @@ class Notifier:
         enabled: bool = True,
         runner: OsascriptRunner | None = None,
         platform: str | None = None,
+        webhook: Callable[[str, str], None] | None = None,
     ) -> None:
         self.enabled = enabled
         self._runner = runner or default_osascript_runner
         self.platform = platform or default_notification_platform()
+        self._webhook = webhook
         self._sent: set[tuple] = set()
         self.delivered: list[tuple[str, str]] = []
+        #: Messages the webhook channel accepted.
+        self.webhook_delivered: list[tuple[str, str]] = []
 
     def notify(self, title: str, message: str, dedup_key: tuple | None = None) -> bool:
         if dedup_key is not None:
@@ -528,6 +614,11 @@ class Notifier:
         logger.info("notification [%s] %s", title, message)
         if not self.enabled:
             return False
+        desktop = self._notify_desktop(title, message)
+        webhook = self._notify_webhook(title, message)
+        return desktop or webhook
+
+    def _notify_desktop(self, title: str, message: str) -> bool:
         try:
             returncode = self._runner(notification_argv(self.platform, title, message))
         except Exception as exc:  # notifier failure degrades to log-only
@@ -544,6 +635,28 @@ class Notifier:
             return False
         self.delivered.append((title, message))
         return True
+
+    def _notify_webhook(self, title: str, message: str) -> bool:
+        if self._webhook is None:
+            return False
+        try:
+            self._webhook(title, message)
+        except Exception as exc:  # LarkError text is already credential-free
+            reason = str(exc) if isinstance(exc, LarkError) else type(exc).__name__
+            logger.warning("lark notifier failed (%s) — channel degraded to log-only", reason)
+            return False
+        self.webhook_delivered.append((title, message))
+        return True
+
+
+def make_notifier(config: PipelineConfig) -> Notifier:
+    """The configured notifier: desktop, plus Lark when its webhook is set."""
+    webhook = (
+        LarkWebhook(config.lark_webhook_url, config.lark_webhook_secret)
+        if config.lark_webhook_url
+        else None
+    )
+    return Notifier(enabled=config.notifications_enabled, webhook=webhook)
 
 
 # ---------------------------------------------------------------------------
@@ -685,7 +798,7 @@ class Orchestrator:
         # The default runner exports the resolved data dirs so component
         # subprocesses resolve the SAME directories as this orchestrator.
         self.runner = runner or make_subprocess_runner(component_env(config))
-        self.notifier = notifier or Notifier(enabled=config.notifications_enabled)
+        self.notifier = notifier or make_notifier(config)
         self.status = StatusFile(status_file_path(config, session))
         self.ctx = SlotContext(session, self.slot_date, config)
         #: Step 6's parsed slot-summary counts, carried into the end-of-slot
@@ -1477,7 +1590,7 @@ def run_watchdog(
     tz), notify — at most once per session/day (marker file, since each
     watchdog fire is a fresh process). A missed slot is never silent."""
     clock = clock or _utc_now
-    notifier = notifier or Notifier(enabled=config.notifications_enabled)
+    notifier = notifier or make_notifier(config)
     now = clock()
     for session in SESSIONS:
         slot_time = config.sessions[session].slot_time

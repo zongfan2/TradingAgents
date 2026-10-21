@@ -168,7 +168,26 @@ slot summary) appear as Windows toasts. They need WSL→Windows interop, and on
 this systemd distro that only survives boots because of
 `/etc/binfmt.d/WSLInterop.conf` (`:WSLInterop:M::MZ::/init:PF`; see
 microsoft/WSL#8843). Without it, every `.exe` fails with "Exec format error"
-and notifications degrade to log-only. Inspect or remove the tasks with:
+and notifications degrade to log-only.
+
+Toasts only reach someone sitting at the server. To also receive every
+notification in Lark/Feishu, add a custom bot to a group (group settings →
+Bots → Add bot → Custom bot), turn on **signature verification**, and put
+both values in `.env` — they are credentials, never commit or paste them
+elsewhere:
+
+```bash
+TRADINGAGENTS_LARK_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/<token>
+TRADINGAGENTS_LARK_WEBHOOK_SECRET=<signing secret>
+```
+
+Every job reads `.env` at start, so no re-install is needed. A Lark failure
+(bad token, `code 19021` sign mismatch, network) is logged as `lark notifier
+failed (...)` in `scheduler.<job>.err.log` and never affects the slot or the
+toast. If the bot uses keyword security instead, the keyword
+`TradingAgents` matches every message (it is the first line).
+
+Inspect or remove the tasks with:
 
 ```bash
 schtasks.exe /Query /TN '\TradingAgents\pipeline.us' /V /FO LIST

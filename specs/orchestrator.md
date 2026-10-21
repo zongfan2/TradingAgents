@@ -200,11 +200,23 @@ webui reads both.
   interop. The script is passed `-EncodedCommand`, and the text is inserted
   as XML text nodes. Both are desktop-only: an alert raised while nobody is
   at the machine is seen on return.
-- Dedup: at most one notification per (component, slot, reason); the watchdog
-  fires at most once per session/day.
-- A notifier failure (missing `osascript`/PowerShell, non-zero exit) degrades
-  to log-only — notifications can never fail a slot.
-- Config `notifications_enabled` (default true).
+- **Lark/Feishu webhook (2026-10-21)**: when `TRADINGAGENTS_LARK_WEBHOOK_URL`
+  is set (a custom-bot webhook, `https://` only), every notification is also
+  POSTed there as a `text` message (`<title>\n<message>`), independently of
+  the desktop channel. With `TRADINGAGENTS_LARK_WEBHOOK_SECRET` (the bot's
+  signature-verification secret) the body carries `timestamp` (unix seconds)
+  and `sign` = base64(HMAC-SHA256(key=`"<timestamp>\n<secret>"`, msg=empty)).
+  10 s timeout; a non-200 response or a body `code`/`StatusCode` other than 0
+  is a failure. The URL and secret are credentials: they live only in
+  `.env`, never in logs, status files, exceptions surfaced in logs, or the
+  config repr. Unset ⇒ desktop only, as before.
+- Dedup: at most one notification per (component, slot, reason) across all
+  channels; the watchdog fires at most once per session/day.
+- A notifier failure (missing `osascript`/PowerShell, non-zero exit, a Lark
+  error) degrades that channel to log-only — the other channel is still
+  tried, and notifications can never fail a slot.
+- Config `notifications_enabled` (default true); false silences every
+  channel (log-only).
 
 ## Requirements
 
