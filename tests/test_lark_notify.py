@@ -234,13 +234,49 @@ def test_transport_error_quoting_only_the_path_never_leaks_the_token(caplog):
     assert "0000-secret-token" not in caplog.text
 
 
+@pytest.fixture
+def no_network(monkeypatch):
+    """Any socket use fails the test (AGENTS.md: tests are offline)."""
+    import socket
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("test reached the network")
+
+    monkeypatch.setattr(socket, "getaddrinfo", refuse)
+    monkeypatch.setattr(socket.socket, "connect", refuse)
+
+
 @pytest.mark.unit
-def test_real_stack_rejects_a_spaced_url_without_echoing_it():
-    # The URL never reaches the network: http.client refuses it locally.
-    webhook = orchestrator.LarkWebhook(URL + " ")
+def test_real_stack_rejects_an_inner_space_locally_without_echoing_it(no_network):
+    # urllib strips outer whitespace, so the space must be inside the path for
+    # http.client to refuse the request before any connection is attempted.
+    webhook = orchestrator.LarkWebhook(URL + " x")
     with pytest.raises(orchestrator.LarkError) as excinfo:
         webhook("t", "m")
-    assert "0000-secret-token" not in str(excinfo.value)
+    assert str(excinfo.value) == "InvalidURL"
+
+
+@pytest.mark.unit
+def test_real_stack_http_error_reports_the_status(no_network, monkeypatch):
+    import io
+    import urllib.error
+    import urllib.request
+
+    closed = []
+
+    class Body(io.BytesIO):
+        def close(self):
+            closed.append(True)
+            super().close()
+
+    def fake_urlopen(request, timeout):
+        raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, Body(b"gone"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    with pytest.raises(orchestrator.LarkError) as excinfo:
+        orchestrator.LarkWebhook(URL)("t", "m")
+    assert str(excinfo.value) == "HTTP 404"
+    assert closed
 
 
 @pytest.mark.unit

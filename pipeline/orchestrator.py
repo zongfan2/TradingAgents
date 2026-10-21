@@ -42,6 +42,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -520,8 +521,15 @@ def default_http_post(url: str, body: bytes, timeout: float) -> tuple[int, bytes
     request = urllib.request.Request(
         url, data=body, headers={"Content-Type": "application/json"}, method="POST"
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - https enforced by config
-        return response.status, response.read()
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - https enforced by config
+            return response.status, response.read()
+    except urllib.error.HTTPError as exc:
+        # A 4xx/5xx is a response, not a transport failure: hand back its
+        # status so the caller reports "HTTP <code>" (404 = revoked/mistyped
+        # hook), and release the connection it holds.
+        with contextlib.closing(exc):
+            return exc.code, exc.read()
 
 
 def lark_sign(timestamp: str, secret: str) -> str:
