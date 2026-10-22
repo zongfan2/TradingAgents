@@ -497,3 +497,18 @@ def test_server_binds_loopback_only(psrv, monkeypatch):
     monkeypatch.setattr(uvicorn, "run", fake_run)
     psrv.main(["--port", "9999"])
     assert seen == {"host": "127.0.0.1", "port": 9999}
+
+
+@pytest.mark.unit
+def test_foreign_host_cannot_reach_write_endpoints(psrv):
+    """DNS rebinding: a page on a foreign name resolving to 127.0.0.1 sends
+    its own Host header — rejected before any endpoint runs."""
+    from fastapi.testclient import TestClient
+
+    halt = psrv._halt_path(psrv._pipeline_config())
+    evil = TestClient(psrv.app, base_url="http://evil.example:8321")
+    assert evil.post("/api/pipeline/halt", json={"halted": True}).status_code == 400
+    assert not halt.exists()
+    for host in ("http://127.0.0.1:8321", "http://localhost:8321"):
+        local = TestClient(psrv.app, base_url=host)
+        assert local.get("/api/pipeline/halt").status_code == 200

@@ -61,7 +61,11 @@ talks to the broker.
   eval-weighted and paired-only variants and ambiguous-replay exclusion).
 - **R3**: no external network calls; everything renders from local files.
 - **R4**: the server binds `127.0.0.1` only — the write actions (manual
-  trigger, halt toggle) must not be reachable from the network.
+  trigger, halt toggle) must not be reachable from the network. Requests
+  whose `Host` is not `127.0.0.1`/`localhost` (any port) are rejected with
+  400 (2026-10-22: the always-on webui task makes DNS rebinding from a local
+  browser a standing risk). Remote viewing is an SSH tunnel to
+  `localhost:<port>`.
 
 ## Acceptance criteria
 

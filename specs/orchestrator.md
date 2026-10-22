@@ -119,6 +119,15 @@ The guard is correct and stays at 15 min; execution moves instead.
   Windows task `pipeline.us-execution`, logs `scheduler.us-execution.*`)
   running `orchestrator execute`, fire times enumerated exactly like a slot's;
   the Windows task's time limit is the adapter timeout plus 1 h.
+- **Web UI task (2026-10-22, windows-tasks only)**: with
+  `TRADINGAGENTS_WEBUI_PORT` set (1024–65535) the installer also generates
+  `pipeline.webui`, running `python -m uvicorn webui.server:app --host
+  127.0.0.1 --port <port>` (logs `scheduler.webui.*`): fired daily from
+  00:00 and repeated every 10 min, `IgnoreNew` while one runs, no time
+  limit, `StartWhenAvailable`. Never bound beyond loopback — remote viewing
+  is an SSH tunnel. Unset ⇒ no task; an unusable value (non-integer,
+  quoted, out of range) disables only the webui task with a config-load
+  warning — like Lark, it never stops a job.
 - **Close re-submission moves with it (2026-10-21)**: with `execution_time`
   set, settle's `execution_adapter refresh` (step 0, both sessions — all
   outside US hours) passes `--no-close-resubmit`, so it never spends a
@@ -226,6 +235,12 @@ webui reads both.
   whitespace or control characters); an unusable setting, or a secret
   without a URL, **disables only the Lark channel** with a config-load
   warning — it never stops a job. Unset ⇒ desktop only, as before.
+- Per-order details (2026-10-22): the step 7 summary (end-of-slot inline,
+  or the `execute` summary) appends one line per order to the **Lark**
+  message only — from the adapter summary's `orders` list, e.g.
+  `• AMZN BUY 37 @263 stop 249.8 target 278.8 (dry-run)` or
+  `• LRCX skipped: no-position`; at most 15 lines, then a count. The desktop
+  toast stays one line; no `orders` list ⇒ no detail lines.
 - Dedup: at most one notification per (component, slot, reason) across all
   channels; the watchdog fires at most once per session/day.
 - A notifier failure (missing `osascript`/PowerShell, non-zero exit, a Lark
@@ -319,4 +334,5 @@ summary is assembled in planned-job order.
    and secret never appear in logs, `LarkError` texts or reprs (transport
    errors by type only, incl. an `InvalidURL` that quotes the path); an
    unusable Lark env disables only Lark and the watchdog still runs; unset
-   ⇒ desktop only.
+   ⇒ desktop only. The step 7 per-order lines reach Lark only, capped at
+   15 with a remainder count.

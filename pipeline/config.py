@@ -137,6 +137,9 @@ class PipelineConfig:
     lark_webhook_url: str | None = field(default=None, repr=False)
     lark_webhook_secret: str | None = field(default=None, repr=False)
     pool_max_staleness_days: int = 3
+    #: Web UI port for the installer's always-on webui task (bound to
+    #: 127.0.0.1 only — reach it over an SSH tunnel). ``None``: no task.
+    webui_port: int | None = None
     python_executable: Path = field(default_factory=lambda: Path(sys.executable))
     #: D19/D20 backend roles: deep-search collection vs evaluation. Validated
     #: eagerly against :data:`BACKEND_CHOICES` — a typo'd backend must fail
@@ -182,6 +185,8 @@ class PipelineConfig:
         lark_error = lark_settings_error(self.lark_webhook_url, self.lark_webhook_secret)
         if lark_error is not None:
             raise ValueError(lark_error)
+        if self.webui_port is not None and not 1024 <= self.webui_port <= 65535:
+            raise ValueError(f"webui_port {self.webui_port} — expected 1024..65535")
         if self.sessions["cn"].execution_time is not None:
             raise ValueError("execution_time is us-only — the adapter never runs for cn")
 
@@ -212,6 +217,22 @@ def load_config(env: Mapping[str, str] | None = None) -> PipelineConfig:
     if lark_error is not None:
         logger.warning("Lark notifications disabled: %s", lark_error)
         lark_url = lark_secret = None
+
+    # The webui port matters to the installer only: a bad value must never
+    # stop every scheduled job at config load either.
+    webui_port: int | None = None
+    raw_port = (env.get("TRADINGAGENTS_WEBUI_PORT") or "").strip()
+    if raw_port:
+        try:
+            webui_port = int(raw_port)
+        except ValueError:
+            webui_port = None
+        if webui_port is None or not 1024 <= webui_port <= 65535:
+            logger.warning(
+                "web UI task disabled: TRADINGAGENTS_WEBUI_PORT %r is not a port in 1024..65535",
+                raw_port,
+            )
+            webui_port = None
 
     sessions = {
         session: SessionSchedule(
@@ -247,6 +268,7 @@ def load_config(env: Mapping[str, str] | None = None) -> PipelineConfig:
         lark_webhook_url=lark_url,
         lark_webhook_secret=lark_secret,
         pool_max_staleness_days=int(env.get("TRADINGAGENTS_POOL_MAX_STALENESS_DAYS") or 3),
+        webui_port=webui_port,
         python_executable=Path(env.get("TRADINGAGENTS_PIPELINE_PYTHON") or sys.executable),
         collect_backend=backend("TRADINGAGENTS_COLLECT_BACKEND", DEFAULT_COLLECT_BACKEND),
         eval_backend=backend("TRADINGAGENTS_EVAL_BACKEND", DEFAULT_EVAL_BACKEND),

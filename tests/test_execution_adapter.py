@@ -422,6 +422,10 @@ def test_s2_default_disabled_appends_dry_run_rows(tmp_path):
     )
     assert row["tif"] == "gtc"
     assert summary["dry_run"] == 1 and summary["submitted"] == 0 and summary["live"] is False
+    # R4: one digest entry per non-intent row, for the Lark summary.
+    assert summary["orders"] == [
+        {key: row[key] for key in ea.DIGEST_KEYS}
+    ]
 
 
 @pytest.mark.unit
@@ -449,6 +453,10 @@ def test_s2_enabled_submits_live_gtc_bracket(tmp_path):
     ]
     assert rows[1]["broker_status"] == "accepted"
     assert summary["submitted"] == 1 and summary["dry_run"] == 0
+    # The intent row is not part of the digest; its outcome row is.
+    assert [(o["kind"], o["broker_status"]) for o in summary["orders"]] == [
+        ("submitted", "accepted")
+    ]
 
 
 @pytest.mark.unit
@@ -888,6 +896,9 @@ def test_s6_live_submissions_per_slot_cap(tmp_path):
     rows = read_orders(config)
     assert (rows[-1]["ticker"], rows[-1]["reason"]) == ("NVDA", "max-orders-per-slot")
     assert summary["submitted"] == 1 and summary["skipped"] == 1
+    assert [(o["ticker"], o["kind"], o["reason"]) for o in summary["orders"]] == [
+        ("AAPL", "submitted", None), ("NVDA", "skip", "max-orders-per-slot"),
+    ]
 
     # Prior live submissions recorded in the ledger count against the budget
     # too (a recovery rerun cannot double the slot's order budget).
@@ -1896,6 +1907,8 @@ def test_ac3_mixed_fixture_slot_produces_exact_dry_run_ledger(tmp_path):
         "recovered": 0,
         "errors": 0,
         "rejected": 0,
+        # Every row but intents, in write order (the cancel included).
+        "orders": [{key: row[key] for key in ea.DIGEST_KEYS} for row in rows],
     }
 
 

@@ -233,6 +233,16 @@ Web UI (localhost-only, no auth — see [`specs/webui-pages.md`](specs/webui-pag
 .venv/bin/uvicorn webui.server:app --port 8321
 ```
 
+On the Windows server, set `TRADINGAGENTS_WEBUI_PORT=8321` in `.env` and
+re-run the installer: it adds `\TradingAgents\pipeline.webui`, which keeps
+the server up on `127.0.0.1` (re-fired every 10 min; a running instance is
+left alone; logs in `scheduler.webui.{out,err}.log`). It is never bound to
+a network interface — view it from another machine through an SSH tunnel:
+
+```bash
+ssh -N -L 8321:localhost:8321 dev   # then open http://localhost:8321 locally
+```
+
 Open http://127.0.0.1:8321. Pipeline pages: **status banner** (per-component
 red/green for both sessions; a session goes red if no slot started by
 slot_time + 1 h), **pool view** (all four lists, gate verdicts, a
