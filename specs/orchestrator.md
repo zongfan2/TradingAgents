@@ -125,7 +125,9 @@ The guard is correct and stays at 15 min; execution moves instead.
   127.0.0.1 --port <port>` (logs `scheduler.webui.*`): fired daily from
   00:00 and repeated every 10 min, `IgnoreNew` while one runs, no time
   limit, `StartWhenAvailable`. Never bound beyond loopback — remote viewing
-  is an SSH tunnel. Unset ⇒ no task.
+  is an SSH tunnel. Unset ⇒ no task; an unusable value (non-integer,
+  quoted, out of range) disables only the webui task with a config-load
+  warning — like Lark, it never stops a job.
 - **Close re-submission moves with it (2026-10-21)**: with `execution_time`
   set, settle's `execution_adapter refresh` (step 0, both sessions — all
   outside US hours) passes `--no-close-resubmit`, so it never spends a

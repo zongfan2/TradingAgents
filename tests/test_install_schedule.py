@@ -697,5 +697,17 @@ def test_webui_port_unset_or_invalid(tmp_path):
     assert "pipeline.webui.xml" not in tasks
     assert load_config({"TRADINGAGENTS_WEBUI_PORT": "8321"}).webui_port == 8321
     assert load_config({}).webui_port is None
+    # Installer-only setting: junk disables just the webui task, never a job.
+    for junk in ('"8321"', "abc", "80", "70000"):
+        assert load_config({"TRADINGAGENTS_WEBUI_PORT": junk}).webui_port is None
     with pytest.raises(ValueError, match="webui_port"):
         make_config(tmp_path, webui_port=80)
+
+
+@pytest.mark.unit
+def test_watchdog_still_runs_with_a_bad_webui_port(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRADINGAGENTS_SKIP_DOTENV", "1")
+    monkeypatch.setenv("TRADINGAGENTS_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("TRADINGAGENTS_NOTIFICATIONS_ENABLED", "false")
+    monkeypatch.setenv("TRADINGAGENTS_WEBUI_PORT", '"8321"')
+    assert orchestrator.main(["watchdog"]) == 0

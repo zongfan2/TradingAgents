@@ -218,6 +218,22 @@ def load_config(env: Mapping[str, str] | None = None) -> PipelineConfig:
         logger.warning("Lark notifications disabled: %s", lark_error)
         lark_url = lark_secret = None
 
+    # The webui port matters to the installer only: a bad value must never
+    # stop every scheduled job at config load either.
+    webui_port: int | None = None
+    raw_port = (env.get("TRADINGAGENTS_WEBUI_PORT") or "").strip()
+    if raw_port:
+        try:
+            webui_port = int(raw_port)
+        except ValueError:
+            webui_port = None
+        if webui_port is None or not 1024 <= webui_port <= 65535:
+            logger.warning(
+                "web UI task disabled: TRADINGAGENTS_WEBUI_PORT %r is not a port in 1024..65535",
+                raw_port,
+            )
+            webui_port = None
+
     sessions = {
         session: SessionSchedule(
             env.get(f"TRADINGAGENTS_SLOT_TIME_{session.upper()}") or DEFAULT_SLOT_TIME,
@@ -252,7 +268,7 @@ def load_config(env: Mapping[str, str] | None = None) -> PipelineConfig:
         lark_webhook_url=lark_url,
         lark_webhook_secret=lark_secret,
         pool_max_staleness_days=int(env.get("TRADINGAGENTS_POOL_MAX_STALENESS_DAYS") or 3),
-        webui_port=int(env.get("TRADINGAGENTS_WEBUI_PORT") or 0) or None,
+        webui_port=webui_port,
         python_executable=Path(env.get("TRADINGAGENTS_PIPELINE_PYTHON") or sys.executable),
         collect_backend=backend("TRADINGAGENTS_COLLECT_BACKEND", DEFAULT_COLLECT_BACKEND),
         eval_backend=backend("TRADINGAGENTS_EVAL_BACKEND", DEFAULT_EVAL_BACKEND),

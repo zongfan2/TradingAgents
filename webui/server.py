@@ -47,6 +47,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from pipeline.common import SESSION_TZ, SESSIONS, session_date, session_for_ticker
 from pipeline.config import PipelineConfig, load_config as load_pipeline_config, parse_slot_time
@@ -96,6 +97,10 @@ LANGUAGES = ["English", "Chinese", "Japanese", "Korean", "Hindi", "Spanish",
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
 app = FastAPI(title="TradingAgents Web UI")
+#: Loopback names only (specs/webui-pages.md R4): with the always-on webui
+#: task a DNS-rebinding page must not reach the write endpoints.
+ALLOWED_HOSTS = ["127.0.0.1", "localhost"]
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
 
 _runs: dict[str, dict] = {}
 _run_lock = threading.Lock()
