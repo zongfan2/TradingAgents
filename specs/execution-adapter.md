@@ -136,6 +136,10 @@ included — constructs a broker client.
   execution").
 - **R4**: any broker API error on one order logs and continues to the next
   (never aborts the slot); summary line to stdout for the orchestrator.
+  The `submit` summary also carries `orders`: one entry per non-`intent`
+  row the run wrote (`ticker`, `kind`, `dry_run`, `reason`, `order_kind`,
+  `qty`, `limit_price`, `stop_price`, `target_price`, `broker_status`), in
+  write order — the orchestrator renders it per order in the Lark summary.
 - **R5**: `--dry-run` flag forces S2 behavior regardless of config.
 
 ## Non-goals

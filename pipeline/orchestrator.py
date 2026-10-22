@@ -633,16 +633,26 @@ class Notifier:
         #: Messages the webhook channel accepted.
         self.webhook_delivered: list[tuple[str, str]] = []
 
-    def notify(self, title: str, message: str, dedup_key: tuple | None = None) -> bool:
+    def notify(
+        self,
+        title: str,
+        message: str,
+        dedup_key: tuple | None = None,
+        details: str | None = None,
+    ) -> bool:
+        """``details`` (extra lines, e.g. one per order) go to the webhook
+        only: a desktop toast stays the one-line ``message``."""
         if dedup_key is not None:
             if dedup_key in self._sent:
                 return False
             self._sent.add(dedup_key)
         logger.info("notification [%s] %s", title, message)
+        if details:
+            logger.info("notification details:\n%s", details)
         if not self.enabled:
             return False
         desktop = self._notify_desktop(title, message)
-        webhook = self._notify_webhook(title, message)
+        webhook = self._notify_webhook(title, f"{message}\n{details}" if details else message)
         return desktop or webhook
 
     def _notify_desktop(self, title: str, message: str) -> bool:
@@ -834,6 +844,8 @@ class Orchestrator:
         self._analysis_counts: dict[str, int] | None = None
         #: Step 7's parsed adapter-summary counts for the same notification.
         self._execution_counts: dict[str, int] | None = None
+        #: Step 7's per-order lines for the Lark summary (None: no summary).
+        self._execution_orders: str | None = None
         #: Set by run_slot: step 7 is left to the ``execute`` job.
         self._defer_execution = False
         #: The execute job's pre-submit refresh counts (run_execution only).
@@ -987,6 +999,7 @@ class Orchestrator:
             elif name == "execution_adapter":
                 status, error = _execution_adapter_outcome(result)
                 self._execution_counts = _execution_summary_counts(result)
+                self._execution_orders = _execution_order_lines(result)
             elif name == "execution_refresh":
                 status, error = _execution_refresh_outcome(result)
                 self._refresh_counts = _refresh_summary_counts(result)
@@ -1103,6 +1116,7 @@ class Orchestrator:
             "TradingAgents pipeline",
             message,
             dedup_key=("summary", (self.session, self.slot_date.isoformat()), "end-of-slot"),
+            details=self._execution_orders,
         )
         self.status.finish_slot(to_utc_iso(self.clock()))
         return 1 if problems else 0
@@ -1171,6 +1185,7 @@ class Orchestrator:
                 "TradingAgents pipeline",
                 message,
                 dedup_key=("summary", (self.session, self.slot_date.isoformat()), "execution"),
+                details=self._execution_orders,
             )
             failed = {"failed", "timeout"}
             return 1 if status in failed or refresh_status in failed else 0
@@ -1427,6 +1442,60 @@ def _execution_summary_counts(result: RunResult) -> dict[str, int] | None:
         return value if isinstance(value, int) else 0
 
     return {key: count(key) for key in _EXECUTION_SUMMARY_KEYS}
+
+
+#: Per-order lines shown in the Lark summary; the rest are counted.
+MAX_ORDER_LINES = 15
+
+
+def _num(value: object) -> str:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "?"
+    return f"{value:g}"
+
+
+def _order_line(entry: dict) -> str:
+    ticker = str(entry.get("ticker") or "?")
+    kind = entry.get("kind")
+    mode = "dry-run" if entry.get("dry_run") else "live"
+    reason = entry.get("reason")
+    if kind == "skip":
+        return f"• {ticker} skipped: {reason or '?'}"
+    order_kind = entry.get("order_kind")
+    side = {"bracket": "BUY", "close": "SELL"}.get(str(order_kind), str(order_kind or "order"))
+    line = f"• {ticker} {side} {_num(entry.get('qty'))} @{_num(entry.get('limit_price'))}"
+    if entry.get("stop_price") is not None:
+        line += f" stop {_num(entry.get('stop_price'))}"
+    if entry.get("target_price") is not None:
+        line += f" target {_num(entry.get('target_price'))}"
+    if kind == "cancel":
+        return f"{line} canceled ({mode})"
+    status = entry.get("broker_status")
+    note = f"{mode}, {status}" if status and mode == "live" else mode
+    if reason:
+        note += f", {reason}"
+    return f"{line} ({note})"
+
+
+def _execution_order_lines(result: RunResult) -> str | None:
+    """One line per order from the submit summary's ``orders`` list (spec
+    execution-adapter R4) — the Lark-only details of the step 7 summary.
+    ``None`` when there is no parseable summary or no order rows."""
+    line = _last_nonempty_line(result.stdout)
+    try:
+        summary = json.loads(line) if line else None
+    except json.JSONDecodeError:
+        return None
+    orders = summary.get("orders") if isinstance(summary, dict) else None
+    if not isinstance(orders, list):
+        return None
+    entries = [entry for entry in orders if isinstance(entry, dict)]
+    if not entries:
+        return None
+    lines = [_order_line(entry) for entry in entries[:MAX_ORDER_LINES]]
+    if len(entries) > MAX_ORDER_LINES:
+        lines.append(f"… {len(entries) - MAX_ORDER_LINES} more in ledger/orders.jsonl")
+    return "\n".join(lines)
 
 
 _REFRESH_SUMMARY_KEYS = (

@@ -660,3 +660,42 @@ def test_default_target_follows_the_host(monkeypatch):
     assert install_schedule.default_target() == "windows-tasks"
     monkeypatch.delenv("WSL_DISTRO_NAME")
     assert install_schedule.default_target() == "launchd"
+
+
+@pytest.mark.unit
+def test_windows_webui_task_serves_loopback_only_and_restarts(tmp_path):
+    config = make_config(tmp_path, webui_port=8321)
+    tasks = install_schedule.generate_windows_tasks(
+        config, SHANGHAI_TZ, YEAR, distro=DISTRO, user=WSL_USER
+    )
+    root = parse_task(tasks["pipeline.webui.xml"])
+    args = task_arguments(root)
+    assert "-m uvicorn webui.server:app --host 127.0.0.1 --port 8321" in args
+    assert "0.0.0.0" not in args
+    assert f"{config.state_dir}/scheduler.webui.err.log" in args
+    interval = root.find("t:Triggers/t:CalendarTrigger/t:Repetition/t:Interval", TASK_NS).text
+    assert interval == "PT10M"
+    settings = root.find("t:Settings", TASK_NS)
+    assert settings.find("t:MultipleInstancesPolicy", TASK_NS).text == "IgnoreNew"
+    assert settings.find("t:ExecutionTimeLimit", TASK_NS).text == "PT0S"
+    assert settings.find("t:StartWhenAvailable", TASK_NS).text == "true"
+    # The slot tasks keep their no-catch-up rule.
+    slot = parse_task(tasks["pipeline.us.xml"]).find("t:Settings", TASK_NS)
+    assert slot.find("t:StartWhenAvailable", TASK_NS).text == "false"
+    assert "webui: always on at 127.0.0.1:8321" in install_schedule.format_schedule(
+        config, SHANGHAI_TZ, YEAR, "windows-tasks"
+    )
+
+
+@pytest.mark.unit
+def test_webui_port_unset_or_invalid(tmp_path):
+    from pipeline.config import load_config
+
+    tasks = install_schedule.generate_windows_tasks(
+        make_config(tmp_path), SHANGHAI_TZ, YEAR, distro=DISTRO, user=WSL_USER
+    )
+    assert "pipeline.webui.xml" not in tasks
+    assert load_config({"TRADINGAGENTS_WEBUI_PORT": "8321"}).webui_port == 8321
+    assert load_config({}).webui_port is None
+    with pytest.raises(ValueError, match="webui_port"):
+        make_config(tmp_path, webui_port=80)

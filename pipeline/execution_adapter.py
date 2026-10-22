@@ -814,6 +814,21 @@ def _cid_order_kind(client_order_id: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+#: Order-row fields carried per order in the submit summary's ``orders`` list.
+DIGEST_KEYS = (
+    "ticker",
+    "kind",
+    "dry_run",
+    "reason",
+    "order_kind",
+    "qty",
+    "limit_price",
+    "stop_price",
+    "target_price",
+    "broker_status",
+)
+
+
 class _SubmitRun:
     """One submit invocation: broker snapshot + running S6/S9 state.
 
@@ -857,6 +872,9 @@ class _SubmitRun:
         }
         self.order_rows = read_order_rows(config.ledger_dir)
         self.states = latest_live_states(self.order_rows)
+        #: One compact entry per non-intent row this run wrote — the summary's
+        #: ``orders`` list, rendered per order in the Lark notification.
+        self.digest: list[dict] = []
         self.entry_done: set[str] = set()
         self.close_done: set[str] = set()
 
@@ -965,7 +983,9 @@ class _SubmitRun:
             "filled_qty": None,
             **fields,
         }
-        _append_order_row(self.config, payload, self.clock)
+        row = _append_order_row(self.config, payload, self.clock)
+        if kind != "intent":  # an intent is always followed by its outcome row
+            self.digest.append({key: row.get(key) for key in DIGEST_KEYS})
 
     def skip(self, record: DecisionRecord, reason: str, client_order_id: str) -> None:
         self.counters["skipped"] += 1
@@ -1422,6 +1442,7 @@ def run_submit(
         "live": run.live,
         "halted": run.halted,
         **run.counters,
+        "orders": run.digest,
     }
 
 

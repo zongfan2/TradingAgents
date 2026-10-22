@@ -323,3 +323,11 @@ def test_watchdog_still_runs_with_a_bad_lark_env(tmp_path, monkeypatch):
     monkeypatch.setenv("TRADINGAGENTS_NOTIFICATIONS_ENABLED", "false")
     monkeypatch.setenv("TRADINGAGENTS_LARK_WEBHOOK_URL", f'"{URL}"')
     assert orchestrator.main(["watchdog"]) == 0
+
+
+@pytest.mark.unit
+def test_details_reach_lark_only():
+    n, post = notifier()
+    assert n.notify("t", "m", details="• AMZN BUY 37 @263 (dry-run)") is True
+    assert n.delivered == [("t", "m")]
+    assert n.webhook_delivered == [("t", "m\n• AMZN BUY 37 @263 (dry-run)")]

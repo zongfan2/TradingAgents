@@ -696,3 +696,78 @@ def test_refresh_problems_never_block_submit(tmp_path, behavior, status, fragmen
     assert record["status"] == status and fragment in record["error"]
     assert rc == (1 if status in ("failed", "timeout") else 0)
     assert read_status(config, "us")["slot"]["finished_at"] is not None
+
+
+# ---------------------------------------------------------------------------
+# Per-order lines in the Lark summary
+# ---------------------------------------------------------------------------
+
+
+def summary_with_orders(orders):
+    summary = json.loads(execution_summary(submitted=0, dry_run=1, skipped=1))
+    return json.dumps({**summary, "orders": orders}) + "\n"
+
+
+AMZN = {
+    "ticker": "AMZN", "kind": "submitted", "dry_run": True, "reason": None,
+    "order_kind": "bracket", "qty": 37.0, "limit_price": 263.0, "stop_price": 249.8,
+    "target_price": 278.8, "broker_status": None,
+}
+LRCX = {
+    "ticker": "LRCX", "kind": "skip", "dry_run": True, "reason": "no-position",
+    "order_kind": None, "qty": None, "limit_price": None, "stop_price": None,
+    "target_price": None, "broker_status": None,
+}
+
+
+@pytest.mark.unit
+def test_execute_summary_lists_each_order_on_lark_only(tmp_path):
+    config = deferred_config(tmp_path)
+    finished_slot(config)
+    runner = FakeRunner(
+        {"execution_adapter": orchestrator.RunResult(0, stdout=summary_with_orders([AMZN, LRCX]))}
+    )
+    lark = []
+    notifier = orchestrator.Notifier(
+        enabled=True, runner=lambda argv: 0, platform="macos",
+        webhook=lambda title, message: lark.append(message),
+    )
+    assert make_orch(config, runner, notifier).run_execution() == 0
+    (message,) = lark
+    head, *lines = message.split("\n")
+    assert head.startswith("execution us 2026-01-05: ok")
+    assert lines == [
+        "• AMZN BUY 37 @263 stop 249.8 target 278.8 (dry-run)",
+        "• LRCX skipped: no-position",
+    ]
+    # The desktop channel keeps the one-line message.
+    assert notifier.delivered == [("TradingAgents pipeline", head)]
+
+
+@pytest.mark.unit
+def test_order_lines_render_live_cancel_and_cap():
+    live = {**AMZN, "dry_run": False, "broker_status": "accepted"}
+    close = {**AMZN, "ticker": "TSLA", "order_kind": "close", "stop_price": None,
+             "target_price": None, "dry_run": False, "broker_status": "new",
+             "reason": "recovered-intent"}
+    cancel = {**AMZN, "ticker": "MU", "kind": "cancel", "dry_run": False}
+
+    def render(orders):
+        return orchestrator._execution_order_lines(
+            orchestrator.RunResult(0, stdout=summary_with_orders(orders))
+        )
+
+    assert render([live, close, cancel]).split("\n") == [
+        "• AMZN BUY 37 @263 stop 249.8 target 278.8 (live, accepted)",
+        "• TSLA SELL 37 @263 (live, new, recovered-intent)",
+        "• MU BUY 37 @263 stop 249.8 target 278.8 canceled (live)",
+    ]
+    many = render([LRCX] * (orchestrator.MAX_ORDER_LINES + 3)).split("\n")
+    assert len(many) == orchestrator.MAX_ORDER_LINES + 1
+    assert many[-1] == "… 3 more in ledger/orders.jsonl"
+    # No list, an empty list, junk entries or no summary: no detail lines.
+    assert render([]) is None and render(["junk"]) is None
+    assert orchestrator._execution_order_lines(
+        orchestrator.RunResult(0, stdout=execution_summary() + "\n")
+    ) is None
+    assert orchestrator._execution_order_lines(orchestrator.RunResult(0, stdout="x\n")) is None
