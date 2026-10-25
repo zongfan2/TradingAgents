@@ -6,6 +6,7 @@ fixtures.
 """
 
 import json
+import logging
 import math
 import subprocess
 import sys
@@ -1866,3 +1867,19 @@ def test_build_pool_default_events_land_in_the_state_dir(pool_dir, tmp_path, mon
         ("nominate", "AVGO", "nominated"),
         ("pool", "AVGO", "opportunity-enter"),
     }
+
+
+@pytest.mark.unit
+def test_build_pool_default_emitter_config_error_never_escapes(pool_dir, monkeypatch, caplog):
+    """The pool is already written when the default emitter is built: a junk
+    config value only skips the events (review 6c8de48 finding 2)."""
+    caplog.set_level(logging.WARNING, logger="pipeline.funnel_events")
+    monkeypatch.setenv("TRADINGAGENTS_TIMEOUT_POOL_BUILDER", "junk")
+    runner = FakeRunner([nomination_json(nominee("AVGO", 7.5))])
+    result = build_pool(
+        "us", as_of=RUN_DATE, backend="claude", pool_dir=pool_dir,
+        runner=runner, fetch_ohlcv=FakeFetcher(),
+    )
+    assert result.outcome == "written"
+    assert "| written" in builder_log(pool_dir)
+    assert "funnel events skipped in _emit_pool_funnel" in caplog.text

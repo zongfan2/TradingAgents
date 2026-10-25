@@ -9,7 +9,13 @@ import logging
 import pytest
 
 from pipeline import funnel_events
-from pipeline.funnel_events import FunnelEvents, best_effort, read_events, reason_code
+from pipeline.funnel_events import (
+    FunnelEvents,
+    best_effort,
+    current_outcomes,
+    read_events,
+    reason_code,
+)
 
 
 def fixed_clock():
@@ -100,3 +106,48 @@ def test_reason_code_and_unreadable_lines(tmp_path):
     path.write_text('{"ticker": "A"}\nnot json\n[1]\n', encoding="utf-8")
     assert read_events(tmp_path, "cn", "2026-10-23") == [{"ticker": "A"}]
     assert read_events(tmp_path, "cn", "2026-10-24") == []
+
+
+def _event(run, stage, ticker, outcome, code, **details):
+    return {"run": run, "stage": stage, "ticker": ticker, "outcome": outcome,
+            "code": code, "reason": code, "details": details}
+
+
+@pytest.mark.unit
+def test_current_outcomes_keeps_both_arms_and_the_strongest_execute_event():
+    events = [
+        _event("r1", "decide", "NVDA", "passed", "BUY", arm="brief"),
+        _event("r1", "decide", "NVDA", "excluded", "HOLD", arm="feeds"),
+        _event("x1", "execute", "NVDA", "info", "superseded", arm="brief"),
+        _event("x1", "execute", "NVDA", "passed", "submitted", arm="brief"),
+        _event("x1", "execute", "NVDA", "excluded", "feeds-arm", arm="feeds"),
+        _event("x1", "execute", "TSLA", "info", "cancel", arm="brief"),
+        _event("x1", "execute", "TSLA", "passed", "submitted", arm="brief"),
+    ]
+    current = current_outcomes(events)
+    decide = current[("decide", "NVDA")]
+    assert (decide["outcome"], decide["code"]) == ("passed", "BUY")
+    assert [e["details"]["arm"] for e in decide["events"]] == ["brief", "feeds"]
+    assert current[("execute", "NVDA")]["code"] == "submitted"
+    assert current[("execute", "TSLA")]["code"] == "submitted"
+
+
+@pytest.mark.unit
+def test_current_outcomes_reruns_supersede_only_what_they_decided():
+    events = [
+        _event("r1", "trigger", "HUM", "passed", "catalyst"),
+        _event("r1", "trigger", "CHRW", "excluded", "below-threshold"),
+        # Rerun: HUM already done (info only), CHRW re-decided.
+        _event("r2", "trigger", "HUM", "info", "already-done"),
+        _event("r2", "trigger", "CHRW", "passed", "catalyst"),
+        # Info-only key keeps its info outcome.
+        _event("r2", "trigger", "AAA", "info", "already-done"),
+    ]
+    current = current_outcomes(events)
+    hum = current[("trigger", "HUM")]
+    assert (hum["outcome"], hum["code"], hum["run"]) == ("passed", "catalyst", "r1")
+    assert [e["code"] for e in hum["notes"]] == ["already-done"]
+    chrw = current[("trigger", "CHRW")]
+    assert (chrw["outcome"], chrw["code"], chrw["run"]) == ("passed", "catalyst", "r2")
+    assert [e["code"] for e in chrw["notes"]] == ["below-threshold"]
+    assert current[("trigger", "AAA")]["outcome"] == "info"

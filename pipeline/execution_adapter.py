@@ -831,10 +831,14 @@ def _emit_execute_funnel(funnel: FunnelEvents, record: DecisionRecord, row: dict
     details = {
         key: row.get(key) for key in DIGEST_KEYS if key not in ("ticker", "kind", "reason")
     }
-    details.update(run_id=record.run_id, client_order_id=row.get("client_order_id"))
+    details.update(
+        run_id=record.run_id, arm=record.arm, client_order_id=row.get("client_order_id")
+    )
     if kind == "skip":
         reason = str(row.get("reason") or "skip")
         funnel.emit("execute", record.ticker, "excluded", reason_code(reason), reason, **details)
+    elif kind == "submitted" and row.get("broker_status") == "rejected":
+        funnel.emit("execute", record.ticker, "excluded", "rejected", "broker rejected the order", **details)
     elif kind == "submitted":
         mode = "dry-run" if row.get("dry_run") else "live"
         funnel.emit("execute", record.ticker, "passed", "submitted", f"submitted ({mode})", **details)

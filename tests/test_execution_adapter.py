@@ -2122,3 +2122,35 @@ def test_funnel_failure_never_changes_orders_or_summary(tmp_path):
         return [{k: v for k, v in r.items() if k != "written_at"} for r in read_orders(config)]
 
     assert shape(plain) == shape(broken)
+
+
+@pytest.mark.unit
+def test_funnel_records_a_broker_rejection_as_excluded(tmp_path):
+    from pipeline.funnel_events import read_events
+
+    config = make_config(tmp_path)
+    write_decision(config)
+    summary = submit_slot(config, FakeBroker(submit_status="rejected"), settings=live_settings())
+    assert summary["rejected"] == 1
+    assert funnel_rows(config) == [("NVDA", "excluded", "rejected")]
+    event = read_events(config.state_dir, "us", SLOT)[0]
+    assert event["details"]["broker_status"] == "rejected"
+    assert event["details"]["arm"] == "brief"
+
+
+@pytest.mark.unit
+def test_funnel_paired_slot_reduces_to_the_live_order(tmp_path):
+    """Supersession rule (spec R1): a superseded attempt and the feeds-arm
+    non-candidate sit beside the brief arm's order; the ticker's execute
+    outcome is still `submitted`."""
+    from pipeline.funnel_events import current_outcomes, read_events
+
+    config = make_config(tmp_path)
+    write_decision(config, n=1)
+    write_decision(config, n=2)
+    write_decision(config, arm="feeds", plan=BUY_PLAN)
+    submit_slot(config, FakeBroker(), settings=live_settings())
+    outcome = current_outcomes(read_events(config.state_dir, "us", SLOT))[("execute", "NVDA")]
+    assert (outcome["outcome"], outcome["code"]) == ("passed", "submitted")
+    assert sorted(e["code"] for e in outcome["events"]) == ["feeds-arm", "submitted", "superseded"]
+    assert {e["details"]["arm"] for e in outcome["events"]} == {"brief", "feeds"}

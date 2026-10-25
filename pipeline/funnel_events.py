@@ -8,9 +8,15 @@ write failure logs a warning and never alters the component's behavior,
 outputs or exit code.
 
 Every :class:`FunnelEvents` instance stamps its events with one ``run``
-id, so a rerun of the same component and slot appends a new run whose events
-supersede the earlier one's (the snapshot builder keeps the last run per
-component).
+id, so a rerun of the same component and slot appends a new run.
+:func:`current_outcomes` is the supersession rule the snapshot builder uses:
+per ``(stage, ticker)``, the latest run that *decided* the ticker (a
+``passed``/``excluded`` event) wins, and within that run the strongest
+outcome (``passed`` > ``excluded`` > ``info``) is the stage outcome — so both
+arms of a pair, a SELL's cancels next to its close, or a feeds-arm
+non-candidate next to the brief arm's order all keep the right result. A
+run with only ``info`` events (``already-done``, ``superseded``) never
+replaces a decision; other runs' events are kept as notes.
 """
 
 from __future__ import annotations
@@ -205,3 +211,34 @@ def read_events(state_dir: str | Path, session: str, slot_date: date | str) -> l
         if isinstance(event, dict):
             events.append(event)
     return events
+
+
+_STRENGTH = {"info": 0, "excluded": 1, "passed": 2}
+
+
+def current_outcomes(events: list[dict]) -> dict[tuple[str, str | None], dict]:
+    """Reduce a slot's events (file order) to one outcome per
+    ``(stage, ticker)`` — the documented supersession rule (module docstring).
+
+    Each value holds the chosen ``outcome``/``code``/``reason``, the deciding
+    ``run``, that run's ``events`` for the key (both arms of a pair, …) and
+    ``notes``: the other runs' events (superseded decisions, info-only
+    reruns)."""
+    grouped: dict[tuple[str, str | None], list[dict]] = {}
+    for event in events:
+        grouped.setdefault((event.get("stage"), event.get("ticker")), []).append(event)
+    result: dict[tuple[str, str | None], dict] = {}
+    for key, group in grouped.items():
+        deciding = [e.get("run") for e in group if e.get("outcome") in ("passed", "excluded")]
+        run = deciding[-1] if deciding else group[-1].get("run")
+        own = [e for e in group if e.get("run") == run]
+        best = max(own, key=lambda e: _STRENGTH.get(e.get("outcome"), -1))
+        result[key] = {
+            "outcome": best.get("outcome"),
+            "code": best.get("code"),
+            "reason": best.get("reason"),
+            "run": run,
+            "events": own,
+            "notes": [e for e in group if e.get("run") != run],
+        }
+    return result

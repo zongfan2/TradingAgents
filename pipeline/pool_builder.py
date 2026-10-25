@@ -1337,7 +1337,9 @@ def build_pool(
 
     outcome = "carried_forward" if carried_forward else "written"
     _emit_pool_funnel(
-        funnel or FunnelEvents(load_config().state_dir, session, as_of, "pool_builder"),
+        funnel,
+        session,
+        as_of,
         pool_file,
         lifecycle,
         nominated,
@@ -1378,7 +1380,9 @@ def build_pool(
 
 @best_effort
 def _emit_pool_funnel(
-    events: FunnelEvents,
+    events: FunnelEvents | None,
+    session: str,
+    as_of: date,
     pool_file: PoolFile,
     lifecycle: LifecycleResult,
     nominated: dict[str, NominationEntry],
@@ -1389,7 +1393,12 @@ def _emit_pool_funnel(
     rules: LifecycleRules,
 ) -> None:
     """Decision-funnel events for the pool just written (spec
-    decision-funnel R1): every nominee, core ticker and layer decision."""
+    decision-funnel R1): every nominee, core ticker and layer decision.
+
+    The default emitter is built here, inside the best-effort wrapper: the
+    pool is already written, so a config error must not escape."""
+    if events is None:
+        events = FunnelEvents(load_config().state_dir, session, as_of, "pool_builder")
     thresholds = {"entry": rules.entry_threshold, "exit": rules.exit_threshold}
     if pool_file.carried_forward:
         events.emit(

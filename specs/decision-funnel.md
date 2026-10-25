@@ -42,8 +42,16 @@ studies).
   code per stage (table below) for aggregation; `reason` is human text. An
   event with an unknown stage, outcome or code is dropped with a warning.
 - Every emitter instance stamps a `run` id. A rerun (or a manual subset run)
-  appends new events; the snapshot builder takes the **latest event per
-  (stage, ticker)**, so a rerun supersedes only what it re-decided.
+  appends new events. Supersession rule (`funnel_events.current_outcomes`,
+  the reference the snapshot builder uses): per **(stage, ticker)**, the
+  **latest run with a `passed`/`excluded` event** decides; within that run
+  the stage outcome is the strongest event (`passed` > `excluded` > `info`)
+  and all of that run's events for the key are kept (both decide arms of a
+  pair, carrying `details.arm`; a SELL's `cancel`s beside its close; a
+  feeds-arm non-candidate beside the brief arm's order). A run with only
+  `info` events (`already-done`, `superseded`) never replaces a decision;
+  other runs' events are kept as notes. So a rerun supersedes only what it
+  re-decided.
 - Emitters are best-effort: an event-write failure logs a warning and never
   changes the component's behavior, exit code or outputs. Each component's
   funnel helper is additionally wrapped (`funnel_events.best_effort`) so a
@@ -59,7 +67,7 @@ studies).
 | `evaluate` (evaluator) | `pass`, `warn`, `fail` (`info` for core — the brief is withheld but the ticker runs; `excluded` for opportunity), `eval-error`, `skipped-below-threshold`, `skipped-absent` |
 | `trigger` (analysis_runner) | `core`, `core-pair`, `catalyst`, `no-score`, `eval-fail`, `below-threshold`, `budget-dropped`, `already-done`, `macro-fail-feeds-only`; manual runs emit nothing |
 | `decide` (analysis_runner) | `BUY`, `SELL`, `HOLD`, `ERROR`; `details`: `arm`, `run_id`, `pair_id`, `pm_rating` (raw five-tier rating, now also in the child's result payload), `plan_valid`, `violations[]`, `error`, `flags`, `execute_eligible` |
-| `execute` (execution_adapter) | non-candidates `hold`, `error`, `feeds-arm`, `no-plan`, `plan-invalid`, `action-mismatch`, `incomplete-plan`, `non-us-session` (from `non_candidate_reason`, the single source of the candidate filter); `superseded` (`info`); every order skip reason by its code (`stale-quote`, `total-risk`, `submit-error`, …); `submitted`; `cancel` (`info`) |
+| `execute` (execution_adapter) | non-candidates `hold`, `error`, `feeds-arm`, `no-plan`, `plan-invalid`, `action-mismatch`, `incomplete-plan`, `non-us-session` (from `non_candidate_reason`, the single source of the candidate filter); `superseded` (`info`); every order skip reason by its code (`stale-quote`, `total-risk`, `submit-error`, …); `submitted`; `rejected` (`excluded`: the broker answered the submit with status rejected); `cancel` (`info`); every execute event carries `details.arm` |
 
 ### R2 — Component output archive (safety net)
 
