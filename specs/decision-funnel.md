@@ -1,7 +1,7 @@
 # Spec: Decision funnel (per-slot exclusion record + webui page)
 
-**Builder**: Claude Code · **Status**: Draft (2026-10-25, awaiting user
-sign-off) · Contracts: new `funnel` event + snapshot schemas (this spec);
+**Builder**: Claude Code · **Status**: P1 implemented (2026-10-25; user
+signed off the plan), P2/P3 open · Contracts: new `funnel` event + snapshot schemas (this spec);
 reads pool, brief/eval, ledger and orders contracts unchanged.
 
 ## Why
@@ -39,21 +39,27 @@ studies).
 ```
 
 - `outcome`: `passed` | `excluded` | `info`. `code` is a stable kebab-case
-  code per stage (table below) for aggregation; `reason` is human text.
+  code per stage (table below) for aggregation; `reason` is human text. An
+  event with an unknown stage, outcome or code is dropped with a warning.
+- Every emitter instance stamps a `run` id. A rerun (or a manual subset run)
+  appends new events; the snapshot builder takes the **latest event per
+  (stage, ticker)**, so a rerun supersedes only what it re-decided.
 - Emitters are best-effort: an event-write failure logs a warning and never
-  changes the component's behavior, exit code or outputs.
+  changes the component's behavior, exit code or outputs. Each component's
+  funnel helper is additionally wrapped (`funnel_events.best_effort`) so a
+  call-site error (argument binding, formatting) cannot escape either.
 - No existing contract changes: pool files, `DecisionRecord` (`extra=forbid`)
   and `OrderRecord` stay as they are. Everything new goes in the event log.
 
 | Stage (component) | `code` values |
 |---|---|
-| `nominate` (pool_builder) | `nominated`, `wrong-session`, `duplicate`, `nomination-failed` (+ `carried_forward`) |
-| `pool` (pool_builder) | `core`, `opportunity-enter`, `opportunity-stay`, `watch`, `dropped-low-score`, `dropped-gate-fail`, `cap-truncated`, `watch-cap`, `removed-low-score-streak`, `removed-gate-fail-streak`; `details.gate_rule`: `insufficient-bars`, `liquidity`, `bollinger-*`, `volume-demotion`, `fetch-error`, plus the thresholds in force |
+| `nominate` (pool_builder) | `nominated`, `wrong-session`, `duplicate`, `nomination-failed` (ticker `null`, `info`) |
+| `pool` (pool_builder) | `core`, `opportunity-enter`, `opportunity-stay`, `watch`, `carried-forward`, `dropped-low-score`, `dropped-gate-fail`, `cap-truncated`, `watch-cap`, `removed-low-score-streak`, `removed-gate-fail-streak`, `now-core`; `details.gate_rule`: `insufficient-bars`, `liquidity`, `bollinger-pass`, `bollinger-weekly-broken`, `bollinger-daily-extended`, `bollinger-both`, `volume-demotion`, `fetch-error`, `gate-error`; `details.thresholds` (entry/exit) |
 | `collect` (ticker_collector) | `written`, `exists`, `failed` (+ reason), `not-collected-watch`, `opportunity-dropped-stale-pool` |
-| `evaluate` (evaluator) | `pass`, `warn`, `fail`, `skipped-below-threshold`, `skipped-absent` |
-| `trigger` (analysis_runner) | `core`, `core-pair`, `catalyst`, `no-score`, `eval-fail`, `below-threshold`, `budget-dropped`, `already-done`, `macro-fail-feeds-only` |
-| `decide` (analysis_runner) | `BUY`, `SELL`, `HOLD`, `ERROR`; `details`: `arm`, `run_id`, `pm_rating`, `plan_valid`, `violations[]`, `error` |
-| `execute` (execution_adapter) | non-candidates `hold`, `feeds-arm`, `plan-invalid`, `action-mismatch`, `incomplete-plan`, `superseded`; every existing skip reason (`stale-quote`, `total-risk`, …); `submitted` (`details`: live/dry, broker status, qty, prices) |
+| `evaluate` (evaluator) | `pass`, `warn`, `fail` (`info` for core — the brief is withheld but the ticker runs; `excluded` for opportunity), `eval-error`, `skipped-below-threshold`, `skipped-absent` |
+| `trigger` (analysis_runner) | `core`, `core-pair`, `catalyst`, `no-score`, `eval-fail`, `below-threshold`, `budget-dropped`, `already-done`, `macro-fail-feeds-only`; manual runs emit nothing |
+| `decide` (analysis_runner) | `BUY`, `SELL`, `HOLD`, `ERROR`; `details`: `arm`, `run_id`, `pair_id`, `pm_rating` (raw five-tier rating, now also in the child's result payload), `plan_valid`, `violations[]`, `error`, `flags`, `execute_eligible` |
+| `execute` (execution_adapter) | non-candidates `hold`, `error`, `feeds-arm`, `no-plan`, `plan-invalid`, `action-mismatch`, `incomplete-plan`, `non-us-session` (from `non_candidate_reason`, the single source of the candidate filter); `superseded` (`info`); every order skip reason by its code (`stale-quote`, `total-risk`, `submit-error`, …); `submitted`; `cancel` (`info`) |
 
 ### R2 — Component output archive (safety net)
 

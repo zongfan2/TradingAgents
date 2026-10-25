@@ -87,6 +87,7 @@ from pipeline.contracts.ledger import (
     PositionsSnapshot,
     TradePlan,
 )
+from pipeline.funnel_events import FunnelEvents, best_effort, reason_code
 
 logger = logging.getLogger("pipeline.execution_adapter")
 
@@ -630,21 +631,30 @@ def _buy_plan_shape_ok(plan: TradePlan) -> bool:
 def is_execution_candidate(record: DecisionRecord) -> bool:
     """The shape filter: rows that are not executable plans at all produce no
     ``orders.jsonl`` rows (HOLD, ERROR, feeds shadow, invalid plans)."""
-    if (
-        record.session != "us"
-        or record.arm != "brief"
-        or record.plan is None
-        or not record.plan_valid
-        or record.decision not in ("BUY", "SELL")
-        or record.plan.action != record.decision
-    ):
-        return False
+    return non_candidate_reason(record) is None
+
+
+def non_candidate_reason(record: DecisionRecord) -> str | None:
+    """Why a row is not an execution candidate (a decision-funnel code), or
+    ``None`` for a candidate — the single source of the shape filter."""
+    if record.session != "us":
+        return "non-us-session"
+    if record.arm != "brief":
+        return "feeds-arm"
+    if record.decision not in ("BUY", "SELL"):
+        return "error" if record.decision == "ERROR" else "hold"
+    if record.plan is None:
+        return "no-plan"
+    if not record.plan_valid:
+        return "plan-invalid"
+    if record.plan.action != record.decision:
+        return "action-mismatch"
     if record.plan.action == "BUY" and not _buy_plan_shape_ok(record.plan):
         logger.warning(
             "%s: plan_valid row with an incomplete BUY plan — not executable", record.run_id
         )
-        return False
-    return True
+        return "incomplete-plan"
+    return None
 
 
 def blocking_reason(
@@ -814,6 +824,24 @@ def _cid_order_kind(client_order_id: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+@best_effort
+def _emit_execute_funnel(funnel: FunnelEvents, record: DecisionRecord, row: dict) -> None:
+    """Execute-stage funnel event for one written order row (best-effort)."""
+    kind = row.get("kind")
+    details = {
+        key: row.get(key) for key in DIGEST_KEYS if key not in ("ticker", "kind", "reason")
+    }
+    details.update(run_id=record.run_id, client_order_id=row.get("client_order_id"))
+    if kind == "skip":
+        reason = str(row.get("reason") or "skip")
+        funnel.emit("execute", record.ticker, "excluded", reason_code(reason), reason, **details)
+    elif kind == "submitted":
+        mode = "dry-run" if row.get("dry_run") else "live"
+        funnel.emit("execute", record.ticker, "passed", "submitted", f"submitted ({mode})", **details)
+    elif kind == "cancel":
+        funnel.emit("execute", record.ticker, "info", "cancel", "open order canceled", **details)
+
+
 #: Order-row fields carried per order in the submit summary's ``orders`` list.
 DIGEST_KEYS = (
     "ticker",
@@ -849,8 +877,10 @@ class _SubmitRun:
         slot_date: date,
         dry_run: bool,
         clock: Clock,
+        funnel: FunnelEvents | None = None,
     ) -> None:
         self.config = config
+        self.funnel = funnel
         self.settings = settings
         self.broker = broker
         self.session = session
@@ -986,6 +1016,8 @@ class _SubmitRun:
         row = _append_order_row(self.config, payload, self.clock)
         if kind != "intent":  # an intent is always followed by its outcome row
             self.digest.append({key: row.get(key) for key in DIGEST_KEYS})
+            if self.funnel is not None:
+                _emit_execute_funnel(self.funnel, record, row)
 
     def skip(self, record: DecisionRecord, reason: str, client_order_id: str) -> None:
         self.counters["skipped"] += 1
@@ -1365,6 +1397,7 @@ def run_submit(
     execute: bool = False,
     dry_run: bool = False,
     clock: Clock = _utc_now,
+    funnel: FunnelEvents | None = None,
 ) -> dict:
     """The ``submit`` entrypoint (R1): read the slot's decisions, apply S1-S9
     in order, append one row per attempt/outcome, return the stdout summary."""
@@ -1373,6 +1406,7 @@ def run_submit(
     account = broker.get_account()  # S1 — before any ledger read or order
     _require_paper(account)
 
+    superseded: list[DecisionRecord] = []
     if run_id is not None:
         record = _find_record(config.ledger_dir, run_id)
         if record.session != "us":
@@ -1388,12 +1422,21 @@ def run_submit(
         # Ledger current-state rule: only the greatest attempt per
         # (ticker, arm) is the slot's decision — a rerun before step 7 must
         # never execute both the superseded and the current plan.
-        records = _latest_attempts(
-            [
-                r
-                for r in load_decision_records(config.ledger_dir)
-                if r.date == slot_date and r.session == session
-            ]
+        slot_records = [
+            r
+            for r in load_decision_records(config.ledger_dir)
+            if r.date == slot_date and r.session == session
+        ]
+        records = _latest_attempts(slot_records)
+        current = {id(r) for r in records}
+        superseded = [r for r in slot_records if id(r) not in current]
+    if funnel is None:
+        funnel = FunnelEvents(config.state_dir, session, slot_date, "execution_adapter", clock=clock)
+    for record in superseded:
+        funnel.emit(
+            "execute", record.ticker, "info", "superseded",
+            "a later attempt of this ticker/arm is the slot's decision",
+            run_id=record.run_id, arm=record.arm,
         )
 
     run = _SubmitRun(
@@ -1405,10 +1448,17 @@ def run_submit(
         slot_date=slot_date,
         dry_run=dry_run,
         clock=clock,
+        funnel=funnel,
     )
     allow_manual = run_id is not None and execute
     for record in records:
-        if not is_execution_candidate(record):
+        not_candidate = non_candidate_reason(record)
+        if not_candidate is not None:
+            funnel.emit(
+                "execute", record.ticker, "excluded", not_candidate,
+                f"not an execution candidate: {not_candidate}",
+                run_id=record.run_id, arm=record.arm, decision=record.decision,
+            )
             logger.info(
                 "not an execution candidate: %s (arm=%s decision=%s plan_valid=%s)",
                 record.run_id,

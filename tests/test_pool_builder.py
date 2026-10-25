@@ -1718,3 +1718,151 @@ def test_default_runner_codex_command_is_a_working_invocation(monkeypatch):
     # check skipped (components inherit an arbitrary cwd), prompt over stdin.
     assert seen["cmd"] == ["codex", "exec", "-c", "tools.web_search=true", "--skip-git-repo-check", "-"]
     assert seen["input"] == "PROMPT"
+
+
+# ---------------------------------------------------------------------------
+# Decision-funnel events (specs/decision-funnel.md R1)
+# ---------------------------------------------------------------------------
+
+
+def funnel_codes(events, stage):
+    return {e["ticker"]: (e["outcome"], e["code"]) for e in events.emitted if e["stage"] == stage}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "closes, gate, rule",
+    [
+        (PASS_CLOSES, "pass", "bollinger-pass"),
+        (OVERHEAT_CLOSES, "watch", "bollinger-daily-extended"),
+        (WEEKLY_BROKEN_CLOSES, "watch", "bollinger-weekly-broken"),
+        (NEITHER_CLOSES, "fail", "bollinger-both"),
+        (SHORT_CLOSES, "fail", "insufficient-bars"),
+    ],
+)
+def test_gate_rule_names_the_step_that_settled_the_verdict(closes, gate, rule):
+    from pipeline.pool_builder import technical_gate_rule
+
+    # No session: the structure legs alone (the liquidity floor is tested below).
+    block, fired = technical_gate_rule(make_bars(closes))
+    assert (block.gate, fired) == (gate, rule)
+    assert technical_gate(make_bars(closes)) == block
+
+
+@pytest.mark.unit
+def test_gate_rule_liquidity_and_volume_demotion():
+    from pipeline.pool_builder import technical_gate_rule
+
+    thin = make_bars(PASS_CLOSES, volumes=[10.0] * len(PASS_CLOSES))
+    assert technical_gate_rule(thin, session="us")[1] == "liquidity"
+    flat = make_bars(PASS_CLOSES, volumes=[LIQUID_BASE_VOLUME] * len(PASS_CLOSES))
+    assert technical_gate_rule(flat, session="us")[0].gate == "watch"
+    assert technical_gate_rule(flat, session="us")[1] == "volume-demotion"
+
+
+@pytest.mark.unit
+def test_build_pool_records_every_nominee_and_layer_decision(pool_dir, tmp_path):
+    from pipeline.funnel_events import FunnelEvents
+
+    write_core(pool_dir, [{"ticker": "NVDA", "note": "holding"}])
+    write_prior_pool(
+        pool_dir,
+        FRIDAY.isoformat(),
+        opportunity=[prior_opportunity("OLD", score=3.0, low=2), prior_opportunity("KEEP")],
+    )
+    runner = FakeRunner(
+        [
+            nomination_json(
+                nominee("AVGO", 7.5),  # pass + high ⇒ enter
+                nominee("MRVL", 5.0),  # pass + [exit, entry) ⇒ watch
+                nominee("LOWW", 3.0),  # pass + < exit ⇒ dropped
+                nominee("DOWN", 5.0),  # fetch error ⇒ gate fail + low ⇒ dropped
+                nominee("KEEP", 7.0),
+                nominee("0700.HK", 8.0),  # wrong session
+                nominee("AVGO", 9.9),  # duplicate
+            )
+        ]
+    )
+    fetcher = FakeFetcher({"DOWN": ConnectionError("down")})
+    events = FunnelEvents(tmp_path / "state", "us", RUN_DATE, "pool_builder")
+    build_pool("us", as_of=RUN_DATE, runner=runner, fetch_ohlcv=fetcher, funnel=events)
+
+    assert funnel_codes(events, "nominate") == {
+        "AVGO": ("excluded", "duplicate"),  # the dropped second occurrence
+        "MRVL": ("passed", "nominated"),
+        "LOWW": ("passed", "nominated"),
+        "DOWN": ("passed", "nominated"),
+        "KEEP": ("passed", "nominated"),
+        "0700.HK": ("excluded", "wrong-session"),
+    }
+    nominated = [e["ticker"] for e in events.emitted if e["code"] == "nominated"]
+    assert nominated.count("AVGO") == 1
+    pool = funnel_codes(events, "pool")
+    assert pool == {
+        "NVDA": ("passed", "core"),
+        "AVGO": ("passed", "opportunity-enter"),
+        "KEEP": ("passed", "opportunity-stay"),
+        "OLD": ("excluded", "removed-low-score-streak"),
+        "MRVL": ("excluded", "watch"),
+        "LOWW": ("excluded", "dropped-low-score"),
+        "DOWN": ("excluded", "dropped-gate-fail"),
+    }
+    by_ticker = {e["ticker"]: e for e in events.emitted if e["stage"] == "pool"}
+    assert by_ticker["DOWN"]["details"]["gate_rule"] == "fetch-error"
+    assert by_ticker["DOWN"]["details"]["gate"] == "fail"
+    assert by_ticker["AVGO"]["details"]["gate_rule"] == "bollinger-pass"
+    assert by_ticker["MRVL"]["reason"] == "score 5 in [exit 4, entry 6)"
+    assert by_ticker["LOWW"]["details"]["thresholds"] == {"entry": 6.0, "exit": 4.0}
+
+
+@pytest.mark.unit
+def test_build_pool_records_cap_truncations(pool_dir, tmp_path):
+    from pipeline.funnel_events import FunnelEvents
+    from pipeline.pool_builder import OPPORTUNITY_CAP, WATCH_CAP
+
+    entrants = [nominee(f"E{i}", 9.0 - i * 0.1) for i in range(OPPORTUNITY_CAP + 1)]
+    watchers = [nominee(f"W{i:02d}", 5.5 - i * 0.01) for i in range(WATCH_CAP + 1)]
+    runner = FakeRunner([nomination_json(*entrants, *watchers)])
+    events = FunnelEvents(tmp_path / "state", "us", RUN_DATE, "pool_builder")
+    build_pool("us", as_of=RUN_DATE, runner=runner, fetch_ohlcv=FakeFetcher(), funnel=events)
+    pool = funnel_codes(events, "pool")
+    assert pool[f"E{OPPORTUNITY_CAP}"] == ("excluded", "cap-truncated")
+    assert pool[f"W{WATCH_CAP:02d}"] == ("excluded", "watch-cap")
+    assert pool["E0"] == ("passed", "opportunity-enter")
+    assert pool["W00"] == ("excluded", "watch")
+
+
+@pytest.mark.unit
+def test_carried_forward_pool_records_nomination_failure(pool_dir, tmp_path):
+    from pipeline.funnel_events import FunnelEvents
+
+    write_prior_pool(
+        pool_dir, FRIDAY.isoformat(),
+        opportunity=[prior_opportunity("AVGO")], watch=[prior_watch("MRVL")],
+    )
+    events = FunnelEvents(tmp_path / "state", "us", RUN_DATE, "pool_builder")
+    build_pool(
+        "us", as_of=RUN_DATE, runner=FakeRunner([RuntimeError("backend down")]),
+        fetch_ohlcv=FakeFetcher(), funnel=events,
+    )
+    (failure,) = [e for e in events.emitted if e["stage"] == "nominate"]
+    assert (failure["ticker"], failure["code"]) == (None, "nomination-failed")
+    assert "backend down" in failure["reason"]
+    assert funnel_codes(events, "pool") == {
+        "AVGO": ("passed", "carried-forward"),
+        "MRVL": ("excluded", "carried-forward"),
+    }
+
+
+@pytest.mark.unit
+def test_build_pool_default_events_land_in_the_state_dir(pool_dir, tmp_path, monkeypatch):
+    from pipeline.funnel_events import read_events
+
+    monkeypatch.setenv("TRADINGAGENTS_STATE_DIR", str(tmp_path / "state"))
+    runner = FakeRunner([nomination_json(nominee("AVGO", 7.5))])
+    build_pool("us", as_of=RUN_DATE, runner=runner, fetch_ohlcv=FakeFetcher())
+    events = read_events(tmp_path / "state", "us", RUN_DATE)
+    assert {(e["stage"], e["ticker"], e["code"]) for e in events} == {
+        ("nominate", "AVGO", "nominated"),
+        ("pool", "AVGO", "opportunity-enter"),
+    }

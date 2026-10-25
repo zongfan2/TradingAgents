@@ -257,6 +257,9 @@ def run_once(args, graph_factory: GraphFactory) -> dict:
         "session": args.session,
         "arm": args.arm,
         "decision": normalize_decision(signal, plan),
+        # The raw PM rating (five-tier) before the BUY/SELL/HOLD projection —
+        # for the decision funnel (spec decision-funnel R1).
+        "pm_rating": " ".join(str(getattr(signal, "value", signal) or "").split())[:40] or None,
         "plan": plan,
         "plan_error": plan_error,
         "repair_used": repair_used,

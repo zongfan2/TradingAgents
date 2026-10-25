@@ -1168,3 +1168,66 @@ def test_batch_cli_dispatch_and_validation(batch_dirs, capsys):
     assert main(["--batch-tickers", "--session", "us", "--date", "2026-08-03"]) == EXIT_OK
     summary = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert summary["requested"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Decision-funnel events (specs/decision-funnel.md R1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_batch_records_each_ticker_outcome(batch_dirs, tmp_path, capsys):
+    from pipeline.funnel_events import FunnelEvents
+
+    pool_dir, brief_dir = batch_dirs
+    day = "2026-08-03"
+    _write_pool(pool_dir, "us", day, core=("NVDA", "MSFT"), opportunity=("AMD", "INTC", "TSLA"))
+    write_brief(brief_dir / "NVDA", f"{day}.md", ticker_text(catalyst_score=2.0))
+    write_brief(brief_dir / "AMD", f"{day}.md", ticker_text(ticker="AMD", catalyst_score=7.5))
+    write_brief(brief_dir / "INTC", f"{day}.md", ticker_text(ticker="INTC", catalyst_score=3.0))
+    events = FunnelEvents(tmp_path / "state", "us", day, "ticker_evaluators")
+    batch_tickers("us", date_str=day, runner=FakeRunner(judgment(), judgment()), funnel=events)
+    codes = {e["ticker"]: (e["outcome"], e["code"]) for e in events.emitted}
+    assert codes == {
+        "NVDA": ("passed", "pass"),
+        "MSFT": ("info", "skipped-absent"),  # core still runs on feeds
+        "AMD": ("passed", "pass"),
+        "INTC": ("excluded", "skipped-below-threshold"),
+        "TSLA": ("excluded", "skipped-absent"),
+    }
+    intc = next(e for e in events.emitted if e["ticker"] == "INTC")
+    assert intc["details"] == {"score": 3.0, "threshold": 7.0}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("layer, outcome", [("core", "info"), ("opportunity", "excluded")])
+def test_batch_eval_fail_stops_only_an_opportunity(batch_dirs, tmp_path, capsys, layer, outcome):
+    from pipeline.funnel_events import FunnelEvents
+
+    pool_dir, brief_dir = batch_dirs
+    day = "2026-08-03"
+    tickers = {"core": (("AMD",), ()), "opportunity": ((), ("AMD",))}[layer]
+    _write_pool(pool_dir, "us", day, core=tickers[0], opportunity=tickers[1])
+    write_brief(brief_dir / "AMD", f"{day}.md", ticker_text(ticker="AMD", catalyst_score=8.0))
+    events = FunnelEvents(tmp_path / "state", "us", day, "ticker_evaluators")
+    failing = judgment(scores=dict.fromkeys(SCORE_DIMENSIONS, 1.0))
+    batch_tickers("us", date_str=day, runner=FakeRunner(failing), funnel=events)
+    (event,) = events.emitted
+    assert (event["ticker"], event["outcome"], event["code"]) == ("AMD", outcome, "fail")
+
+
+@pytest.mark.unit
+def test_batch_backend_failure_is_an_eval_error_event(batch_dirs, tmp_path, capsys):
+    from pipeline.funnel_events import FunnelEvents
+
+    pool_dir, brief_dir = batch_dirs
+    day = "2026-08-03"
+    _write_pool(pool_dir, "us", day, core=("NVDA",))
+    write_brief(brief_dir / "NVDA", f"{day}.md", ticker_text())
+    events = FunnelEvents(tmp_path / "state", "us", day, "ticker_evaluators")
+    batch_tickers(
+        "us", date_str=day, runner=FakeRunner(BackendError("boom"), BackendError("boom")),
+        funnel=events,
+    )
+    (event,) = events.emitted
+    assert (event["code"], event["reason"]) == ("eval-error", "evaluation backend failed")

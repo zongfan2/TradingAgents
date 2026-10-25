@@ -1542,3 +1542,122 @@ def test_main_emits_per_run_lines_and_final_summary(tmp_path, monkeypatch, capsy
     assert summary["completed"] == 1
     assert summary["errors"] == 0
     assert summary["invalid_plans"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Decision-funnel events (specs/decision-funnel.md R1)
+# ---------------------------------------------------------------------------
+
+
+class RatedChild(FakeChild):
+    """FakeChild whose payload also carries the raw PM rating."""
+
+    def __init__(self, ratings, **kwargs):
+        super().__init__(**kwargs)
+        self.ratings = ratings
+
+    def __call__(self, spec, timeout):
+        result = super().__call__(spec, timeout)
+        if result.payload is not None:
+            result.payload["pm_rating"] = self.ratings.get(spec.ticker)
+        return result
+
+
+def funnel_by(events, stage):
+    return {e["ticker"]: e for e in events.emitted if e["stage"] == stage}
+
+
+@pytest.mark.unit
+def test_trigger_and_decide_events_cover_every_ticker(tmp_path):
+    from pipeline.funnel_events import FunnelEvents
+
+    config = make_config(tmp_path)
+    write_pool(
+        config, "us", SLOT, core=("AAA", "HLD"),
+        opportunity=(("HOT", 6.0), ("COLD", 9.0), ("BAD", 9.0), ("NOBRIEF", 9.0)),
+    )
+    macro = write_brief(config.macro_brief_dir / "2026-08-07.us.md")
+    write_eval(macro, "pass")
+    briefs = {}
+    for ticker, score, verdict in (("HOT", 7.5, "pass"), ("COLD", 6.9, "pass"), ("BAD", 9.5, "fail")):
+        briefs[ticker] = write_brief(
+            config.ticker_brief_dir / ticker / "2026-08-07.md", catalyst_score=score
+        )
+        write_eval(briefs[ticker], verdict)
+    child = RatedChild(
+        {"AAA": "Overweight", "HLD": "Underweight", "HOT": "Buy"},
+        plans={"HLD": None},
+        decisions={"HLD": "HOLD"},
+    )
+    events = FunnelEvents(config.state_dir, "us", SLOT, "analysis_runner")
+    run(config, make_resolvers(macro, briefs), child, funnel=events)
+
+    trigger = funnel_by(events, "trigger")
+    assert {t: (e["outcome"], e["code"]) for t, e in trigger.items()} == {
+        "AAA": ("passed", "core"),
+        "HLD": ("passed", "core"),
+        "HOT": ("passed", "catalyst"),
+        "COLD": ("excluded", "below-threshold"),
+        "BAD": ("excluded", "eval-fail"),
+        "NOBRIEF": ("excluded", "no-score"),
+    }
+    assert trigger["COLD"]["reason"] == "brief catalyst_score 6.9 < trigger 7"
+    assert trigger["COLD"]["details"] == {"score": 6.9, "threshold": 7.0}
+    decide = funnel_by(events, "decide")
+    assert {t: (e["outcome"], e["code"]) for t, e in decide.items()} == {
+        "AAA": ("passed", "BUY"),
+        "HLD": ("excluded", "HOLD"),
+        "HOT": ("passed", "BUY"),
+    }
+    assert decide["HLD"]["reason"] == "HOLD (PM: Underweight)"
+    assert decide["AAA"]["details"]["pm_rating"] == "Overweight"
+    assert decide["AAA"]["details"]["run_id"] == "2026-08-07-us-AAA-brief-1"
+
+
+@pytest.mark.unit
+def test_decide_event_carries_plan_violations_and_errors(tmp_path):
+    from pipeline.funnel_events import FunnelEvents
+
+    config = make_config(tmp_path)
+    write_pool(config, "us", SLOT, core=("NOPLAN", "BOOM"))
+    child = FakeChild(plans={"NOPLAN": None}, decisions={"NOPLAN": "BUY"}, fail=("BOOM",))
+    events = FunnelEvents(config.state_dir, "us", SLOT, "analysis_runner")
+    run(config, make_resolvers(), child, funnel=events)
+    decide = funnel_by(events, "decide")
+    assert decide["NOPLAN"]["outcome"] == "excluded"
+    assert decide["NOPLAN"]["reason"] == "plan invalid: no TradePlan block extracted"
+    assert decide["NOPLAN"]["details"]["violations"] == ["no TradePlan block extracted"]
+    assert (decide["BOOM"]["code"], decide["BOOM"]["reason"]) == ("ERROR", "child boom")
+
+
+@pytest.mark.unit
+def test_budget_drop_and_rerun_skip_are_recorded(tmp_path):
+    from pipeline.funnel_events import FunnelEvents
+
+    config = make_config(tmp_path)
+    write_pool(config, "us", SLOT, core=("AAA", "BBB"), opportunity=(("HOT", 8.0),))
+    macro = write_brief(config.macro_brief_dir / "2026-08-07.us.md")
+    write_eval(macro, "pass")
+    hot = write_brief(config.ticker_brief_dir / "HOT" / "2026-08-07.md", catalyst_score=8.5)
+    write_eval(hot, "pass")
+    settings = ar.RunnerSettings(ab_pairing="paired", ab_core_pairs_per_slot=2, max_runs_per_slot=3)
+    events = FunnelEvents(config.state_dir, "us", SLOT, "analysis_runner")
+    run(config, make_resolvers(macro, {"HOT": hot}), FakeChild(), settings=settings, funnel=events)
+    trigger = funnel_by(events, "trigger")
+    assert (trigger["HOT"]["outcome"], trigger["HOT"]["code"]) == ("excluded", "budget-dropped")
+    assert {trigger[t]["code"] for t in ("AAA", "BBB")} <= {"core", "core-pair"}
+
+    again = FunnelEvents(config.state_dir, "us", SLOT, "analysis_runner")
+    run(config, make_resolvers(macro, {"HOT": hot}), FakeChild(), settings=settings, funnel=again)
+    skipped = {e["ticker"] for e in again.emitted if e["code"] == "already-done"}
+    # AAA's pair completed; BBB was demoted to solo, so its pair re-runs.
+    assert skipped == {"AAA"}
+
+
+@pytest.mark.unit
+def test_manual_runs_stay_out_of_the_funnel(tmp_path):
+    from pipeline.funnel_events import read_events
+
+    config = make_config(tmp_path)
+    run(config, make_resolvers(), FakeChild(), manual_ticker="TSLA")
+    assert read_events(config.state_dir, "us", SLOT) == []

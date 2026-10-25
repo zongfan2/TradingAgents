@@ -73,6 +73,7 @@ from pipeline.contracts.briefs import (
     validate_ticker_brief_path,
 )
 from pipeline.contracts.pool import PoolReadResult, read_pool
+from pipeline.funnel_events import FunnelEvents, best_effort
 from pipeline.prompts import PROMPTS_DIR
 
 logger = logging.getLogger("pipeline.ticker_collector")
@@ -637,6 +638,7 @@ def collect_all(
     pool_dir: str | Path | None = None,
     concurrency: int | None = None,
     pool_max_staleness_days: int | None = None,
+    funnel: FunnelEvents | None = None,
 ) -> CollectSummary:
     """Collect briefs for the session's ``core ∪ opportunity`` tickers.
 
@@ -666,7 +668,7 @@ def collect_all(
     max_workers = _resolve_concurrency(concurrency)
     log_path = brief_dir / COLLECTOR_LOG_NAME
 
-    jobs, _pool_result = resolve_jobs(pool_dir, session, as_of, pool_max_staleness_days)
+    jobs, pool_result = resolve_jobs(pool_dir, session, as_of, pool_max_staleness_days)
     prefailed: list[TickerOutcome] = []
     if tickers is not None:
         jobs, prefailed = _subset_jobs(jobs, tickers)
@@ -707,7 +709,51 @@ def collect_all(
                 for job in jobs
             ]
             outcomes = [future.result() for future in futures]  # collect_one never raises
-    return CollectSummary(date=as_of, session=session, outcomes=outcomes + prefailed)
+    summary = CollectSummary(date=as_of, session=session, outcomes=outcomes + prefailed)
+    _emit_collect_funnel(
+        funnel or FunnelEvents(config.state_dir, session, as_of, "ticker_collectors"),
+        summary,
+        pool_result,
+        subset=tickers is not None,
+    )
+    return summary
+
+
+@best_effort
+def _emit_collect_funnel(
+    events: FunnelEvents, summary: CollectSummary, pool_result, *, subset: bool
+) -> None:
+    """Decision-funnel events (spec decision-funnel R1): one per collected
+    ticker, plus the pool tickers collection never reaches on purpose."""
+    for outcome in summary.outcomes:
+        if outcome.outcome == "failed":
+            events.emit(
+                "collect", outcome.ticker, "excluded", "failed", outcome.reason or "",
+                attempts=outcome.attempts,
+            )
+        else:
+            events.emit(
+                "collect", outcome.ticker, "passed",
+                "written" if outcome.outcome == "written" else "exists",
+                outcome.reason or "",
+                sources_count=outcome.sources_count, catalyst_score=outcome.catalyst_score,
+            )
+    pool = pool_result.pool
+    if subset or pool is None:
+        return  # a manual subset says nothing about the layers it skipped
+    if pool_result.staleness == "absent":
+        for entry in pool.opportunity:
+            events.emit(
+                "collect", entry.ticker, "excluded", "opportunity-dropped-stale-pool",
+                f"pool {pool_result.gap_days} day(s) old — opportunity layer dropped",
+                gap_days=pool_result.gap_days,
+            )
+        return
+    for entry in pool.watch:
+        events.emit(
+            "collect", entry.ticker, "excluded", "not-collected-watch",
+            "watch layer is not collected", score=entry.score,
+        )
 
 
 # ---------------------------------------------------------------------------

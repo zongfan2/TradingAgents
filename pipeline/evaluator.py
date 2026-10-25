@@ -73,6 +73,7 @@ from pipeline.contracts.evals import (
     TickerEvalReport,
     compute_verdict,
 )
+from pipeline.funnel_events import FunnelEvents
 
 EVALUATOR_MODEL = "gpt-5.6-terra"
 #: Evaluator identity written into the eval json for the claude backend (the
@@ -644,6 +645,7 @@ def batch_tickers(
     force: bool = False,
     backend: str | None = None,
     runner: Runner | None = None,
+    funnel: FunnelEvents | None = None,
 ) -> int:
     """Orchestrator step 5: evaluate the day's ticker briefs per the quota
     policy — every collected core brief, plus every opportunity brief whose
@@ -682,7 +684,10 @@ def batch_tickers(
             entry.ticker for entry in result.pool.opportunity if entry.ticker not in set(core)
         ]
 
+    events = funnel or FunnelEvents(config.state_dir, session, day, "ticker_evaluators")
     jobs: list[Path] = []
+    #: brief path -> (ticker, layer) for the funnel events
+    job_tickers: dict[Path, tuple[str, str]] = {}
     absent = 0
     below_threshold = 0
     brief_root = Path(config.ticker_brief_dir)
@@ -690,41 +695,69 @@ def batch_tickers(
         path = brief_root / ticker / f"{day.isoformat()}.md"
         if path.is_file():
             jobs.append(path)
+            job_tickers[path] = (ticker, "core")
         else:
             absent += 1
+            events.emit("evaluate", ticker, "info", "skipped-absent", "no brief to evaluate")
     for ticker in opportunity:
         path = brief_root / ticker / f"{day.isoformat()}.md"
         if not path.is_file():
             absent += 1
+            events.emit("evaluate", ticker, "excluded", "skipped-absent", "no brief to evaluate")
             continue
         score = _batch_catalyst_score(path.read_text(encoding="utf-8"))
         if score is not None and score < threshold:
             below_threshold += 1
+            events.emit(
+                "evaluate", ticker, "excluded", "skipped-below-threshold",
+                f"brief catalyst_score {score:g} < trigger {threshold:g}",
+                score=score, threshold=threshold,
+            )
             continue
         jobs.append(path)
+        job_tickers[path] = (ticker, "opportunity")
 
     counts = {"ok": 0, "refused": 0, "backend_failed": 0, "errors": 0}
     verdicts: dict[str, int] = {}
 
     def _evaluate(path: Path) -> None:
         rc = evaluate_brief(path, force=force, backend=backend, runner=runner)
+        ticker, layer = job_tickers[path]
         if rc == EXIT_OK:
             counts["ok"] += 1
+            flagged = None
             try:
-                verdict = str(
-                    json.loads(eval_path_for(path).read_text(encoding="utf-8")).get(
-                        "verdict", "unknown"
-                    )
-                )
-            except (OSError, ValueError):
+                payload = json.loads(eval_path_for(path).read_text(encoding="utf-8"))
+                verdict = str(payload.get("verdict", "unknown"))
+                flagged = len(payload.get("flagged_claims") or [])
+            except (OSError, ValueError, AttributeError):
                 verdict = "unknown"
             verdicts[verdict] = verdicts.get(verdict, 0) + 1
-        elif rc == EXIT_REFUSED:
+            if verdict in ("pass", "warn"):
+                events.emit(
+                    "evaluate", ticker, "passed", verdict, f"eval {verdict}",
+                    flagged_claims=flagged,
+                )
+            elif verdict == "fail":
+                # Core still runs (brief withheld); an opportunity stops here.
+                events.emit(
+                    "evaluate", ticker, "info" if layer == "core" else "excluded", "fail",
+                    "eval fail" + (" — brief withheld" if layer == "core" else ""),
+                    flagged_claims=flagged,
+                )
+            else:
+                events.emit("evaluate", ticker, "info", "eval-error", "eval verdict unreadable")
+            return
+        if rc == EXIT_REFUSED:
             counts["refused"] += 1
+            why = "refused"
         elif rc == EXIT_BACKEND_FAILURE:
             counts["backend_failed"] += 1
+            why = "backend failed"
         else:
             counts["errors"] += 1
+            why = f"exit {rc}"
+        events.emit("evaluate", ticker, "info", "eval-error", f"evaluation {why}")
 
     if jobs:
         with ThreadPoolExecutor(max_workers=min(TICKER_EVAL_CONCURRENCY, len(jobs))) as pool:

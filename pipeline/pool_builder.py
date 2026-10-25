@@ -90,6 +90,7 @@ from pipeline.contracts.pool import (
     WatchEntry,
     read_pool,
 )
+from pipeline.funnel_events import FunnelEvents, best_effort
 from pipeline.prompts import PROMPTS_DIR
 
 logger = logging.getLogger("pipeline.pool_builder")
@@ -713,7 +714,34 @@ def evaluate_gate(
     avg_dollar_volume_20d: float | None = None,
     volume_ratio_5d_20d: float | None = None,
 ) -> Gate:
-    """The spec's v1.1 rule set, as a pure decision on snapshot values, in
+    """The verdict of :func:`gate_decision` (see there for the rules)."""
+    return gate_decision(
+        n_daily_bars,
+        daily,
+        weekly,
+        rules,
+        session=session,
+        avg_dollar_volume_20d=avg_dollar_volume_20d,
+        volume_ratio_5d_20d=volume_ratio_5d_20d,
+    )[0]
+
+
+def gate_decision(
+    n_daily_bars: int,
+    daily: BollBands | None,
+    weekly: BollBands | None,
+    rules: GateRules | None = None,
+    *,
+    session: str | None = None,
+    avg_dollar_volume_20d: float | None = None,
+    volume_ratio_5d_20d: float | None = None,
+) -> tuple[Gate, str]:
+    """``(verdict, rule)``: the rule is the decision-funnel code of the step
+    that settled the verdict (``insufficient-bars``, ``liquidity``,
+    ``bollinger-pass``, ``bollinger-weekly-broken``,
+    ``bollinger-daily-extended``, ``bollinger-both``, ``volume-demotion``).
+
+    The spec's v1.1 rule set, as a pure decision on snapshot values, in
     the spec's fixed order:
 
     1. History < ``min_daily_bars`` daily bars ⇒ ``fail``.
@@ -733,19 +761,21 @@ def evaluate_gate(
     """
     rules = rules or GateRules()
     if n_daily_bars < rules.min_daily_bars:
-        return "fail"
+        return "fail", "insufficient-bars"
     floor = rules.min_avg_dollar_volume.get(session) if session is not None else None
     if floor is not None and (avg_dollar_volume_20d is None or avg_dollar_volume_20d < floor):
-        return "fail"
+        return "fail", "liquidity"
     daily_ok = daily is not None and daily.close <= daily.upper * rules.daily_upper_mult
     weekly_ok = weekly is not None and weekly.close >= weekly.lower
     if daily_ok and weekly_ok:
         if volume_ratio_5d_20d is not None and volume_ratio_5d_20d < rules.volume_confirm_ratio:
-            return "watch"
-        return "pass"
-    if daily_ok or weekly_ok:
-        return "watch"
-    return "fail"
+            return "watch", "volume-demotion"
+        return "pass", "bollinger-pass"
+    if daily_ok:
+        return "watch", "bollinger-weekly-broken"
+    if weekly_ok:
+        return "watch", "bollinger-daily-extended"
+    return "fail", "bollinger-both"
 
 
 def technical_gate(
@@ -753,6 +783,15 @@ def technical_gate(
     rules: GateRules | None = None,
     session: str | None = None,
 ) -> TechnicalBlock:
+    """The :class:`TechnicalBlock` of :func:`technical_gate_rule`."""
+    return technical_gate_rule(bars, rules, session)[0]
+
+
+def technical_gate_rule(
+    bars: Sequence[Sequence],
+    rules: GateRules | None = None,
+    session: str | None = None,
+) -> tuple[TechnicalBlock, str]:
     """Full stage-3 verdict for one ticker's daily OHLCV history (gate v1.1).
 
     The band + liquidity snapshot is recorded whenever computable, regardless
@@ -766,16 +805,17 @@ def technical_gate(
     daily = bollinger([float(bar[4]) for bar in ordered], rules.boll_window, rules.boll_sigma)
     weekly = bollinger(weekly_closes(ordered), rules.boll_window, rules.boll_sigma)
     dollar_volume, volume_ratio = liquidity_metrics(ordered)
+    gate, rule = gate_decision(
+        len(ordered),
+        daily,
+        weekly,
+        rules,
+        session=session,
+        avg_dollar_volume_20d=dollar_volume,
+        volume_ratio_5d_20d=volume_ratio,
+    )
     return TechnicalBlock(
-        gate=evaluate_gate(
-            len(ordered),
-            daily,
-            weekly,
-            rules,
-            session=session,
-            avg_dollar_volume_20d=dollar_volume,
-            volume_ratio_5d_20d=volume_ratio,
-        ),
+        gate=gate,
         boll_daily=daily,
         boll_weekly=weekly,
         # The contract records only positive dollar volume (gt=0): an all-zero
@@ -784,7 +824,7 @@ def technical_gate(
             dollar_volume if dollar_volume is not None and dollar_volume > 0 else None
         ),
         volume_ratio_5d_20d=volume_ratio,
-    )
+    ), rule
 
 
 def default_fetch_daily_ohlcv(ticker: str) -> list[OhlcvBar]:
@@ -821,6 +861,7 @@ def _gate_snapshots(
     fetch: FetchOhlcv,
     rules: GateRules,
     session: str | None = None,
+    gate_rules_out: dict[str, str] | None = None,
 ) -> dict[str, TechnicalBlock | None]:
     """Gate every ticker in the day's evaluation universe. A fetch failure —
     or a gate computation error on one ticker's pathological bars — is
@@ -836,10 +877,16 @@ def _gate_snapshots(
         except Exception as exc:
             logger.warning("OHLCV fetch failed for %s — gate 'fail', no bands: %s", ticker, exc)
             snapshots[ticker] = None
+            if gate_rules_out is not None:
+                gate_rules_out[ticker] = "fetch-error"
             continue
         try:
-            snapshots[ticker] = technical_gate(bars, rules, session)
+            snapshots[ticker], rule = technical_gate_rule(bars, rules, session)
+            if gate_rules_out is not None:
+                gate_rules_out[ticker] = rule
         except Exception as exc:
+            if gate_rules_out is not None:
+                gate_rules_out[ticker] = "gate-error"
             logger.warning(
                 "technical gate failed for %s — treated like a fetch failure "
                 "(gate 'fail', no bands): %s",
@@ -863,6 +910,9 @@ class LifecycleResult:
     entered: list[str] = field(default_factory=list)
     exited: list[str] = field(default_factory=list)
     truncated: list[str] = field(default_factory=list)
+    #: ticker -> (outcome, code, reason) for the decision funnel (spec
+    #: decision-funnel R1); caps overwrite the earlier verdict.
+    funnel: dict[str, tuple[str, str, str]] = field(default_factory=dict)
 
 
 def apply_lifecycle(
@@ -888,6 +938,7 @@ def apply_lifecycle(
             logger.info(
                 "%s is now a core ticker — opportunity membership folds into core", ticker
             )
+            result.funnel[ticker] = ("info", "now-core", "opportunity member is now core")
             continue
         nomination = nominated.get(ticker)
         snapshot = gates.get(ticker)
@@ -920,6 +971,12 @@ def apply_lifecycle(
                 )
             )
             result.exited.append(ticker)
+            result.funnel[ticker] = (
+                "excluded",
+                "removed-low-score-streak",
+                f"score {score:g} < exit {rules.exit_threshold:g} "
+                f"for {rules.low_score_exit_streak} pools",
+            )
             continue
         if fail_streak >= rules.gate_fail_exit_streak:
             result.removed.append(
@@ -932,7 +989,17 @@ def apply_lifecycle(
                 )
             )
             result.exited.append(ticker)
+            result.funnel[ticker] = (
+                "excluded",
+                "removed-gate-fail-streak",
+                f"technical gate fail for {rules.gate_fail_exit_streak} pools",
+            )
             continue
+        result.funnel[ticker] = (
+            "passed",
+            "opportunity-stay",
+            f"member since {member.entered_on.isoformat()}, score {score:g}",
+        )
         result.opportunity.append(
             OpportunityEntry(
                 ticker=ticker,
@@ -969,6 +1036,11 @@ def apply_lifecycle(
                 )
             )
             result.entered.append(ticker)
+            result.funnel[ticker] = (
+                "passed",
+                "opportunity-enter",
+                f"gate pass, score {nomination.score:g} >= entry {rules.entry_threshold:g}",
+            )
         elif (
             gate == "watch"
             or (gate == "pass" and nomination.score >= rules.exit_threshold)
@@ -976,6 +1048,16 @@ def apply_lifecycle(
         ):
             # gate watch; or score in the [exit, entry) band; or strong
             # narrative on broken structure — watch, never enter.
+            if gate == "watch":
+                why = f"gate watch, score {nomination.score:g}"
+            elif gate == "pass":
+                why = (
+                    f"score {nomination.score:g} in [exit {rules.exit_threshold:g}, "
+                    f"entry {rules.entry_threshold:g})"
+                )
+            else:
+                why = f"gate fail despite score {nomination.score:g} >= entry"
+            result.funnel[ticker] = ("excluded", "watch", why)
             result.watch.append(
                 WatchEntry(
                     ticker=ticker,
@@ -990,6 +1072,18 @@ def apply_lifecycle(
             logger.info(
                 "dropping nominee %s (gate %s, score %.1f)", ticker, gate, nomination.score
             )
+            if gate == "fail":
+                result.funnel[ticker] = (
+                    "excluded",
+                    "dropped-gate-fail",
+                    f"gate fail, score {nomination.score:g} < entry {rules.entry_threshold:g}",
+                )
+            else:
+                result.funnel[ticker] = (
+                    "excluded",
+                    "dropped-low-score",
+                    f"score {nomination.score:g} < exit {rules.exit_threshold:g}",
+                )
 
     # Caps: truncate lowest-score-first and log every drop (contract hard
     # requirement 4). Sort is deterministic (score desc, ticker asc).
@@ -1005,6 +1099,11 @@ def apply_lifecycle(
             OPPORTUNITY_CAP,
             entry.ticker,
             entry.score,
+        )
+        result.funnel[entry.ticker] = (
+            "excluded",
+            "cap-truncated",
+            f"opportunity cap {OPPORTUNITY_CAP}: score {entry.score:g} ranked out",
         )
         if entry.ticker in prior_members:
             result.removed.append(
@@ -1025,6 +1124,11 @@ def apply_lifecycle(
             WATCH_CAP,
             entry.ticker,
             entry.score,
+        )
+        result.funnel[entry.ticker] = (
+            "excluded",
+            "watch-cap",
+            f"watch cap {WATCH_CAP}: score {entry.score:g} ranked out",
         )
     result.watch = result.watch[:WATCH_CAP]
     return result
@@ -1059,7 +1163,9 @@ class BuildResult:
 
 
 def _filter_session_nominees(
-    entries: list[NominationEntry], session: str
+    entries: list[NominationEntry],
+    session: str,
+    drops: list[tuple[str, str]] | None = None,
 ) -> dict[str, NominationEntry]:
     """Defensive post-validation filter: wrong-market symbols are dropped with
     a warning (they would fail the pool contract's session rule); duplicate
@@ -1070,11 +1176,15 @@ def _filter_session_nominees(
             logger.warning(
                 "dropping nominee %s — not a '%s'-session symbol", entry.ticker, session
             )
+            if drops is not None:
+                drops.append((entry.ticker, "wrong-session"))
             continue
         if entry.ticker in nominated:
             logger.warning(
                 "duplicate nomination for %s — keeping the first occurrence", entry.ticker
             )
+            if drops is not None:
+                drops.append((entry.ticker, "duplicate"))
             continue
         nominated[entry.ticker] = entry
     return nominated
@@ -1091,6 +1201,7 @@ def build_pool(
     pool_dir: str | Path | None = None,
     gate_rules: GateRules | None = None,
     lifecycle_rules: LifecycleRules | None = None,
+    funnel: FunnelEvents | None = None,
 ) -> BuildResult:
     """Run stages 1–5 for one session slot; raises :class:`BuilderError` only
     on the R4 hard failures (unreadable core, contract-invalid output, write
@@ -1134,6 +1245,7 @@ def build_pool(
     #: originating backend on a hit, so ``generator`` never claims a backend
     #: that did not do the searching.
     nomination_backend = backend
+    nomination_error: str | None = None
     try:
         nominations, nomination_backend = nominate(
             runner or default_runner,
@@ -1144,12 +1256,17 @@ def build_pool(
         )
     except NominationError as exc:
         carried_forward = True
+        nomination_error = _one_line(exc)
         print(
             f"pool-builder: warning: {exc} — carrying opportunity/watch forward "
             "from the prior pool (streaks untouched)",
             file=sys.stderr,
         )
 
+    nominee_drops: list[tuple[str, str]] = []
+    gate_rule_by_ticker: dict[str, str] = {}
+    nominated: dict[str, NominationEntry] = {}
+    gates: dict[str, TechnicalBlock | None] = {}
     if carried_forward:
         # R4: prior layers verbatim; no gating, no streak movement.
         core_entries = core
@@ -1158,13 +1275,17 @@ def build_pool(
             watch=[e for e in prior_watch if e.ticker not in core_tickers],
         )
     else:
-        nominated = _filter_session_nominees(nominations, session)
+        nominated = _filter_session_nominees(nominations, session, nominee_drops)
         # Stages 3+4 — gate the whole evaluation universe, then apply the
         # lifecycle. Core is gated too, but only as a renderable annotation
         # (R1: the gate never drops a core ticker).
         universe = core_tickers | set(nominated) | {e.ticker for e in prior_opportunity}
         gates = _gate_snapshots(
-            universe, fetch_ohlcv or default_fetch_daily_ohlcv, gate_rules, session
+            universe,
+            fetch_ohlcv or default_fetch_daily_ohlcv,
+            gate_rules,
+            session,
+            gate_rule_by_ticker,
         )
         lifecycle = apply_lifecycle(
             as_of, prior, nominated, gates, core_tickers, lifecycle_rules
@@ -1215,6 +1336,17 @@ def build_pool(
         raise BuilderError(f"pool write failed: {exc}") from exc
 
     outcome = "carried_forward" if carried_forward else "written"
+    _emit_pool_funnel(
+        funnel or FunnelEvents(load_config().state_dir, session, as_of, "pool_builder"),
+        pool_file,
+        lifecycle,
+        nominated,
+        nominee_drops,
+        gates,
+        gate_rule_by_ticker,
+        nomination_error,
+        lifecycle_rules,
+    )
     append_log_line(
         log_path,
         as_of.isoformat(),
@@ -1242,6 +1374,66 @@ def build_pool(
         entered=lifecycle.entered,
         exited=lifecycle.exited,
     )
+
+
+@best_effort
+def _emit_pool_funnel(
+    events: FunnelEvents,
+    pool_file: PoolFile,
+    lifecycle: LifecycleResult,
+    nominated: dict[str, NominationEntry],
+    nominee_drops: list[tuple[str, str]],
+    gates: dict[str, TechnicalBlock | None],
+    gate_rules: dict[str, str],
+    nomination_error: str | None,
+    rules: LifecycleRules,
+) -> None:
+    """Decision-funnel events for the pool just written (spec
+    decision-funnel R1): every nominee, core ticker and layer decision."""
+    thresholds = {"entry": rules.entry_threshold, "exit": rules.exit_threshold}
+    if pool_file.carried_forward:
+        events.emit(
+            "nominate", None, "info", "nomination-failed", nomination_error or "",
+            carried_forward=True,
+        )
+        for entry in pool_file.opportunity:
+            events.emit(
+                "pool", entry.ticker, "passed", "carried-forward",
+                "opportunity carried forward (nomination failed)", score=entry.score,
+            )
+        for entry in pool_file.watch:
+            events.emit(
+                "pool", entry.ticker, "excluded", "carried-forward",
+                "watch carried forward (nomination failed)", score=entry.score,
+            )
+    for ticker, nomination in nominated.items():
+        events.emit(
+            "nominate", ticker, "passed", "nominated",
+            f"score {nomination.score:g} ({nomination.catalyst_type})",
+            score=nomination.score, catalyst_type=nomination.catalyst_type,
+        )
+    for ticker, code in nominee_drops:
+        events.emit("nominate", ticker, "excluded", code, code.replace("-", " "))
+
+    def gate_details(ticker: str) -> dict:
+        # A fetch error leaves no snapshot: candidates route as gate fail.
+        technical = gates.get(ticker)
+        gate = technical.gate if technical is not None else ("fail" if ticker in gates else None)
+        return {"gate": gate, "gate_rule": gate_rules.get(ticker)}
+
+    for entry in pool_file.core:
+        events.emit(
+            "pool", entry.ticker, "passed", "core", "core watchlist (always analysed)",
+            score=entry.score, **gate_details(entry.ticker),
+        )
+    for ticker, (outcome, code, reason) in lifecycle.funnel.items():
+        nomination = nominated.get(ticker)
+        events.emit(
+            "pool", ticker, outcome, code, reason,
+            score=nomination.score if nomination is not None else None,
+            thresholds=thresholds,
+            **gate_details(ticker),
+        )
 
 
 # ---------------------------------------------------------------------------

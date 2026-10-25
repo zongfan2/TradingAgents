@@ -60,6 +60,7 @@ from pipeline.common import (
     to_utc_iso,
 )
 from pipeline.config import PipelineConfig, load_config, parse_slot_time
+from pipeline.funnel_events import best_effort, funnel_dir
 
 logger = logging.getLogger("pipeline.orchestrator")
 
@@ -971,6 +972,7 @@ class Orchestrator:
             },
         )
         error: str | None = None
+        result: RunResult | None = None
         try:
             result = self.runner(argv, timeout)
         except subprocess.TimeoutExpired:
@@ -1015,6 +1017,9 @@ class Orchestrator:
         }
         self.status.update_component(name, record)
         self._log_component(name, status, record["duration_s"], error)
+        archive_component_output(
+            self.config, self.session, self.slot_date, name, record, result
+        )
         slot_key = (self.session, self.slot_date.isoformat())
         if status in ("failed", "timeout"):
             self.notifier.notify(
@@ -1417,6 +1422,55 @@ def _analysis_runner_outcome(result: RunResult) -> tuple[str, str | None]:
             f"({count('completed')}/{count('planned')} runs completed)",
         )
     return "ok", None
+
+
+#: Bytes of each stream kept by the component output archive (from the end).
+ARCHIVE_TAIL_BYTES = 64 * 1024
+
+
+def _tail(text: str, limit: int = ARCHIVE_TAIL_BYTES) -> str:
+    data = text.encode("utf-8", errors="replace")
+    if len(data) <= limit:
+        return text
+    return data[-limit:].decode("utf-8", errors="ignore")
+
+
+@best_effort
+def archive_component_output(
+    config: PipelineConfig,
+    session: str,
+    slot_date: date,
+    name: str,
+    record: dict,
+    result: RunResult | None,
+) -> None:
+    """Spec decision-funnel R2: keep each component's final stdout summary
+    line and output tails, so a reason no funnel emitter covers survives
+    the slot. Overwritten on a rerun; failures are log-only."""
+    stdout = result.stdout if result is not None else ""
+    stderr = result.stderr if result is not None else ""
+    summary_line = _last_nonempty_line(stdout)
+    try:
+        summary = json.loads(summary_line) if summary_line else None
+    except json.JSONDecodeError:
+        summary = None
+    payload = {
+        "schema": 1,
+        "component": name,
+        "session": session,
+        "date": slot_date.isoformat(),
+        "status": record.get("status"),
+        "started_at": record.get("started_at"),
+        "finished_at": record.get("finished_at"),
+        "error": record.get("error"),
+        "returncode": result.returncode if result is not None else None,
+        "summary": summary if isinstance(summary, dict) else None,
+        "stdout_tail": _tail(stdout),
+        "stderr_tail": _tail(stderr),
+    }
+    path = funnel_dir(config.state_dir, session) / slot_date.isoformat() / f"{name}.out.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(path, json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
 
 
 _EXECUTION_SUMMARY_KEYS = ("submitted", "dry_run", "skipped", "canceled", "errors", "rejected")
