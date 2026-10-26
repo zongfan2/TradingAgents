@@ -1,7 +1,8 @@
 # Spec: Decision funnel (per-slot exclusion record + webui page)
 
 **Builder**: Claude Code · **Status**: P1 implemented (2026-10-25; user
-signed off the plan), P2/P3 open · Contracts: new `funnel` event + snapshot schemas (this spec);
+signed off the plan), P2/P3 open · Contracts: new `funnel` event (model:
+`pipeline/contracts/funnel.py`) + snapshot schemas (this spec);
 reads pool, brief/eval, ledger and orders contracts unchanged.
 
 ## Why
@@ -49,9 +50,14 @@ studies).
   and all of that run's events for the key are kept (both decide arms of a
   pair, carrying `details.arm`; a SELL's `cancel`s beside its close; a
   feeds-arm non-candidate beside the brief arm's order). A run with only
-  `info` events (`already-done`, `superseded`) never replaces a decision;
+  `info` events (`already-done`, `superseded`, the adapter's rerun
+  `dedupe`) never replaces a decision;
   other runs' events are kept as notes. So a rerun supersedes only what it
-  re-decided.
+  re-decided. Exception, `execute`: an order an earlier run placed stays
+  live at the broker whatever a rerun emits (its feeds-arm non-candidate,
+  `dedupe`), so the run holding the **strongest outcome across all runs**
+  decides (ties: the latest run) — a rerun can upgrade a skip to
+  `submitted`, never downgrade a placed order.
 - Emitters are best-effort: an event-write failure logs a warning and never
   changes the component's behavior, exit code or outputs. Each component's
   funnel helper is additionally wrapped (`funnel_events.best_effort`) so a
@@ -67,7 +73,7 @@ studies).
 | `evaluate` (evaluator) | `pass`, `warn`, `fail` (`info` for core — the brief is withheld but the ticker runs; `excluded` for opportunity), `eval-error`, `skipped-below-threshold`, `skipped-absent` |
 | `trigger` (analysis_runner) | `core`, `core-pair`, `catalyst`, `no-score`, `eval-fail`, `below-threshold`, `budget-dropped`, `already-done`, `macro-fail-feeds-only`; manual runs emit nothing |
 | `decide` (analysis_runner) | `BUY`, `SELL`, `HOLD`, `ERROR`; `details`: `arm`, `run_id`, `pair_id`, `pm_rating` (raw five-tier rating, now also in the child's result payload), `plan_valid`, `violations[]`, `error`, `flags`, `execute_eligible` |
-| `execute` (execution_adapter) | non-candidates `hold`, `error`, `feeds-arm`, `no-plan`, `plan-invalid`, `action-mismatch`, `incomplete-plan`, `non-us-session` (from `non_candidate_reason`, the single source of the candidate filter); `superseded` (`info`); every order skip reason by its code (`stale-quote`, `total-risk`, `submit-error`, …); `submitted`; `rejected` (`excluded`: the broker answered the submit with status rejected); `cancel` (`info`); every execute event carries `details.arm` |
+| `execute` (execution_adapter) | non-candidates `hold`, `error`, `feeds-arm`, `no-plan`, `plan-invalid`, `action-mismatch`, `incomplete-plan`, `non-us-session` (from `non_candidate_reason`, the single source of the candidate filter); `superseded` (`info`); every order skip reason by its code (`stale-quote`, `total-risk`, `submit-error`, …) — except `dedupe` (`info`: an earlier run already placed the order); `submitted` (also for `recovered-intent`); `rejected` (`excluded`: the broker answered the submit with status rejected); `cancel` (`info`); every execute event carries `details.arm` |
 
 ### R2 — Component output archive (safety net)
 
@@ -124,6 +130,16 @@ The server is already in the user's tailnet (`desktop-p5u8dva.tailc36a4b.ts.net`
 - AWS is not needed. A public, no-Tailscale link would mean publishing a
   read-only static export (S3 + CloudFront + auth); out of scope unless
   asked.
+
+## Prior art (specs/README.md rule 6)
+
+- **P1 (event log)** predates rule 6 and adds no mechanism from the rule's
+  list: it is an internal append-only JSONL log on the existing
+  `locked_append` (the same primitive as `orders.jsonl`), with no external
+  integration. No survey was done; none is claimed.
+- **P3 (R5 Tailscale serve)** is an external integration: survey prior art
+  (Tailscale's own serve/funnel docs and 2–3 maintained projects exposing a
+  loopback app over a tailnet) and record it here before P3 is built.
 
 ## Rollout
 

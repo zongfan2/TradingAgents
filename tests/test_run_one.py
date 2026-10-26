@@ -323,6 +323,31 @@ def test_main_emits_exactly_one_json_line(child_env, capsys):
     assert graph.calls == [("NVDA", "2026-08-07", "stock")]
 
 
+class _Rating(Enum):
+    OVERWEIGHT = "Overweight"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("signal,expected", [
+    (_Rating.OVERWEIGHT, "Overweight"),  # Enum ⇒ its value
+    ("  **Strong\n   buy**  " + "x" * 60, ("**Strong buy** " + "x" * 60)[:40]),
+    (None, None),
+    ("   ", None),
+])
+def test_result_payload_carries_the_raw_pm_rating(child_env, capsys, signal, expected):
+    graph = FakeGraph(fenced(VALID_PLAN), signal=signal)
+    rc = run_one.main(
+        ["--ticker", "NVDA", "--date", "2026-08-07", "--session", "us", "--arm", "brief"],
+        graph_factory=lambda position_context, debug: graph,
+    )
+    assert rc == 0
+    (line,) = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    result = parse_result_line(line)
+    assert result["pm_rating"] == expected
+    if expected is not None:
+        assert len(result["pm_rating"]) <= 40 and "\n" not in result["pm_rating"]
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize("rating,trader_action,decision,eligible", [
     ("Underweight", "BUY", "HOLD", False),

@@ -2279,3 +2279,36 @@ def test_funnel_paired_slot_reduces_to_the_live_order(tmp_path):
     assert (outcome["outcome"], outcome["code"]) == ("passed", "submitted")
     assert sorted(e["code"] for e in outcome["events"]) == ["feeds-arm", "submitted", "superseded"]
     assert {e["details"]["arm"] for e in outcome["events"]} == {"brief", "feeds"}
+
+
+@pytest.mark.unit
+def test_funnel_rerun_never_downgrades_a_placed_order(tmp_path):
+    """Review 1118c0a: a second submit for the same slot skips the placed
+    order as ``dedupe`` (info) and re-emits the feeds-arm non-candidate; the
+    ticker's execute outcome must stay the first run's ``submitted``."""
+    from pipeline.funnel_events import current_outcomes, read_events
+
+    config = make_config(tmp_path)
+    write_decision(config)
+    write_decision(config, arm="feeds", plan=BUY_PLAN)
+    broker = FakeBroker()
+    submit_slot(config, broker, settings=live_settings())
+    submit_slot(config, broker, settings=live_settings())
+    assert len(broker.submitted) == 1
+    events = read_events(config.state_dir, "us", SLOT)
+    assert ("NVDA", "info", "dedupe") in funnel_rows(config)
+    outcome = current_outcomes(events)[("execute", "NVDA")]
+    assert (outcome["outcome"], outcome["code"]) == ("passed", "submitted")
+    assert {e["code"] for e in outcome["notes"]} >= {"dedupe"}
+
+
+@pytest.mark.unit
+def test_funnel_rerun_can_upgrade_a_skip_to_submitted(tmp_path):
+    from pipeline.funnel_events import current_outcomes, read_events
+
+    config = make_config(tmp_path)
+    write_decision(config)
+    submit_slot(config, FakeBroker(quotes={"NVDA": ea.Quote(bid=99.5, ask=100.0, timestamp=NOW - timedelta(hours=2))}), settings=live_settings())
+    submit_slot(config, FakeBroker(), settings=live_settings())
+    outcome = current_outcomes(read_events(config.state_dir, "us", SLOT))[("execute", "NVDA")]
+    assert (outcome["outcome"], outcome["code"]) == ("passed", "submitted")

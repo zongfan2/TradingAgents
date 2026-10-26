@@ -6,6 +6,7 @@ One module per contract spec:
 - :mod:`pipeline.contracts.evals`  — ``*.eval.json`` reports + verdict rule
 - :mod:`pipeline.contracts.pool`   — tiered pool files + reading rule
 - :mod:`pipeline.contracts.ledger` — TradePlan validator + jsonl records
+- :mod:`pipeline.contracts.funnel` — decision-funnel event lines
 
 Writers validate strictly (unknown fields rejected); readers use each model's
 ``parse_lenient`` (unknown fields warned about and dropped).

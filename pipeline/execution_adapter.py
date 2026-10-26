@@ -877,7 +877,10 @@ def _emit_execute_funnel(funnel: FunnelEvents, record: DecisionRecord, row: dict
     )
     if kind == "skip":
         reason = str(row.get("reason") or "skip")
-        funnel.emit("execute", record.ticker, "excluded", reason_code(reason), reason, **details)
+        # ``dedupe`` means an earlier run already placed this order: info, so
+        # a rerun never supersedes that run's ``submitted`` outcome.
+        outcome = "info" if reason_code(reason) == "dedupe" else "excluded"
+        funnel.emit("execute", record.ticker, outcome, reason_code(reason), reason, **details)
     elif kind == "submitted" and row.get("broker_status") == "rejected":
         funnel.emit("execute", record.ticker, "excluded", "rejected", "broker rejected the order", **details)
     elif kind == "submitted":

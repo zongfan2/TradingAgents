@@ -22,6 +22,7 @@ specifies Flash for every model-assisted backup role without activating it.
 | [pool-data-contract.md](pool-data-contract.md) | Tiered stock pool json + hysteresis state | **v1** |
 | [ticker-brief-data-contract.md](ticker-brief-data-contract.md) | Per-ticker brief files + eval json | **v1** |
 | [trade-plan-ledger-contract.md](trade-plan-ledger-contract.md) | TradePlan schema + decisions/orders/outcomes jsonl | **v1** |
+| [decision-funnel.md](decision-funnel.md) (R1) | Funnel event lines `funnel/<session>/<date>.events.jsonl` (`pipeline/contracts/funnel.py`) | **v1** |
 
 ## Components
 
@@ -37,6 +38,7 @@ specifies Flash for every model-assisted backup role without activating it.
 | [execution-adapter.md](execution-adapter.md) | Alpaca **paper** bracket orders, fail-closed guards | Claude Code | **Implemented** |
 | [orchestrator.md](orchestrator.md) | Per-session scheduling, ordering, settle job, status file, notifications | Claude Code | **Implemented** |
 | [webui-pages.md](webui-pages.md) | Status banner, pool/briefs views, A/B aggregates, halt toggle | Claude Code | **Implemented** |
+| [decision-funnel.md](decision-funnel.md) | Per-slot exclusion record (event log, snapshot, webui page) | Claude Code | **P1 implemented** — P2/P3 open |
 
 ## System overview
 

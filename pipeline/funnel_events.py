@@ -15,8 +15,11 @@ per ``(stage, ticker)``, the latest run that *decided* the ticker (a
 outcome (``passed`` > ``excluded`` > ``info``) is the stage outcome — so both
 arms of a pair, a SELL's cancels next to its close, or a feeds-arm
 non-candidate next to the brief arm's order all keep the right result. A
-run with only ``info`` events (``already-done``, ``superseded``) never
-replaces a decision; other runs' events are kept as notes.
+run with only ``info`` events (``already-done``, ``superseded``, the
+adapter's rerun ``dedupe``) never replaces a decision; other runs' events
+are kept as notes. The ``execute`` stage is the exception: an order a run
+placed stays live at the broker, so there the run holding the strongest
+outcome across all runs decides (ties: the latest run).
 """
 
 from __future__ import annotations
@@ -29,61 +32,13 @@ from collections.abc import Callable
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from pipeline.common import SESSIONS, locked_append, to_utc_iso
+from pipeline.common import locked_append, to_utc_iso
+from pipeline.contracts.funnel import SCHEMA_VERSION, FunnelEvent
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
 FUNNEL_DIRNAME = "funnel"
 EVENTS_SUFFIX = ".events.jsonl"
-
-OUTCOMES = ("passed", "excluded", "info")
-
-#: Stable codes per stage (spec R1 table). ``execute`` also accepts every
-#: adapter skip reason, so it is open-ended there (the code is the reason's
-#: prefix before any ``:`` detail).
-CODES: dict[str, frozenset[str] | None] = {
-    "nominate": frozenset(
-        {"nominated", "wrong-session", "duplicate", "nomination-failed"}
-    ),
-    "pool": frozenset(
-        {
-            "core",
-            "opportunity-enter",
-            "opportunity-stay",
-            "watch",
-            "carried-forward",
-            "dropped-low-score",
-            "dropped-gate-fail",
-            "cap-truncated",
-            "watch-cap",
-            "removed-low-score-streak",
-            "removed-gate-fail-streak",
-            "now-core",
-        }
-    ),
-    "collect": frozenset(
-        {"written", "exists", "failed", "not-collected-watch", "opportunity-dropped-stale-pool"}
-    ),
-    "evaluate": frozenset(
-        {"pass", "warn", "fail", "eval-error", "skipped-below-threshold", "skipped-absent"}
-    ),
-    "trigger": frozenset(
-        {
-            "core",
-            "core-pair",
-            "catalyst",
-            "no-score",
-            "eval-fail",
-            "below-threshold",
-            "budget-dropped",
-            "already-done",
-            "macro-fail-feeds-only",
-        }
-    ),
-    "decide": frozenset({"BUY", "SELL", "HOLD", "ERROR"}),
-    "execute": None,
-}
 
 Clock = Callable[[], datetime]
 
@@ -139,15 +94,6 @@ class FunnelEvents:
         **details: object,
     ) -> None:
         try:
-            if self.session not in SESSIONS:
-                raise ValueError(f"unknown session {self.session!r}")
-            if stage not in CODES:
-                raise ValueError(f"unknown funnel stage {stage!r}")
-            if outcome not in OUTCOMES:
-                raise ValueError(f"unknown funnel outcome {outcome!r}")
-            allowed = CODES[stage]
-            if allowed is not None and code not in allowed:
-                raise ValueError(f"unknown {stage} code {code!r}")
             event = {
                 "schema": SCHEMA_VERSION,
                 "written_at": to_utc_iso(self._clock()),
@@ -163,6 +109,9 @@ class FunnelEvents:
                 "details": details,
             }
             line = json.dumps(event, ensure_ascii=False, sort_keys=True, default=str)
+            # Strict writer validation (specs/README.md rule 5) on the line as
+            # it will be read back.
+            FunnelEvent.model_validate(json.loads(line))
             locked_append(self.path, line)
         except Exception as exc:  # best-effort: never change the component
             logger.warning(
@@ -229,8 +178,15 @@ def current_outcomes(events: list[dict]) -> dict[tuple[str, str | None], dict]:
         grouped.setdefault((event.get("stage"), event.get("ticker")), []).append(event)
     result: dict[tuple[str, str | None], dict] = {}
     for key, group in grouped.items():
-        deciding = [e.get("run") for e in group if e.get("outcome") in ("passed", "excluded")]
-        run = deciding[-1] if deciding else group[-1].get("run")
+        if key[0] == "execute":
+            # A placed order stays live at the broker whatever a later run
+            # emits, so the strongest outcome across runs decides (ties: the
+            # latest run).
+            strongest = max(_STRENGTH.get(e.get("outcome"), -1) for e in group)
+            run = [e for e in group if _STRENGTH.get(e.get("outcome"), -1) == strongest][-1].get("run")
+        else:
+            deciding = [e.get("run") for e in group if e.get("outcome") in ("passed", "excluded")]
+            run = deciding[-1] if deciding else group[-1].get("run")
         own = [e for e in group if e.get("run") == run]
         best = max(own, key=lambda e: _STRENGTH.get(e.get("outcome"), -1))
         result[key] = {

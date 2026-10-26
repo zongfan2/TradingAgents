@@ -151,3 +151,44 @@ def test_current_outcomes_reruns_supersede_only_what_they_decided():
     assert (chrw["outcome"], chrw["code"], chrw["run"]) == ("passed", "catalyst", "r2")
     assert [e["code"] for e in chrw["notes"]] == ["below-threshold"]
     assert current[("trigger", "AAA")]["outcome"] == "info"
+
+
+# ---------------------------------------------------------------------------
+# Contract model (specs/README.md rule 5)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_emitted_line_round_trips_through_the_contract_model(tmp_path):
+    from pipeline.contracts.funnel import FunnelEvent
+
+    events = FunnelEvents(tmp_path, "us", "2026-10-23", "execution_adapter", clock=fixed_clock)
+    events.emit("execute", "NVDA", "passed", "submitted", "submitted (live)", arm="brief")
+    (line,) = funnel_events.events_path(tmp_path, "us", "2026-10-23").read_text().splitlines()
+    model = FunnelEvent.model_validate(json.loads(line))
+    assert (model.stage, model.code, model.details) == ("execute", "submitted", {"arm": "brief"})
+    assert model.model_dump(mode="json", by_alias=True)["schema"] == 1
+
+
+@pytest.mark.unit
+def test_contract_model_rejects_unknown_fields_and_codes():
+    from pydantic import ValidationError
+
+    from pipeline.contracts.funnel import FunnelEvent
+
+    base = {
+        "schema": 1, "written_at": "2026-10-23T13:45:00Z", "session": "us",
+        "date": "2026-10-23", "component": "analysis_runner", "run": "r1",
+        "stage": "trigger", "ticker": "HUM", "outcome": "excluded",
+        "code": "below-threshold", "reason": "6 < 7", "details": {},
+    }
+    FunnelEvent.model_validate(base)
+    with pytest.raises(ValidationError, match="extra"):
+        FunnelEvent.model_validate({**base, "surprise": 1})
+    with pytest.raises(ValidationError, match="unknown trigger code"):
+        FunnelEvent.model_validate({**base, "code": "made-up"})
+    with pytest.raises(ValidationError, match="written_at"):
+        FunnelEvent.model_validate({**base, "written_at": "2026-10-23T13:45:00"})
+    # Readers drop unknown fields instead of failing.
+    lenient = FunnelEvent.parse_lenient({**base, "surprise": 1})
+    assert lenient.code == "below-threshold"
