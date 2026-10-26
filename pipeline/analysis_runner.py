@@ -76,6 +76,7 @@ from pipeline.contracts.ledger import (
     validate_trade_plan,
 )
 from pipeline.contracts.pool import PoolReadResult, read_pool
+from pipeline.funnel_events import FunnelEvents, best_effort
 from pipeline.run_one import REPAIR_PROMPT, RESULT_SENTINEL
 
 logger = logging.getLogger("pipeline.analysis_runner")
@@ -355,8 +356,12 @@ def plan_jobs(
     settings: RunnerSettings,
     macro: BriefInfo,
     inspect_ticker: Callable[[str], BriefInfo],
+    untriggered: list[tuple[str, str, str, dict]] | None = None,
 ) -> list[RunJob]:
     """Trigger rules + eval-gating state table + pairing → the slot's jobs.
+
+    ``untriggered`` (optional) collects ``(ticker, code, reason, details)``
+    for every opportunity ticker that does not trigger (decision funnel).
 
     - core: every member, every slot (a ticker eval ``fail`` withholds the
       contaminated brief, never the coverage).
@@ -419,8 +424,13 @@ def plan_jobs(
     catalyst: list[RunJob] = []
     for ticker in opportunity_tickers:
         info = inspect_ticker(ticker)
+        threshold = settings.analysis_trigger_threshold
         if info.catalyst_score is None:
             logger.info("%s: no ticker brief catalyst_score — no auto-trigger", ticker)
+            if untriggered is not None:
+                untriggered.append(
+                    (ticker, "no-score", "no ticker brief catalyst_score", {})
+                )
             continue
         if info.verdict == "fail":
             logger.warning(
@@ -428,8 +438,32 @@ def plan_jobs(
                 ticker,
                 info.catalyst_score,
             )
+            if untriggered is not None:
+                untriggered.append(
+                    (
+                        ticker,
+                        "eval-fail",
+                        f"ticker eval fail (score {info.catalyst_score:g})",
+                        {"score": info.catalyst_score},
+                    )
+                )
             continue
-        if info.catalyst_score < settings.analysis_trigger_threshold:
+        if info.catalyst_score < threshold:
+            logger.info(
+                "%s: brief catalyst_score %.1f < trigger %.1f — no auto-trigger",
+                ticker,
+                info.catalyst_score,
+                threshold,
+            )
+            if untriggered is not None:
+                untriggered.append(
+                    (
+                        ticker,
+                        "below-threshold",
+                        f"brief catalyst_score {info.catalyst_score:g} < trigger {threshold:g}",
+                        {"score": info.catalyst_score, "threshold": threshold},
+                    )
+                )
             continue
         would_pair = settings.ab_pairing == "paired" and not macro_failed
         arms, paired, flags = arms_for(would_pair)
@@ -1290,8 +1324,11 @@ def _run_job_impl(
         violations: list[str] = []
         repair_used = False
         error = None
+        pm_rating: str | None = None
         if result.returncode == 0 and isinstance(result.payload, dict):
             payload = result.payload
+            raw_rating = payload.get("pm_rating")
+            pm_rating = raw_rating if isinstance(raw_rating, str) else None
             raw_decision = payload.get("decision")
             decision = raw_decision if raw_decision in ("BUY", "SELL", "HOLD") else "HOLD"
             repair_used = bool(payload.get("repair_used"))
@@ -1401,6 +1438,7 @@ def _run_job_impl(
             "decision": line_decision,
             "plan_valid": line_plan_valid,
             "violations": violations or None,
+            "pm_rating": pm_rating,
             "repair_used": repair_used,
             "flags": run_flags or None,
             "execute_eligible": (
@@ -1435,6 +1473,7 @@ def run_slot(
     manual_ticker: str | None = None,
     clock: Callable[[], datetime] = _utc_now,
     emit: Callable[[dict], None] | None = None,
+    funnel: FunnelEvents | None = None,
 ) -> SlotOutcome:
     """Run the slot (or one manual ticker) and append the decision records.
 
@@ -1449,6 +1488,13 @@ def run_slot(
 
     skipped: list[str] = []
     dropped: list[dict] = []
+    # Manual runs never auto-execute: they stay out of the slot's funnel.
+    events = (
+        None
+        if manual_ticker is not None
+        else funnel or FunnelEvents(config.state_dir, session, slot_date, "analysis_runner")
+    )
+    untriggered: list[tuple[str, str, str, dict]] = []
     if manual_ticker is not None:
         manual = manual_ticker.strip().upper()
         if not TICKER_RE.match(manual):
@@ -1465,6 +1511,7 @@ def run_slot(
             settings=settings,
             macro=macro,
             inspect_ticker=inspect,
+            untriggered=untriggered,
         )
         if not force:
             solo_done, paired_done = completed_coverage(
@@ -1490,6 +1537,8 @@ def run_slot(
                     kept.append(job)
             jobs = kept
         jobs, dropped = enforce_budget(jobs, settings.max_runs_per_slot)
+        if events is not None:
+            _emit_trigger_funnel(events, jobs, untriggered, skipped, dropped)
 
     digest = write_config_digest(config.ledger_dir, settings)
     positions = load_positions(config.ledger_dir)
@@ -1528,8 +1577,10 @@ def run_slot(
                     logger.exception("%s: %s", job.ticker, error)
                     outcome = _complete_failed_outcome(job, JobOutcome(), error)
                 outcomes_by_index[index] = outcome
-                if emit is not None:
-                    for line in outcome.run_lines:
+                for line in outcome.run_lines:
+                    if events is not None:
+                        _emit_decide_funnel(events, line)
+                    if emit is not None:
                         emit(line)
 
     ordered_outcomes = [outcomes_by_index[index] for index in range(len(jobs))]
@@ -1554,6 +1605,77 @@ def run_slot(
         "run_ids": [line["run_id"] for line in run_lines if line["run_id"]],
     }
     return SlotOutcome(summary=summary, records=records)
+
+
+@best_effort
+def _emit_trigger_funnel(
+    events: FunnelEvents,
+    jobs: Sequence[RunJob],
+    untriggered: Sequence[tuple[str, str, str, dict]],
+    skipped: Sequence[str],
+    dropped: Sequence[dict],
+) -> None:
+    """Trigger-stage funnel events (spec decision-funnel R1)."""
+    for ticker, code, reason, details in untriggered:
+        events.emit("trigger", ticker, "excluded", code, reason, **details)
+    for ticker in skipped:
+        events.emit(
+            "trigger", ticker, "info", "already-done",
+            "completed decision row(s) exist for this slot — not re-run",
+        )
+    demoted = set()
+    for entry in dropped:
+        if entry.get("trigger") == "core":
+            demoted.add(entry["ticker"])  # still runs as the solo brief run
+            continue
+        events.emit(
+            "trigger", entry["ticker"], "excluded", "budget-dropped", str(entry["reason"]),
+            score=entry.get("catalyst_score"),
+        )
+    for job in jobs:
+        if "macro-fail" in job.flags:
+            code = "macro-fail-feeds-only"
+            reason = "macro eval fail — feeds-only run"
+        elif job.trigger == "catalyst":
+            code, reason = "catalyst", f"catalyst_score {job.catalyst_score:g}"
+        elif job.paired:
+            code, reason = "core-pair", "core A/B pair (brief + feeds)"
+        else:
+            code, reason = "core", "core watchlist"
+            if job.ticker in demoted:
+                reason += " (pair demoted by the run budget)"
+        events.emit(
+            "trigger", job.ticker, "passed", code, reason,
+            arms=list(job.arms), flags=list(job.flags), score=job.catalyst_score,
+        )
+
+
+@best_effort
+def _emit_decide_funnel(events: FunnelEvents, line: dict) -> None:
+    """One decide-stage event per run line (both arms of a pair)."""
+    decision = line.get("decision") or "ERROR"
+    if decision not in ("BUY", "SELL", "HOLD"):
+        decision = "ERROR"
+    if decision == "ERROR":
+        reason = str(line.get("error") or "run failed")
+    elif not line.get("plan_valid"):
+        reason = "plan invalid: " + "; ".join(line.get("violations") or ["?"])
+    else:
+        reason = f"{decision}" + (f" (PM: {line['pm_rating']})" if line.get("pm_rating") else "")
+    actionable = decision in ("BUY", "SELL") and bool(line.get("plan_valid"))
+    events.emit(
+        "decide", line.get("ticker"), "passed" if actionable else "excluded", decision, reason,
+        arm=line.get("arm"),
+        run_id=line.get("run_id"),
+        pair_id=line.get("pair_id"),
+        pm_rating=line.get("pm_rating"),
+        plan_valid=line.get("plan_valid"),
+        violations=line.get("violations"),
+        error=line.get("error"),
+        flags=line.get("flags"),
+        repair_used=line.get("repair_used"),
+        execute_eligible=line.get("execute_eligible"),
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -1997,3 +1997,61 @@ def test_ticker_evaluators_outcome_missing_summary_warns():
     status, error = orchestrator._ticker_evaluators_outcome(orchestrator.RunResult(0, stdout=""))
     assert status == "warn"
     assert "no parseable JSON summary" in error
+
+
+# ---------------------------------------------------------------------------
+# Component output archive (specs/decision-funnel.md R2)
+# ---------------------------------------------------------------------------
+
+
+def read_archive(config, session, name):
+    path = config.state_dir / "funnel" / session / SLOT_DATE.isoformat() / f"{name}.out.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+@pytest.mark.unit
+def test_every_component_output_is_archived_with_its_summary(tmp_path):
+    config = make_config(tmp_path, component_timeouts={"macro_collector": 7})
+    write_eval(config, "us", SLOT_DATE)
+    summary = {"date": SLOT_DATE.isoformat(), "dropped": [{"ticker": "HOT", "reason": "budget"}]}
+    runner = FakeRunner(
+        {
+            "analysis_runner": orchestrator.RunResult(
+                0, stdout='{"run_id": "x"}\n' + json.dumps(summary) + "\n", stderr="warn: y\n"
+            ),
+            "macro_collector": subprocess.TimeoutExpired(cmd="fake-cli", timeout=7),
+        }
+    )
+    run_slot(config, "us", runner)
+    archive = read_archive(config, "us", "analysis_runner")
+    assert archive["summary"] == summary
+    assert archive["stderr_tail"] == "warn: y\n"
+    assert archive["status"] == read_status(config, "us")["components"]["analysis_runner"]["status"]
+    timed_out = read_archive(config, "us", "macro_collector")
+    assert (timed_out["status"], timed_out["returncode"]) == ("timeout", None)
+    assert timed_out["error"] == "timeout after 7s"
+
+
+@pytest.mark.unit
+def test_archive_keeps_only_the_tail_and_never_fails_the_slot(tmp_path):
+    config = make_config(tmp_path)
+    write_eval(config, "us", SLOT_DATE)
+    big = "x" * (orchestrator.ARCHIVE_TAIL_BYTES + 100) + "END"
+    runner = FakeRunner({"pool_builder": orchestrator.RunResult(0, stdout="", stderr=big)})
+    run_slot(config, "us", runner)
+    tail = read_archive(config, "us", "pool_builder")["stderr_tail"]
+    assert tail.endswith("END") and len(tail.encode()) == orchestrator.ARCHIVE_TAIL_BYTES
+
+    # An unwritable archive is log-only: status and outcome are unchanged.
+    plain, blocked = make_config(tmp_path / "plain"), make_config(tmp_path / "blocked")
+    for config in (plain, blocked):
+        write_eval(config, "us", SLOT_DATE)
+    archive_dir = blocked.state_dir / "funnel" / "us" / SLOT_DATE.isoformat()
+    archive_dir.parent.mkdir(parents=True)
+    archive_dir.write_text("not a directory", encoding="utf-8")
+    assert run_slot(plain, "us", FakeRunner()) == run_slot(blocked, "us", FakeRunner())
+
+    def statuses(config):
+        return {n: c["status"] for n, c in read_status(config, "us")["components"].items()}
+
+    assert statuses(plain) == statuses(blocked)

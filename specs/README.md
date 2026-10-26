@@ -65,3 +65,13 @@ specifies Flash for every model-assisted backup role without activating it.
    strict validator: writers reject unknown fields, readers warn on them;
    contract compatibility tests live next to the models. Prose in a contract
    spec and its model must never disagree — the model follows the spec.
+6. **Prior art before new mechanisms.** When a spec introduces a new component,
+   external integration, or a mechanism with known failure modes (calendars/DST,
+   order idempotency, retries, backtest bias, rate limits), survey 2–3 actively
+   maintained, clearly licensed projects first and record a short "Prior art"
+   section in the spec: repo URL + commit, license, the design taken, the known
+   issues avoided. Prefer the official SDK or a maintained library as a
+   dependency over reimplementing it. Code may be copied only from
+   Apache-2.0-compatible sources (MIT/BSD/Apache) with attribution kept;
+   never from GPL/AGPL, unlicensed, or unknown-origin code. Not required for
+   bug fixes or changes inside an existing component.

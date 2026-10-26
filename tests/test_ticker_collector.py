@@ -962,3 +962,63 @@ def test_module_invocable_via_python_dash_m():
     assert "--session" in proc.stdout
     assert "--tickers" in proc.stdout
     assert "--backend" in proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# Decision-funnel events (specs/decision-funnel.md R1)
+# ---------------------------------------------------------------------------
+
+
+def _add_watch(pool_path, ticker="WDC", score=7.0):
+    payload = json.loads(pool_path.read_text(encoding="utf-8"))
+    payload["watch"] = [
+        {
+            "ticker": ticker,
+            "score": score,
+            "catalyst_type": "earnings",
+            "rationale": "watching",
+            "citations": ["https://example.com/w"],
+            "technical": {"gate": "watch"},
+        }
+    ]
+    pool_path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+@pytest.mark.unit
+def test_collect_records_outcomes_and_uncollected_watch(dirs, tmp_path):
+    from pipeline.funnel_events import FunnelEvents
+
+    _brief_dir, pool_dir = dirs
+    _add_watch(write_pool(pool_dir))
+    fake = FakeBackend(
+        {"NVDA": [RuntimeError("backend crashed")], "AVGO": [make_ticker_brief(ticker="AVGO")]}
+    )
+    events = FunnelEvents(tmp_path / "state", "us", AS_OF, "ticker_collectors")
+    collect_all("us", as_of=AS_OF, runner=fake, funnel=events)
+    codes = {e["ticker"]: (e["outcome"], e["code"], e["reason"]) for e in events.emitted}
+    assert codes == {
+        "NVDA": ("excluded", "failed", "backend crashed"),
+        "AVGO": ("passed", "written", ""),
+        "WDC": ("excluded", "not-collected-watch", "watch layer is not collected"),
+    }
+    # A second run finds the brief on disk.
+    again = FunnelEvents(tmp_path / "state", "us", AS_OF, "ticker_collectors")
+    collect_all("us", as_of=AS_OF, runner=FakeBackend({"NVDA": [RuntimeError("x")]}),
+                tickers=["AVGO"], funnel=again)
+    assert [(e["ticker"], e["code"]) for e in again.emitted] == [("AVGO", "exists")]
+
+
+@pytest.mark.unit
+def test_collect_records_the_stale_pool_opportunity_drop(dirs, tmp_path):
+    from pipeline.funnel_events import read_events
+
+    _brief_dir, pool_dir = dirs
+    write_pool(pool_dir, date_str="2026-08-01")  # gap 7 > cap 3 ⇒ absent
+    (pool_dir / "core.us.yaml").write_text("- ticker: NVDA\n  note: holding\n", encoding="utf-8")
+    collect_all("us", as_of=AS_OF, runner=FakeBackend({"NVDA": [make_ticker_brief(ticker="NVDA")]}))
+    # Default emitter: TRADINGAGENTS_STATE_DIR from the fixture.
+    events = read_events(tmp_path / "state", "us", AS_OF)
+    assert {(e["ticker"], e["code"]) for e in events} == {
+        ("NVDA", "written"),
+        ("AVGO", "opportunity-dropped-stale-pool"),
+    }

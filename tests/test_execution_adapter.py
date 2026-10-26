@@ -2151,3 +2151,131 @@ def test_r4_broker_error_on_one_order_never_aborts_the_slot(tmp_path):
     ]
     assert rows[1]["reason"].startswith("submit-error: ")
     assert summary["errors"] == 1 and summary["submitted"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Decision-funnel events (specs/decision-funnel.md R1)
+# ---------------------------------------------------------------------------
+
+
+def funnel_rows(config):
+    from pipeline.funnel_events import read_events
+
+    return [
+        (e["ticker"], e["outcome"], e["code"])
+        for e in read_events(config.state_dir, "us", SLOT)
+        if e["stage"] == "execute"
+    ]
+
+
+@pytest.mark.unit
+def test_funnel_records_non_candidates_with_their_reason(tmp_path):
+    config = make_config(tmp_path)
+    write_decision(config, ticker="META", arm="feeds", plan=BUY_PLAN)
+    write_decision(config, ticker="AMZN", plan=None, decision="HOLD", plan_valid=True)
+    write_decision(config, ticker="INTC", plan=BUY_PLAN, plan_valid=False)
+    write_decision(config, ticker="IBM", plan=None, decision="ERROR", plan_valid=False)
+    write_decision(config, ticker="0700.HK", session="cn", plan=BUY_PLAN)
+    submit_slot(config, FakeBroker(), settings=live_settings())
+    assert sorted(funnel_rows(config)) == [
+        ("AMZN", "excluded", "hold"),
+        ("IBM", "excluded", "error"),
+        ("INTC", "excluded", "plan-invalid"),
+        ("META", "excluded", "feeds-arm"),
+    ]
+
+
+@pytest.mark.unit
+def test_non_candidate_reason_is_the_candidate_filter():
+    from pipeline.contracts.ledger import DecisionRecord
+
+    base = {
+        "run_id": "2026-08-07-us-NVDA-brief-1", "pair_id": None, "date": DATE_ISO,
+        "session": "us", "ticker": "NVDA", "arm": "brief", "preset": "t", "trigger": "core",
+        "catalyst_score": None, "macro_eval_verdict": "pass", "ticker_eval_verdict": "pass",
+        "inputs": {"macro_brief": None, "ticker_brief": None, "pool": None, "config_digest": "d"},
+        "decided_at": "2026-08-07T13:00:00Z", "decision": "BUY", "plan": BUY_PLAN,
+        "plan_valid": True,
+    }
+    cases = [
+        ({}, None),
+        ({"arm": "feeds", "run_id": "2026-08-07-us-NVDA-feeds-1"}, "feeds-arm"),
+        ({"decision": "HOLD", "plan": None}, "hold"),
+        ({"plan_valid": False}, "plan-invalid"),
+        ({"decision": "SELL"}, "action-mismatch"),
+    ]
+    for overrides, expected in cases:
+        record = DecisionRecord.model_validate({**base, **overrides})
+        assert ea.non_candidate_reason(record) == expected
+        assert ea.is_execution_candidate(record) is (expected is None)
+
+
+@pytest.mark.unit
+def test_funnel_records_skips_submissions_and_superseded_attempts(tmp_path):
+    config = make_config(tmp_path)
+    write_decision(config, n=1)
+    write_decision(config, n=2)
+    write_decision(config, ticker="TSLA", plan=SELL_PLAN)  # no position to close
+    submit_slot(config, FakeBroker(), settings=live_settings())
+    assert funnel_rows(config) == [
+        ("NVDA", "info", "superseded"),
+        ("NVDA", "passed", "submitted"),
+        ("TSLA", "excluded", "no-position"),
+    ]
+    from pipeline.funnel_events import read_events
+
+    submitted = next(e for e in read_events(config.state_dir, "us", SLOT) if e["code"] == "submitted")
+    assert submitted["reason"] == "submitted (live)"
+    assert submitted["details"]["run_id"] == "2026-08-07-us-NVDA-brief-2"
+    assert submitted["details"]["broker_status"] == "accepted"
+
+
+@pytest.mark.unit
+def test_funnel_failure_never_changes_orders_or_summary(tmp_path):
+    from pipeline import funnel_events
+
+    plain, broken = make_config(tmp_path / "a"), make_config(tmp_path / "b")
+    for config in (plain, broken):
+        write_decision(config)
+        write_decision(config, ticker="TSLA", plan=SELL_PLAN)
+    # The events path is a directory: every event write fails.
+    funnel_events.events_path(broken.state_dir, "us", SLOT).mkdir(parents=True)
+    results = [submit_slot(c, FakeBroker(), settings=live_settings()) for c in (plain, broken)]
+    assert results[0] == results[1]
+
+    def shape(config):
+        return [{k: v for k, v in r.items() if k != "written_at"} for r in read_orders(config)]
+
+    assert shape(plain) == shape(broken)
+
+
+@pytest.mark.unit
+def test_funnel_records_a_broker_rejection_as_excluded(tmp_path):
+    from pipeline.funnel_events import read_events
+
+    config = make_config(tmp_path)
+    write_decision(config)
+    summary = submit_slot(config, FakeBroker(submit_status="rejected"), settings=live_settings())
+    assert summary["rejected"] == 1
+    assert funnel_rows(config) == [("NVDA", "excluded", "rejected")]
+    event = read_events(config.state_dir, "us", SLOT)[0]
+    assert event["details"]["broker_status"] == "rejected"
+    assert event["details"]["arm"] == "brief"
+
+
+@pytest.mark.unit
+def test_funnel_paired_slot_reduces_to_the_live_order(tmp_path):
+    """Supersession rule (spec R1): a superseded attempt and the feeds-arm
+    non-candidate sit beside the brief arm's order; the ticker's execute
+    outcome is still `submitted`."""
+    from pipeline.funnel_events import current_outcomes, read_events
+
+    config = make_config(tmp_path)
+    write_decision(config, n=1)
+    write_decision(config, n=2)
+    write_decision(config, arm="feeds", plan=BUY_PLAN)
+    submit_slot(config, FakeBroker(), settings=live_settings())
+    outcome = current_outcomes(read_events(config.state_dir, "us", SLOT))[("execute", "NVDA")]
+    assert (outcome["outcome"], outcome["code"]) == ("passed", "submitted")
+    assert sorted(e["code"] for e in outcome["events"]) == ["feeds-arm", "submitted", "superseded"]
+    assert {e["details"]["arm"] for e in outcome["events"]} == {"brief", "feeds"}
