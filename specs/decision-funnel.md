@@ -141,7 +141,14 @@ no build timestamp — identical inputs give a byte-identical file):
   submission sticks, else the arm's latest deciding row; brief arm first),
   superseded attempts as `info`. Manual runs are left out — their decision
   rows, order rows and execute events — so a manual submit on the slot day
-  never marks the scheduled execute step as run (`pending` stays).
+  never marks the scheduled execute step as run (`pending` stays). They do
+  share the attempt counter, though: when a manual attempt is the latest
+  for a (ticker, arm) the adapter supersedes the slot's row and skips the
+  manual one, so that arm's execute stage is `manual-shadowed` (`excluded`,
+  `details.manual_run_id`), overriding the recorded `superseded`. Execute
+  events, like order rows, count only when written on the slot day
+  (session-local): a later-day re-execution under the slot's run_id never
+  changes the old snapshot.
 - Built in-process by the orchestrator, recorded as status component
   `funnel`: at the end of every slot (cn and us) and again after the us
   `execute` job. A build failure is a `warn` on `funnel` (its error is

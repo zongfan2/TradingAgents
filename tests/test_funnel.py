@@ -6,7 +6,7 @@ pending execution, cn slots, determinism, backfill and the CLI build on it.
 
 import hashlib
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pytest
 
@@ -31,6 +31,10 @@ def member(ticker, score, entered_on=D):
         "technical": technical(), "entered_on": entered_on,
         "low_score_streak": 0, "gate_fail_streak": 0,
     }
+
+
+def on_slot_day():
+    return datetime(2026, 10, 23, 13, 45, tzinfo=timezone.utc)  # 09:45 New York
 
 
 def make_config(tmp_path) -> PipelineConfig:
@@ -60,9 +64,9 @@ def write_brief(config, ticker, score, verdict=None, session="us", tamper=False)
 
 
 def write_order(config, ticker, kind, *, dry_run=False, reason=None, status="accepted", arm="brief",
-                written_at=f"{D}T13:45:00Z"):
+                written_at=f"{D}T13:45:00Z", attempt=1):
     row = {
-        "run_id": f"{D}-us-{ticker}-{arm}-1", "written_at": written_at,
+        "run_id": f"{D}-us-{ticker}-{arm}-{attempt}", "written_at": written_at,
         "session": "us", "ticker": ticker, "kind": kind, "dry_run": dry_run,
         "reason": reason, "client_order_id": f"{D}-us-{ticker}-entry",
         "order_kind": None if kind == "skip" else "bracket", "tif": "gtc", "qty": 10,
@@ -375,10 +379,51 @@ def test_manual_runs_do_not_mark_execute_as_run(tmp_path):
     seed_slot(config, orders=False)
     write_decision(config, ticker="MMM", trigger="manual", date_iso=D, plan=BUY_PLAN)
     write_order(config, "MMM", "submitted", dry_run=True)
-    events = FunnelEvents(config.state_dir, "us", DAY, "execution_adapter")
+    events = FunnelEvents(config.state_dir, "us", DAY, "execution_adapter", clock=on_slot_day)
     events.emit("execute", "MMM", "passed", "submitted", "submitted (dry-run)",
                 run_id=f"{D}-us-MMM-brief-1", dry_run=True)
     snap = funnel.build_snapshot(config, "us", DAY)
     assert snap["context"]["execute_ran"] is False
     assert ticker_map(snap)["AAA"]["final"] == "pending"
     assert "MMM" not in ticker_map(snap)
+
+
+@pytest.mark.unit
+def test_manual_attempt_shadowing_the_slot_decision_is_explained(tmp_path):
+    """Review f59d3fa finding 1: a same-day manual attempt 2 is the adapter's
+    current decision; the snapshot says so instead of 'superseded'/unknown."""
+    config = make_config(tmp_path)
+    seed_slot(config, orders=False)
+    write_decision(config, ticker="AAA", n=2, trigger="manual", date_iso=D, plan=BUY_PLAN)
+    write_order(config, "AAA", "skip", reason="manual-trigger", attempt=2)
+    events = FunnelEvents(config.state_dir, "us", DAY, "execution_adapter", clock=on_slot_day)
+    events.emit("execute", "AAA", "info", "superseded", "later attempt",
+                run_id=f"{D}-us-AAA-brief-1", arm="brief")
+    events.emit("execute", "AAA", "excluded", "manual-trigger", "manual-trigger",
+                run_id=f"{D}-us-AAA-brief-2", arm="brief")
+    snap = funnel.build_snapshot(config, "us", DAY)
+    aaa = ticker_map(snap)["AAA"]
+    assert stage(snap, "AAA", "decide") == ("passed", "BUY", "reconstructed")
+    assert stage(snap, "AAA", "execute") == ("excluded", "manual-shadowed", "reconstructed")
+    assert aaa["final"] == "excluded"
+    assert aaa["stages"]["execute"]["details"]["manual_run_id"] == f"{D}-us-AAA-brief-2"
+
+
+@pytest.mark.unit
+def test_later_day_execute_events_do_not_change_an_old_snapshot(tmp_path):
+    """Review f59d3fa finding 2: execute events follow the order-row rule."""
+    config = make_config(tmp_path)
+    seed_slot(config, orders=False)
+    first = funnel.write_snapshot(config, "us", DAY).read_bytes()
+    later = FunnelEvents(config.state_dir, "us", DAY, "execution_adapter",
+                         clock=lambda: datetime(2026, 10, 24, 13, 45, tzinfo=timezone.utc))
+    later.emit("execute", "AAA", "passed", "submitted", "submitted (live)",
+               run_id=f"{D}-us-AAA-brief-1", arm="brief", dry_run=False)
+    snap = funnel.build_snapshot(config, "us", DAY)
+    assert ticker_map(snap)["AAA"]["final"] == "pending"
+    assert snap["context"]["events"] == 0
+    # The events file itself is an input, so only its hash may differ.
+    rebuilt = json.loads(funnel.render_snapshot(snap))
+    original = json.loads(first)
+    rebuilt["context"]["inputs"].pop(f"funnel/us/{D}.events.jsonl", None)
+    assert rebuilt == original

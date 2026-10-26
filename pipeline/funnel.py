@@ -227,6 +227,9 @@ class _Slot:
                 and event.get("session") == self.session
                 and event.get("date") == self.day
                 and event.get("stage") in STAGES
+                # Execute events follow the order-row rule: a later-day
+                # re-execution under this slot's run_id is that day's.
+                and (event.get("stage") != "execute" or self._written_on_slot_day(event))
             ):
                 self.events.append(event)
 
@@ -278,6 +281,15 @@ class _Slot:
         # their order rows and their execute events.
         manual = {r.run_id for r in slot_records if r.trigger == "manual"}
         all_records = [r for r in slot_records if r.trigger != "manual"]
+        # ... but they share its attempt counter: the adapter's latest-attempt
+        # rule runs over every row, so a later manual attempt shadows the
+        # slot's own decision for that (ticker, arm) — the adapter then
+        # supersedes the slot's row and skips the manual one.
+        scheduled = {(r.ticker, r.arm) for r in all_records}
+        self.shadowed: dict[tuple[str, str], DecisionRecord] = {
+            (r.ticker, r.arm): r for r in _latest_attempts(slot_records)
+            if r.trigger == "manual" and (r.ticker, r.arm) in scheduled
+        }
         self.events = [
             e for e in self.events
             if not (e.get("stage") == "execute"
@@ -593,6 +605,17 @@ class _Slot:
             arm_results: list[Entry] = []  # one per arm, brief first
             trail: list[Entry] = []
             for record in records:
+                shadow = self.shadowed.get((record.ticker, record.arm))
+                if shadow is not None:
+                    entry = _entry(
+                        "excluded", "manual-shadowed",
+                        f"manual run {shadow.run_id} became this ticker/arm's latest attempt; "
+                        "the adapter superseded this decision and skips manual runs",
+                        arm=record.arm, run_id=record.run_id, manual_run_id=shadow.run_id,
+                    )
+                    arm_results.append(entry)
+                    trail.append(entry)
+                    continue
                 reason = non_candidate_reason(record)
                 if reason is not None:
                     entry = _entry("excluded", reason, f"not an execution candidate: {reason}",
@@ -628,6 +651,8 @@ class _Slot:
                 if stage == "nominate" and result["code"] == "nomination-failed":
                     nomination_failed = result["reason"] or "nomination failed"
                 continue
+            if stage == "execute" and (ticker, "brief") in self.shadowed and self.execute_ran:
+                continue  # the recorded 'superseded' would hide the manual shadow
             self.stages[stage][ticker] = _recorded_entry(result)
         if nomination_failed is None and self.pool is not None and self.pool.carried_forward:
             nomination_failed = "nomination failed (reason not recorded)"
