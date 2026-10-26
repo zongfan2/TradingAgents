@@ -1440,6 +1440,12 @@ def test_trading_days_since_counts_broker_sessions():
     # Thanksgiving 2026-11-26: Wed → Fri is one session, not two.
     thanksgiving = FakeBroker(holidays={date(2026, 11, 26)})
     assert ea.trading_days_since(thanksgiving, date(2026, 11, 25), date(2026, 11, 27)) == 1
+    # A window holding only a holiday is a true zero, not "calendar empty".
+    assert ea.trading_days_since(thanksgiving, date(2026, 11, 25), date(2026, 11, 26)) == 0
+    with pytest.raises(ea.BrokerError):
+        ea.trading_days_since(FakeBroker(holidays=thanksgiving.holidays | {
+            date(2026, 11, 25) + timedelta(days=n) for n in range(30)
+        }), date(2026, 11, 25), date(2026, 11, 27))
 
 
 @pytest.mark.unit
@@ -1574,6 +1580,26 @@ def test_refresh_stale_entry_falls_back_to_weekdays_without_calendar(tmp_path):
     broker = thursday_entry_book(config, holidays={SLOT}, errors={"get_trading_days"})
     summary = refresh(config, broker)
     assert broker.canceled == ["oid-thu"] and summary["canceled_stale"] == 1
+
+
+@pytest.mark.unit
+def test_refresh_stale_entry_empty_calendar_falls_back_to_weekdays(tmp_path):
+    """An SDK answering [] without raising is unavailable, not zero sessions."""
+    config = make_config(tmp_path)
+    broker = thursday_entry_book(config)
+    broker.get_trading_days = lambda start, end: []
+    summary = refresh(config, broker)
+    assert broker.canceled == ["oid-thu"] and summary["canceled_stale"] == 1
+
+
+@pytest.mark.unit
+def test_s9_addon_spacing_fails_closed_on_empty_calendar(tmp_path):
+    config = make_config(tmp_path)
+    broker = addon_scenario(config)
+    broker.get_trading_days = lambda start, end: []
+    submit_slot(config, broker, settings=live_settings())
+    assert read_orders(config)[-1]["reason"] == "add-spacing"
+    assert broker.submitted == []
 
 
 @pytest.mark.unit

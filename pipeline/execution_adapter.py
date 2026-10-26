@@ -703,10 +703,20 @@ def trading_days_since(broker: AlpacaBroker, start: date, end: date) -> int:
     """Broker-calendar sessions strictly after ``start`` up to and including
     ``end``. Raises whatever the broker raises — each caller picks its own
     fail direction (S9 spacing fails closed; stale-entry cancel falls back to
-    :func:`weekdays_since`)."""
+    :func:`weekdays_since`).
+
+    The query runs NEXT_SESSION_MAX_DAYS past ``end`` (the calendar lists
+    future sessions too), so a healthy calendar is never empty: an empty
+    answer raises instead of silently counting zero, while a window holding
+    only holidays still counts zero correctly."""
     if end <= start:
         return 0
-    return len(broker.get_trading_days(start + timedelta(days=1), end))
+    sessions = broker.get_trading_days(
+        start + timedelta(days=1), end + timedelta(days=NEXT_SESSION_MAX_DAYS)
+    )
+    if not sessions:
+        raise BrokerError(f"broker calendar empty for {start}..{end}")
+    return sum(1 for day in sessions if day <= end)
 
 
 def next_session_after(broker: AlpacaBroker, day: date) -> date | None:
