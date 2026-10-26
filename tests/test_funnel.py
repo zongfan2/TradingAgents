@@ -447,3 +447,57 @@ def test_manual_rerun_after_execution_never_hides_the_live_order(tmp_path):
     lines[-1] = json.dumps({**row, "decided_at": f"{D}T12:00:00Z"})
     path.write_text("\n".join(lines) + "\n")
     assert ticker_map(funnel.build_snapshot(config, "us", DAY))["AAA"]["final"] == "order-live"
+
+
+def append_manual(config, ticker, n, decided_at):
+    row = write_decision(config, ticker=ticker, n=n, trigger="manual", date_iso=D, plan=BUY_PLAN)
+    path = config.ledger_dir / "decisions.jsonl"
+    lines = path.read_text().splitlines()
+    lines[-1] = json.dumps({**row, "decided_at": decided_at})
+    path.write_text("\n".join(lines) + "\n")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "decided_at, expected",
+    [(f"{D}T15:00:00Z", "stale-quote"), (f"{D}T12:00:00Z", "manual-shadowed")],
+)
+def test_manual_shadowing_follows_the_execute_timing(tmp_path, decided_at, expected):
+    """Review 887c5a8 finding 1: with no live order involved, only a manual
+    attempt decided before the execute run (13:45Z) shadows CCC's row."""
+    config = make_config(tmp_path)
+    seed_slot(config)  # CCC brief-1: skip stale-quote at 13:45Z
+    append_manual(config, "CCC", 2, decided_at)
+    snap = funnel.build_snapshot(config, "us", DAY)
+    assert stage(snap, "CCC", "execute") == ("excluded", expected, "reconstructed")
+
+
+@pytest.mark.unit
+def test_no_usable_pool_falls_back_to_core_yaml(tmp_path):
+    """Review 887c5a8 finding 2: as the components do, a slot without a
+    usable pool reads core.<session>.yaml; a too-old pool's opportunity
+    layer is reconstructed as dropped."""
+    config = make_config(tmp_path)
+    seed_slot(config, orders=False)
+    pool = config.pool_dir / "us" / f"{D}.json"
+    stale = json.loads(pool.read_text())
+    stale["as_of_date"] = "2026-10-01"  # gap > the 3-day cap ⇒ absent
+    pool.unlink()
+    write_json(config.pool_dir / "us" / "2026-10-01.json", stale)
+    (config.pool_dir / "core.us.yaml").write_text(
+        "- ticker: AAA\n- ticker: BBB\n", encoding="utf-8"
+    )
+    # Without a usable pool only core is collected.
+    (config.ticker_brief_dir / "collector.log").write_text(
+        f"{D} | us | AAA | 9 | 6.0 | written\n", encoding="utf-8"
+    )
+    snap = funnel.build_snapshot(config, "us", DAY)
+    tickers = ticker_map(snap)
+    assert (tickers["AAA"]["layer"], tickers["BBB"]["layer"]) == ("core", "core")
+    assert stage(snap, "BBB", "evaluate") == ("info", "skipped-absent", "reconstructed")
+    assert stage(snap, "BBB", "trigger") == ("info", None, "unknown")
+    assert stage(snap, "CCC", "collect") == (
+        "excluded", "opportunity-dropped-stale-pool", "reconstructed",
+    )
+    assert snap["context"]["pool"]["core_fallback"] is True
+    assert "pools/core.us.yaml" in snap["context"]["inputs"]

@@ -121,7 +121,12 @@ no build timestamp — identical inputs give a byte-identical file):
   nominate — nomination cache (wrong session by `session_for_ticker`, a
   duplicate keeps its first nomination); pool — layers of the same-day pool
   file (`opportunity-enter` when `entered_on` is the slot date, else
-  `-stay`; `carried-forward` on a carried pool), `removed[].reason` prefixes
+  `-stay`; `carried-forward` on a carried pool; without a usable pool —
+  none, or older than the staleness cap — the core layer is
+  `core.<session>.yaml` as the components read it (as it is *now*: a
+  backfill of an old degraded slot uses today's list, hashed in `inputs`)
+  and a too-old pool's opportunity layer is collect
+  `opportunity-dropped-stale-pool`), `removed[].reason` prefixes
   (`score<` / `technical gate fail for` / `opportunity cap`), a nominee
   missing from the pool is `unknown` (low score, gate fail and watch cap
   are indistinguishable without the gate); collect — the slot's

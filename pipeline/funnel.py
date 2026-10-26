@@ -239,6 +239,12 @@ class _Slot:
         self.pool: PoolFile | None = None
         self.pool_error: str | None = None
         self.pool_used: PoolFile | None = None  # newest ≤ date (what collectors read)
+        #: No usable pool: collectors/evaluator/runner fall back to the core
+        #: yaml, and a too-old pool's opportunity layer is dropped.
+        self.core_fallback: list[str] | None = None
+        self.core_error: str | None = None
+        self.pool_stale: PoolFile | None = None
+        self.pool_gap_days: int | None = None
         try:
             result = read_pool(
                 self.config.pool_dir, self.session, self.slot_date,
@@ -253,6 +259,10 @@ class _Slot:
                 self.pool_used = result.pool
                 if result.pool.as_of_date == self.slot_date:
                     self.pool = result.pool
+            else:
+                self.pool_stale = result.pool
+                self.pool_gap_days = result.gap_days
+                self.core_fallback = self._core_yaml()
 
         cache = inputs.json(
             Path(self.config.pool_dir) / self.session / f".nomination-cache-{self.day}.json"
@@ -352,6 +362,20 @@ class _Slot:
             and any(t > manual.decided_at for t in activity)
         }
 
+    def _core_yaml(self) -> list[str]:
+        """The core layer the components fall back to without a usable pool
+        (``ticker_collector.read_core_yaml``, the collectors' own reader).
+        Note: the file is read as it is NOW — a backfill of an old degraded
+        slot uses today's core list (its hash is in ``inputs``)."""
+        from pipeline.ticker_collector import read_core_yaml
+
+        self.inputs.text(Path(self.config.pool_dir) / f"core.{self.session}.yaml")
+        try:
+            return read_core_yaml(Path(self.config.pool_dir), self.session)
+        except Exception as exc:
+            self.core_error = " ".join(str(exc).split())[:300]
+            return []
+
     def _written_on_slot_day(self, row: dict) -> bool:
         written = _instant(row.get("written_at"))
         return written is not None and session_date(self.session, written) == self.slot_date
@@ -398,7 +422,7 @@ class _Slot:
         """Core and opportunity tickers the collectors/evaluator served."""
         pool = self.pool_used
         if pool is None:
-            return [], []
+            return list(self.core_fallback or ()), []
         core = [e.ticker for e in pool.core]
         opportunity = [e.ticker for e in pool.opportunity if e.ticker not in set(core)]
         return core, opportunity
@@ -496,6 +520,14 @@ class _Slot:
                 out[ticker] = _entry(
                     "passed", None, "brief on disk; collector outcome not logged", UNKNOWN
                 )
+        if self.pool_stale is not None:
+            for entry in self.pool_stale.opportunity:
+                if entry.ticker not in core:
+                    out.setdefault(entry.ticker, _entry(
+                        "excluded", "opportunity-dropped-stale-pool",
+                        f"pool {self.pool_gap_days} day(s) old — opportunity layer dropped",
+                        gap_days=self.pool_gap_days,
+                    ))
         if self.pool is not None and self.pool_used is self.pool:
             for entry in self.pool.watch:
                 out.setdefault(
@@ -701,6 +733,8 @@ class _Slot:
                     "as_of_date": self.pool_used.as_of_date.isoformat() if self.pool_used else None,
                     "carried_forward": self.pool.carried_forward if self.pool else None,
                     "error": self.pool_error,
+                    "core_fallback": self.core_fallback is not None,
+                    "core_error": self.core_error,
                 },
                 "nomination_failed": nomination_failed,
                 "thresholds": self.thresholds,
@@ -718,6 +752,11 @@ class _Slot:
             for name in ("core", "opportunity", "watch", "removed"):
                 for entry in getattr(self.pool, name):
                     layers.setdefault(entry.ticker, name)
+        for ticker in self.core_fallback or ():
+            layers.setdefault(ticker, "core")
+        if self.pool_stale is not None:
+            for entry in self.pool_stale.opportunity:
+                layers.setdefault(entry.ticker, "opportunity")
         for ticker in self.stages["nominate"]:
             layers.setdefault(ticker, "nominee")
         return layers
