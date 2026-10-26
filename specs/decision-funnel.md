@@ -100,7 +100,8 @@ stage is `unknown` exactly when its `code` is null.
   error), `nomination_failed`, `thresholds` (trigger from the slot's
   `config_snapshots`, entry/exit from pool events, caps from the pool
   contract; `thresholds.source` says `config-snapshot` / `events` /
-  `default` per value), `execute_ran`, the event count, and `inputs`: a
+  `default` per value), `execute_ran`, `execute_uncertain` (only ambiguous
+  manual-run traces), the event count, and `inputs`: a
   sha256 per file read — for the shared append-only files
   (`decisions.jsonl`, `orders.jsonl`, `collector.log`) and the slot's own
   event log only the slot's kept rows/events are hashed (manual decision
@@ -155,11 +156,14 @@ stage is `unknown` exactly when its `code` is null.
   submission sticks, else the arm's latest deciding row; brief arm first),
   superseded attempts as `info`. Manual runs are left out — their decision
   rows, order rows and execute events — so a manual submit on the slot day
-  never marks the scheduled execute step as run (`pending` stays). One
-  exception: the `manual-trigger` skip (row or event) that the *scheduled*
-  submit run writes for a manual latest attempt (an operator's
-  `submit --run-id --execute` never does) is kept as evidence that execute
-  ran and as shadow timing, hashed under `orders.jsonl#manual-trigger`. They do
+  never marks the scheduled execute step as run (`pending` stays). A
+  manual run's `manual-trigger` skip (row or event) is ambiguous — the
+  scheduled submit writes it when the manual attempt was latest, and so
+  does an operator's `submit --run-id <manual>` without `--execute` — so it
+  is no evidence either way: when it is the only execute trace,
+  `context.execute_uncertain` is true and a would-be `pending` ticker is
+  `unknown` (never `pending`, never `manual-shadowed`). It is hashed under
+  `orders.jsonl#manual-trigger` / `<date>.events.jsonl#manual-trigger`. They do
   share the attempt counter, though: when a manual attempt is the latest
   for a (ticker, arm) **and was decided before an execute run** (some slot
   submit row — `intent`/`submitted`/`skip`, not refresh — or execute event

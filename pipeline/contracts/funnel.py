@@ -167,6 +167,9 @@ class SnapshotContext(ContractModel):
     nomination_failed: str | None
     thresholds: Thresholds
     execute_ran: bool
+    #: Only ambiguous evidence (a manual run's manual-trigger skip): the
+    #: execute state is unknown — no ticker is pending.
+    execute_uncertain: bool
     events: int = Field(ge=0)
     #: input label -> sha256 hex
     inputs: dict[str, str]

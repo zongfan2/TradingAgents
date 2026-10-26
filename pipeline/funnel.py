@@ -306,17 +306,18 @@ class _Slot:
                 and (event.get("details") or {}).get("run_id") in manual
             )
 
-        # The SCHEDULED submit run skips a manual latest attempt with
-        # 'manual-trigger' (an operator's submit --run-id --execute never
-        # does): proof the execute step ran, though not the manual run's
-        # outcome. Kept as evidence for execute_ran and shadow timing only.
+        # A 'manual-trigger' skip of a manual run is written both by the
+        # scheduled submit (the manual attempt was latest) and by an
+        # operator's `submit --run-id <manual>` without --execute — the files
+        # cannot tell which. It is therefore no evidence either way: alone,
+        # it makes the execute state uncertain (never pending, never ran).
         self.execute_marks: list[dict] = [
             e for e in self.events if manual_execute(e) and e.get("code") == "manual-trigger"
         ]
         self.events = [e for e in self.events if not manual_execute(e)]
-        inputs.rows(
-            f"{FUNNEL_DIRNAME}/{self.session}/{self.day}{EVENTS_SUFFIX}#slot", self.events
-        )
+        events_label = f"{FUNNEL_DIRNAME}/{self.session}/{self.day}{EVENTS_SUFFIX}"
+        inputs.rows(f"{events_label}#slot", self.events)
+        inputs.rows(f"{events_label}#manual-trigger", self.execute_marks)
         inputs.rows(
             "ledger/decisions.jsonl#slot",
             [r.model_dump(mode="json", by_alias=True) for r in all_records],
@@ -350,8 +351,9 @@ class _Slot:
         inputs.rows("ledger/orders.jsonl#manual-trigger", mark_rows)
 
         execute_events = [e for e in self.events if e.get("stage") == "execute"]
-        self.execute_ran = self.session == "us" and bool(
-            self.orders or execute_events or self.execute_marks
+        self.execute_ran = self.session == "us" and bool(self.orders or execute_events)
+        self.execute_uncertain = (
+            self.session == "us" and not self.execute_ran and bool(self.execute_marks)
         )
         self.shadowed = self._shadowed(manual_latest, execute_events)
         macro_dir = Path(self.config.macro_brief_dir)
@@ -372,10 +374,7 @@ class _Slot:
         # come from refresh, which never applies the latest-attempt rule.
         submit_rows = [r for r in self.orders if r.get("kind") in ("intent", "submitted", "skip")]
         activity = [
-            t for t in (
-                _instant(x.get("written_at"))
-                for x in (*submit_rows, *execute_events, *self.execute_marks)
-            )
+            t for t in (_instant(x.get("written_at")) for x in (*submit_rows, *execute_events))
             if t is not None
         ]
         live_runs = {
@@ -791,6 +790,7 @@ class _Slot:
                 "nomination_failed": nomination_failed,
                 "thresholds": self.thresholds,
                 "execute_ran": self.execute_ran,
+                "execute_uncertain": self.execute_uncertain,
                 "events": len(self.events),
                 "inputs": dict(sorted(self.inputs.hashes.items())),
             },
@@ -837,6 +837,7 @@ class _Slot:
             and trail.get("decide", {}).get("outcome") == "passed"
             and "execute" not in trail
             and not self.execute_ran
+            and not self.execute_uncertain
         ):
             final = "pending"
         else:
