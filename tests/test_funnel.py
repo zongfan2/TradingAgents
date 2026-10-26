@@ -607,3 +607,18 @@ def test_refresh_rows_do_not_count_as_an_execute_run(tmp_path):
     write_order(config, "CCC", "refresh", written_at=f"{D}T16:00:00Z")
     snap = funnel.build_snapshot(config, "us", DAY)
     assert stage(snap, "CCC", "execute") == ("excluded", "stale-quote", "reconstructed")
+
+
+@pytest.mark.unit
+def test_scheduled_manual_trigger_skip_proves_execute_ran(tmp_path):
+    """Review 31b5132: without events, the scheduled run's manual-trigger
+    skip of a manual latest attempt is evidence that execute ran."""
+    config = make_config(tmp_path)
+    write_decision(config, ticker="CCC", trigger="catalyst", date_iso=D, plan=BUY_PLAN)
+    append_manual(config, "CCC", 2, f"{D}T12:00:00Z")
+    write_order(config, "CCC", "skip", reason="manual-trigger", attempt=2)
+    snap = funnel.build_snapshot(config, "us", DAY)
+    assert snap["context"]["execute_ran"] is True
+    assert stage(snap, "CCC", "execute") == ("excluded", "manual-shadowed", "reconstructed")
+    assert ticker_map(snap)["CCC"]["final"] == "excluded"
+    assert "ledger/orders.jsonl#manual-trigger" in snap["context"]["inputs"]

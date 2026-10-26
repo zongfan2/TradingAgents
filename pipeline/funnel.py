@@ -300,11 +300,20 @@ class _Slot:
             (r.ticker, r.arm): r for r in _latest_attempts(slot_records)
             if r.trigger == "manual" and (r.ticker, r.arm) in scheduled
         }
-        self.events = [
-            e for e in self.events
-            if not (e.get("stage") == "execute"
-                    and (e.get("details") or {}).get("run_id") in manual)
+        def manual_execute(event: dict) -> bool:
+            return (
+                event.get("stage") == "execute"
+                and (event.get("details") or {}).get("run_id") in manual
+            )
+
+        # The SCHEDULED submit run skips a manual latest attempt with
+        # 'manual-trigger' (an operator's submit --run-id --execute never
+        # does): proof the execute step ran, though not the manual run's
+        # outcome. Kept as evidence for execute_ran and shadow timing only.
+        self.execute_marks: list[dict] = [
+            e for e in self.events if manual_execute(e) and e.get("code") == "manual-trigger"
         ]
+        self.events = [e for e in self.events if not manual_execute(e)]
         inputs.rows(
             f"{FUNNEL_DIRNAME}/{self.session}/{self.day}{EVENTS_SUFFIX}#slot", self.events
         )
@@ -325,16 +334,25 @@ class _Slot:
         # This slot's decisions, as executed on the slot day: a close the
         # execute refresh re-submits on a later day keeps the original run_id
         # but belongs to that day, not to this snapshot.
-        self.orders = [
+        day_rows = [
             row for row in read_order_rows(self.config.ledger_dir)
             if str(row.get("run_id") or "").startswith(prefix)
-            and row.get("run_id") not in manual
             and self._written_on_slot_day(row)
         ]
+        self.orders = [row for row in day_rows if row.get("run_id") not in manual]
+        mark_rows = [
+            row for row in day_rows
+            if row.get("run_id") in manual and row.get("kind") == "skip"
+            and reason_code(str(row.get("reason") or "")) == "manual-trigger"
+        ]
+        self.execute_marks.extend(mark_rows)
         inputs.rows("ledger/orders.jsonl#slot", self.orders)
+        inputs.rows("ledger/orders.jsonl#manual-trigger", mark_rows)
 
         execute_events = [e for e in self.events if e.get("stage") == "execute"]
-        self.execute_ran = self.session == "us" and bool(self.orders or execute_events)
+        self.execute_ran = self.session == "us" and bool(
+            self.orders or execute_events or self.execute_marks
+        )
         self.shadowed = self._shadowed(manual_latest, execute_events)
         macro_dir = Path(self.config.macro_brief_dir)
         self.macro_verdict = _verdict(inputs, macro_dir / f"{self.day}.{self.session}.md")
@@ -354,7 +372,10 @@ class _Slot:
         # come from refresh, which never applies the latest-attempt rule.
         submit_rows = [r for r in self.orders if r.get("kind") in ("intent", "submitted", "skip")]
         activity = [
-            t for t in (_instant(x.get("written_at")) for x in (*submit_rows, *execute_events))
+            t for t in (
+                _instant(x.get("written_at"))
+                for x in (*submit_rows, *execute_events, *self.execute_marks)
+            )
             if t is not None
         ]
         live_runs = {

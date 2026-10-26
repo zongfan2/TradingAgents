@@ -155,7 +155,11 @@ stage is `unknown` exactly when its `code` is null.
   submission sticks, else the arm's latest deciding row; brief arm first),
   superseded attempts as `info`. Manual runs are left out — their decision
   rows, order rows and execute events — so a manual submit on the slot day
-  never marks the scheduled execute step as run (`pending` stays). They do
+  never marks the scheduled execute step as run (`pending` stays). One
+  exception: the `manual-trigger` skip (row or event) that the *scheduled*
+  submit run writes for a manual latest attempt (an operator's
+  `submit --run-id --execute` never does) is kept as evidence that execute
+  ran and as shadow timing, hashed under `orders.jsonl#manual-trigger`. They do
   share the attempt counter, though: when a manual attempt is the latest
   for a (ticker, arm) **and was decided before an execute run** (some slot
   submit row — `intent`/`submitted`/`skip`, not refresh — or execute event
