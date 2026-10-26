@@ -53,11 +53,12 @@ studies).
   `info` events (`already-done`, `superseded`, the adapter's rerun
   `dedupe`) never replaces a decision;
   other runs' events are kept as notes. So a rerun supersedes only what it
-  re-decided. Exception, `execute`: an order an earlier run placed stays
-  live at the broker whatever a rerun emits (its feeds-arm non-candidate,
-  `dedupe`), so the run holding the **strongest outcome across all runs**
-  decides (ties: the latest run) — a rerun can upgrade a skip to
-  `submitted`, never downgrade a placed order.
+  re-decided. Exception, `execute`: a **live** order an earlier run placed
+  stays at the broker whatever a rerun emits (its feeds-arm non-candidate,
+  `dedupe`), so the latest run with a live `submitted` (`details.dry_run`
+  false) decides — a rerun never downgrades a placed order. Dry-run
+  submissions place nothing and follow the general rule, so a later live
+  run's skip replaces them.
 - Emitters are best-effort: an event-write failure logs a warning and never
   changes the component's behavior, exit code or outputs. Each component's
   funnel helper is additionally wrapped (`funnel_events.best_effort`) so a

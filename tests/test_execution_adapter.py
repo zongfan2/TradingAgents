@@ -2303,6 +2303,22 @@ def test_funnel_rerun_never_downgrades_a_placed_order(tmp_path):
 
 
 @pytest.mark.unit
+def test_funnel_live_skip_replaces_an_earlier_dry_run_submission(tmp_path):
+    """Review 63e04de: a dry run places nothing, so the later live run's
+    exclusion is the ticker's execute outcome."""
+    from pipeline.funnel_events import current_outcomes, read_events
+
+    config = make_config(tmp_path)
+    write_decision(config)
+    submit_slot(config, FakeBroker())  # default settings: dry run
+    stale = ea.Quote(bid=99.5, ask=100.0, timestamp=NOW - timedelta(hours=2))
+    submit_slot(config, FakeBroker(quotes={"NVDA": stale}), settings=live_settings())
+    outcome = current_outcomes(read_events(config.state_dir, "us", SLOT))[("execute", "NVDA")]
+    assert (outcome["outcome"], outcome["code"]) == ("excluded", "stale-quote")
+    assert [e["details"]["dry_run"] for e in outcome["notes"]] == [True]
+
+
+@pytest.mark.unit
 def test_funnel_rerun_can_upgrade_a_skip_to_submitted(tmp_path):
     from pipeline.funnel_events import current_outcomes, read_events
 

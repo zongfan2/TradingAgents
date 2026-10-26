@@ -17,9 +17,10 @@ arms of a pair, a SELL's cancels next to its close, or a feeds-arm
 non-candidate next to the brief arm's order all keep the right result. A
 run with only ``info`` events (``already-done``, ``superseded``, the
 adapter's rerun ``dedupe``) never replaces a decision; other runs' events
-are kept as notes. The ``execute`` stage is the exception: an order a run
-placed stays live at the broker, so there the run holding the strongest
-outcome across all runs decides (ties: the latest run).
+are kept as notes. The ``execute`` stage is the exception: a LIVE order a
+run placed stays at the broker, so the latest run with a live
+``submitted`` decides there whatever later runs emit; dry-run submissions
+place nothing and follow the general rule.
 """
 
 from __future__ import annotations
@@ -165,6 +166,15 @@ def read_events(state_dir: str | Path, session: str, slot_date: date | str) -> l
 _STRENGTH = {"info": 0, "excluded": 1, "passed": 2}
 
 
+def _is_live_submission(event: dict) -> bool:
+    details = event.get("details") or {}
+    return (
+        event.get("outcome") == "passed"
+        and event.get("code") == "submitted"
+        and details.get("dry_run") is False
+    )
+
+
 def current_outcomes(events: list[dict]) -> dict[tuple[str, str | None], dict]:
     """Reduce a slot's events (file order) to one outcome per
     ``(stage, ticker)`` — the documented supersession rule (module docstring).
@@ -178,15 +188,14 @@ def current_outcomes(events: list[dict]) -> dict[tuple[str, str | None], dict]:
         grouped.setdefault((event.get("stage"), event.get("ticker")), []).append(event)
     result: dict[tuple[str, str | None], dict] = {}
     for key, group in grouped.items():
+        deciding = [e.get("run") for e in group if e.get("outcome") in ("passed", "excluded")]
+        run = deciding[-1] if deciding else group[-1].get("run")
         if key[0] == "execute":
-            # A placed order stays live at the broker whatever a later run
-            # emits, so the strongest outcome across runs decides (ties: the
-            # latest run).
-            strongest = max(_STRENGTH.get(e.get("outcome"), -1) for e in group)
-            run = [e for e in group if _STRENGTH.get(e.get("outcome"), -1) == strongest][-1].get("run")
-        else:
-            deciding = [e.get("run") for e in group if e.get("outcome") in ("passed", "excluded")]
-            run = deciding[-1] if deciding else group[-1].get("run")
+            # A LIVE order stays at the broker whatever a later run emits, so
+            # the latest run that placed one decides; dry runs place nothing.
+            placed = [e.get("run") for e in group if _is_live_submission(e)]
+            if placed:
+                run = placed[-1]
         own = [e for e in group if e.get("run") == run]
         best = max(own, key=lambda e: _STRENGTH.get(e.get("outcome"), -1))
         result[key] = {
