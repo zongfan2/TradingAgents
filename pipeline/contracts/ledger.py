@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import math
 import re
-from datetime import date
+from datetime import date, timedelta, timezone
 from typing import Literal
 
 from pydantic import Field, field_validator, model_validator
@@ -387,7 +387,29 @@ class PositionEntry(ContractModel):
     open_orders: list[OpenOrderLeg] = Field(default_factory=list)
 
 
+#: ``positions.json`` ``next_session`` must fall within this many days after
+#: ``as_of``'s UTC date — the writer's broker-calendar lookahead window.
+NEXT_SESSION_MAX_DAYS = 14
+
+
 class PositionsSnapshot(ContractModel):
     as_of: UtcInstant
+    #: First US session strictly after ``as_of``'s UTC date (broker calendar);
+    #: None ⇒ unknown, the runner falls back to weekday counting.
+    next_session: date | None = None
     equity: float
     positions: list[PositionEntry] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _next_session_in_window(self) -> PositionsSnapshot:
+        """The runner trusts ``next_session`` outright, so a far-future value
+        would keep stale numbers looking fresh — reject anything outside
+        (as_of's UTC date, + NEXT_SESSION_MAX_DAYS]."""
+        if self.next_session is not None:
+            as_of_day = self.as_of.astimezone(timezone.utc).date()
+            latest = as_of_day + timedelta(days=NEXT_SESSION_MAX_DAYS)
+            if not as_of_day < self.next_session <= latest:
+                raise ValueError(
+                    f"next_session {self.next_session} not in ({as_of_day}, {latest}]"
+                )
+        return self

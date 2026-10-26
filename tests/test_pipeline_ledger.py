@@ -388,6 +388,7 @@ def test_positions_snapshot_contract_example_parses():
     snapshot = ledger.PositionsSnapshot.model_validate(
         {
             "as_of": "2026-08-04T12:20:00Z",
+            "next_session": "2026-08-05",
             "equity": 99985.65,
             "positions": [
                 {
@@ -410,6 +411,36 @@ def test_positions_snapshot_contract_example_parses():
         }
     )
     assert snapshot.positions[0].open_orders[0].leg == "stop"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "next_session",
+    ["2026-11-25", "2026-11-24", "2026-12-10"],  # same day, before, > 14 days
+)
+def test_positions_snapshot_rejects_next_session_outside_window(next_session):
+    payload = {"as_of": "2026-11-25T20:00:00Z", "next_session": next_session, "equity": 1.0}
+    with pytest.raises(ValidationError, match="next_session"):
+        ledger.PositionsSnapshot.model_validate(payload)
+    with pytest.raises(ValidationError, match="next_session"):
+        ledger.PositionsSnapshot.parse_lenient(payload)  # readers reject it too
+
+
+@pytest.mark.unit
+def test_positions_snapshot_next_session_window_bounds():
+    as_of = "2026-11-25T20:00:00Z"
+    for ok in ("2026-11-26", "2026-12-09", None):
+        snapshot = ledger.PositionsSnapshot.model_validate(
+            {"as_of": as_of, "next_session": ok, "equity": 1.0}
+        )
+        assert str(snapshot.next_session) == str(ok)
+    # The window is anchored to as_of's UTC date, not its local date.
+    late_et = "2026-11-26T02:00:00Z"  # 21:00 New York on 11-25
+    with pytest.raises(ValidationError, match="next_session"):
+        ledger.PositionsSnapshot.model_validate(
+            {"as_of": late_et, "next_session": "2026-11-26", "equity": 1.0}
+        )
+
 
 
 # ---------------------------------------------------------------------------

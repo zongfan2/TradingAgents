@@ -233,6 +233,7 @@ class FakeBroker:
         equity=100_000.0,
         buying_power=200_000.0,
         trading_day=True,
+        holidays=(),
         now=NOW,
         quotes=None,
         assets=None,
@@ -246,6 +247,7 @@ class FakeBroker:
         self.equity = equity
         self.buying_power = buying_power
         self.trading_day = trading_day
+        self.holidays = set(holidays)
         self.now = now
         self.quotes = dict(quotes or {})
         self.assets = dict(assets or {})
@@ -276,6 +278,12 @@ class FakeBroker:
     def get_calendar_today(self):
         self._touch("get_calendar_today")
         return ea.CalendarDay(date=self.now.date()) if self.trading_day else None
+
+    def get_trading_days(self, start, end):
+        """Weekdays in [start, end] minus ``holidays`` — the broker calendar."""
+        self._touch("get_trading_days")
+        days = (start + timedelta(days=n) for n in range((end - start).days + 1))
+        return [d for d in days if d.weekday() < 5 and d not in self.holidays]
 
     def get_asset(self, ticker):
         self._touch("get_asset")
@@ -1233,6 +1241,28 @@ def test_s9_addon_pyramid_up_violation(tmp_path):
 
 
 @pytest.mark.unit
+def test_s9_addon_spacing_counts_holidays_out(tmp_path):
+    """Monday 08-03 → Friday 08-07 is 4 weekdays, but with two holidays in
+    between only 2 broker sessions < 3 — the weekday count would have passed."""
+    config = make_config(tmp_path)
+    broker = addon_scenario(config)
+    broker.holidays = {date(2026, 8, 4), date(2026, 8, 5)}
+    submit_slot(config, broker, settings=live_settings())
+    assert read_orders(config)[-1]["reason"] == "add-spacing"
+    assert broker.submitted == []
+
+
+@pytest.mark.unit
+def test_s9_addon_spacing_fails_closed_without_calendar(tmp_path):
+    config = make_config(tmp_path)
+    broker = addon_scenario(config)
+    broker.errors.add("get_trading_days")
+    submit_slot(config, broker, settings=live_settings())
+    assert read_orders(config)[-1]["reason"] == "add-spacing"
+    assert broker.submitted == []
+
+
+@pytest.mark.unit
 def test_s9_addon_spacing_violation(tmp_path):
     """Last fill Thursday 08-06 → Friday 08-07 is 1 trading day < 3."""
     config = make_config(tmp_path)
@@ -1400,12 +1430,39 @@ def test_sell_cancel_failure_fails_closed_without_a_close(tmp_path):
 
 
 @pytest.mark.unit
-def test_trading_days_since_weekday_arithmetic():
+def test_trading_days_since_counts_broker_sessions():
     friday, monday = date(2026, 8, 7), date(2026, 8, 3)
-    assert ea.trading_days_since(monday, friday) == 4  # Tue..Fri
-    assert ea.trading_days_since(date(2026, 8, 6), friday) == 1
-    assert ea.trading_days_since(friday, friday) == 0
-    assert ea.trading_days_since(friday, date(2026, 8, 10)) == 1  # Fri → Mon
+    broker = FakeBroker()
+    assert ea.trading_days_since(broker, monday, friday) == 4  # Tue..Fri
+    assert ea.trading_days_since(broker, date(2026, 8, 6), friday) == 1
+    assert ea.trading_days_since(broker, friday, friday) == 0
+    assert ea.trading_days_since(broker, friday, date(2026, 8, 10)) == 1  # Fri → Mon
+    # Thanksgiving 2026-11-26: Wed → Fri is one session, not two.
+    thanksgiving = FakeBroker(holidays={date(2026, 11, 26)})
+    assert ea.trading_days_since(thanksgiving, date(2026, 11, 25), date(2026, 11, 27)) == 1
+    # A window holding only a holiday is a true zero, not "calendar empty".
+    assert ea.trading_days_since(thanksgiving, date(2026, 11, 25), date(2026, 11, 26)) == 0
+    with pytest.raises(ea.BrokerError):
+        ea.trading_days_since(FakeBroker(holidays=thanksgiving.holidays | {
+            date(2026, 11, 25) + timedelta(days=n) for n in range(30)
+        }), date(2026, 11, 25), date(2026, 11, 27))
+
+
+@pytest.mark.unit
+def test_weekdays_since_fallback_arithmetic():
+    friday, monday = date(2026, 8, 7), date(2026, 8, 3)
+    assert ea.weekdays_since(monday, friday) == 4
+    assert ea.weekdays_since(friday, friday) == 0
+    assert ea.weekdays_since(friday, date(2026, 8, 10)) == 1
+
+
+@pytest.mark.unit
+def test_next_session_after_skips_weekends_and_holidays():
+    broker = FakeBroker(holidays={date(2026, 11, 26)})
+    assert ea.next_session_after(broker, date(2026, 11, 25)) == date(2026, 11, 27)
+    assert ea.next_session_after(broker, date(2026, 8, 7)) == date(2026, 8, 10)
+    closed = FakeBroker(holidays={date(2026, 8, 7) + timedelta(days=n) for n in range(15)})
+    assert ea.next_session_after(closed, date(2026, 8, 7)) is None
 
 
 # ---------------------------------------------------------------------------
@@ -1491,6 +1548,74 @@ def test_refresh_cancels_stale_unfilled_entry_but_never_a_filled_entry(tmp_path)
         (stale_cid, "stale-entry"),
     ]
     assert summary["canceled_stale"] == 1
+
+
+def thursday_entry_book(config, **broker_kwargs):
+    """One unfilled entry submitted Thursday 08-06, refreshed on SLOT (Fri)."""
+    cid = "2026-08-06-us-NVDA-entry"
+    append_order_row(
+        config, client_order_id=cid, written_at="2026-08-06T13:00:00Z",
+        run_id="2026-08-06-us-NVDA-brief-1",
+    )
+    return FakeBroker(
+        broker_orders={cid: broker_order(cid, status="accepted", oid="oid-thu")},
+        **broker_kwargs,
+    )
+
+
+@pytest.mark.unit
+def test_refresh_stale_entry_age_counts_broker_sessions(tmp_path):
+    """No session after Thursday's submit (Friday is a holiday) ⇒ not yet
+    stale; the weekday count would have canceled it."""
+    config = make_config(tmp_path)
+    broker = thursday_entry_book(config, holidays={SLOT})
+    summary = refresh(config, broker)
+    assert broker.canceled == [] and summary["canceled_stale"] == 0
+
+
+@pytest.mark.unit
+def test_refresh_stale_entry_falls_back_to_weekdays_without_calendar(tmp_path):
+    """Calendar down ⇒ weekday count, which can only cancel earlier."""
+    config = make_config(tmp_path)
+    broker = thursday_entry_book(config, holidays={SLOT}, errors={"get_trading_days"})
+    summary = refresh(config, broker)
+    assert broker.canceled == ["oid-thu"] and summary["canceled_stale"] == 1
+
+
+@pytest.mark.unit
+def test_refresh_stale_entry_empty_calendar_falls_back_to_weekdays(tmp_path):
+    """An SDK answering [] without raising is unavailable, not zero sessions."""
+    config = make_config(tmp_path)
+    broker = thursday_entry_book(config)
+    broker.get_trading_days = lambda start, end: []
+    summary = refresh(config, broker)
+    assert broker.canceled == ["oid-thu"] and summary["canceled_stale"] == 1
+
+
+@pytest.mark.unit
+def test_s9_addon_spacing_fails_closed_on_empty_calendar(tmp_path):
+    config = make_config(tmp_path)
+    broker = addon_scenario(config)
+    broker.get_trading_days = lambda start, end: []
+    submit_slot(config, broker, settings=live_settings())
+    assert read_orders(config)[-1]["reason"] == "add-spacing"
+    assert broker.submitted == []
+
+
+@pytest.mark.unit
+def test_refresh_snapshot_records_next_session(tmp_path):
+    config = make_config(tmp_path)
+    refresh(config, FakeBroker(holidays={date(2026, 8, 10)}))
+    snapshot = json.loads((config.ledger_dir / "positions.json").read_text(encoding="utf-8"))
+    assert snapshot["next_session"] == "2026-08-11"  # Fri as_of → Mon holiday → Tue
+
+
+@pytest.mark.unit
+def test_refresh_snapshot_next_session_null_without_calendar(tmp_path):
+    config = make_config(tmp_path)
+    refresh(config, FakeBroker(errors={"get_trading_days"}))
+    snapshot = json.loads((config.ledger_dir / "positions.json").read_text(encoding="utf-8"))
+    assert snapshot["next_session"] is None
 
 
 @pytest.mark.unit

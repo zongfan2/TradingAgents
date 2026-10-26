@@ -36,7 +36,7 @@ import pytest
 from pipeline import analysis_runner as ar
 from pipeline.common import sha256_file, sha256_text
 from pipeline.config import PipelineConfig
-from pipeline.contracts.ledger import DecisionRecord
+from pipeline.contracts.ledger import DecisionRecord, PositionEntry, PositionsSnapshot
 
 SLOT = date(2026, 8, 7)  # a Friday
 NOW = datetime(2026, 8, 7, 13, 0, tzinfo=timezone.utc)
@@ -1364,6 +1364,51 @@ def test_position_snapshot_staleness_uses_trading_days():
     assert ar.position_snapshot_stale(friday, monday) is False
     assert ar.position_snapshot_stale(thursday, monday) is True
     assert ar.position_snapshot_stale(friday, date(2026, 8, 7)) is False  # same day
+
+
+@pytest.mark.unit
+def test_position_snapshot_staleness_uses_next_session_across_holidays():
+    wednesday = datetime(2026, 11, 25, 20, 0, tzinfo=timezone.utc)
+    friday = date(2026, 11, 27)  # Thursday 11-26 is Thanksgiving
+    # Weekday fallback reads the holiday as a missed refresh…
+    assert ar.position_snapshot_stale(wednesday, friday) is True
+    # …the broker calendar knows Friday is the very next session.
+    assert ar.position_snapshot_stale(wednesday, friday, next_session=friday) is False
+    # A missed session is still stale: next session Fri, slot Mon.
+    assert ar.position_snapshot_stale(wednesday, date(2026, 11, 30), next_session=friday) is True
+    # next_session never makes a same-day or older slot stale.
+    assert ar.position_snapshot_stale(wednesday, date(2026, 11, 25), next_session=friday) is False
+
+
+@pytest.mark.unit
+def test_load_positions_rejects_out_of_window_next_session(tmp_path):
+    """A far-future next_session would keep stale numbers looking fresh —
+    the snapshot is dropped instead (no position numbers reach the trader)."""
+    (tmp_path / "positions.json").write_text(
+        json.dumps(
+            {"as_of": "2026-11-25T20:00:00Z", "next_session": "2027-01-04", "equity": 1.0}
+        ),
+        encoding="utf-8",
+    )
+    assert ar.load_positions(tmp_path) is None
+
+
+@pytest.mark.unit
+def test_position_context_honors_snapshot_next_session():
+    snapshot = PositionsSnapshot(
+        as_of=datetime(2026, 11, 25, 20, 0, tzinfo=timezone.utc),
+        next_session=date(2026, 11, 27),
+        equity=100_000.0,
+        positions=[
+            PositionEntry(
+                ticker="NVDA", qty=10, avg_entry=100.0,
+                last_fill_at=datetime(2026, 11, 24, 15, 0, tzinfo=timezone.utc),
+                market_value=1050.0, unrealized_pl=50.0, tranches=1,
+            )
+        ],
+    )
+    text = ar.position_context_for(snapshot, "NVDA", date(2026, 11, 27))
+    assert text is not None and text.startswith("- qty: 10")
 
 
 # ---------------------------------------------------------------------------

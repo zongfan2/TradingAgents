@@ -80,6 +80,7 @@ from pipeline.common import (
 )
 from pipeline.config import PipelineConfig, load_config
 from pipeline.contracts.ledger import (
+    NEXT_SESSION_MAX_DAYS,
     DecisionRecord,
     OpenOrderLeg,
     OrderRecord,
@@ -268,6 +269,8 @@ class AlpacaBroker(Protocol):
 
     def get_calendar_today(self) -> CalendarDay | None: ...
 
+    def get_trading_days(self, start: date, end: date) -> list[date]: ...
+
     def get_asset(self, ticker: str) -> AssetInfo: ...
 
     def latest_quote(self, ticker: str) -> Quote: ...
@@ -284,6 +287,13 @@ class AlpacaBroker(Protocol):
 
 
 BrokerFactory = Callable[[], AlpacaBroker]
+
+
+def _calendar_date(day) -> date | None:
+    value = getattr(day, "date", None)
+    if isinstance(value, datetime):
+        return value.date()
+    return value if isinstance(value, date) else None
 
 
 class AlpacaPaperBroker:
@@ -318,14 +328,21 @@ class AlpacaPaperBroker:
         today = self.get_clock().date()
         days = self._trading.get_calendar(GetCalendarRequest(start=today, end=today))
         for day in days or ():
-            day_date = getattr(day, "date", None)
-            if isinstance(day_date, datetime):
-                day_date = day_date.date()
-            if day_date == today:
+            if _calendar_date(day) == today:
                 return CalendarDay(date=today)
         # Some SDK versions return the NEXT session for a closed day — the
         # equality check above keeps that fail-closed (closed ⇒ None).
         return None
+
+    def get_trading_days(self, start: date, end: date) -> list[date]:
+        from alpaca.trading.requests import GetCalendarRequest
+
+        days = self._trading.get_calendar(GetCalendarRequest(start=start, end=end))
+        # Same defensive filter as today's check: never trust a returned
+        # session outside the requested range.
+        return sorted(
+            {d for d in map(_calendar_date, days or ()) if d is not None and start <= d <= end}
+        )
 
     def get_asset(self, ticker: str) -> AssetInfo:
         asset = self._trading.get_asset(ticker)
@@ -682,18 +699,42 @@ def sized_qty(plan: TradePlan, equity: float, settings: AdapterSettings) -> int:
     return max(0, qty)
 
 
-def trading_days_since(start: date, end: date) -> int:
+def trading_days_since(broker: AlpacaBroker, start: date, end: date) -> int:
+    """Broker-calendar sessions strictly after ``start`` up to and including
+    ``end``. Raises whatever the broker raises — each caller picks its own
+    fail direction (S9 spacing fails closed; stale-entry cancel falls back to
+    :func:`weekdays_since`).
+
+    The query runs NEXT_SESSION_MAX_DAYS past ``end`` (the calendar lists
+    future sessions too), so a healthy calendar is never empty: an empty
+    answer raises instead of silently counting zero, while a window holding
+    only holidays still counts zero correctly."""
+    if end <= start:
+        return 0
+    sessions = broker.get_trading_days(
+        start + timedelta(days=1), end + timedelta(days=NEXT_SESSION_MAX_DAYS)
+    )
+    if not sessions:
+        raise BrokerError(f"broker calendar empty for {start}..{end}")
+    return sum(1 for day in sessions if day <= end)
+
+
+def next_session_after(broker: AlpacaBroker, day: date) -> date | None:
+    """First broker-calendar session strictly after ``day``; None when the
+    lookahead window holds none."""
+    sessions = broker.get_trading_days(
+        day + timedelta(days=1), day + timedelta(days=NEXT_SESSION_MAX_DAYS)
+    )
+    return sessions[0] if sessions else None
+
+
+def weekdays_since(start: date, end: date) -> int:
     """Weekdays strictly after ``start`` up to and including ``end``.
 
-    Weekday approximation of "trading days": a market holiday inside the
-    window counts as a trading day and inflates the count by one. The error
-    direction is use-dependent — for the refresh stale-entry cancel the
-    inflation is fail-safe (a stale entry is canceled no later than a true
-    count would), but for the S9 add-on spacing gate it is PERMISSIVE:
-    around a holiday, ``add_spacing_days`` can be satisfied one true trading
-    day early. Bounded at one day per holiday in the window; an exact count
-    needs a broker calendar range query (post-v2 — the broker seam exposes
-    only today's session).
+    Fallback for :func:`trading_days_since` when the broker calendar is
+    unavailable: a market holiday inside the window counts as a trading day,
+    so the count can only be too high — use it only where over-counting is
+    the safe direction (the refresh stale-entry cancel).
     """
     if end <= start:
         return 0
@@ -1140,7 +1181,13 @@ class _SubmitRun:
         if last_time is None:
             # Spacing cannot be established from the ledger — fail closed.
             return "add-spacing"
-        if trading_days_since(last_time.date(), self.slot_date) < self.settings.add_spacing_days:
+        try:
+            spacing = trading_days_since(self.broker, last_time.date(), self.slot_date)
+        except Exception as exc:
+            # A weekday count could pass the gate a session early — fail closed.
+            logger.warning("broker calendar unavailable for %s spacing: %s", ticker, _one_line(exc))
+            return "add-spacing"
+        if spacing < self.settings.add_spacing_days:
             return "add-spacing"
         return None
 
@@ -1572,7 +1619,12 @@ def run_refresh(
         if (order.filled_qty or 0) > 0:
             continue  # a filled/partial position keeps its GTC protective legs
         submitted_on = _row_instant(sub).date()
-        if trading_days_since(submitted_on, today) < 1:
+        try:
+            age = trading_days_since(broker, submitted_on, today)
+        except Exception as exc:
+            logger.warning("broker calendar unavailable for stale-entry age: %s", _one_line(exc))
+            age = weekdays_since(submitted_on, today)  # over-counts ⇒ cancels earlier
+        if age < 1:
             continue
         try:
             broker.cancel_order(order.order_id)
@@ -1799,7 +1851,15 @@ def run_refresh(
                     open_orders=legs,
                 )
             )
-        snapshot = PositionsSnapshot(as_of=clock(), equity=account.equity, positions=entries)
+        as_of = clock()
+        try:
+            next_session = next_session_after(broker, as_of.astimezone(timezone.utc).date())
+        except Exception as exc:
+            logger.warning("broker calendar unavailable for next_session: %s", _one_line(exc))
+            next_session = None
+        snapshot = PositionsSnapshot(
+            as_of=as_of, next_session=next_session, equity=account.equity, positions=entries
+        )
         atomic_write(
             Path(config.ledger_dir) / POSITIONS_NAME,
             json.dumps(snapshot.model_dump(mode="json"), indent=2, ensure_ascii=False) + "\n",

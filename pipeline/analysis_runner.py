@@ -790,25 +790,27 @@ def _weekdays_between(start: date, end: date) -> int:
     )
 
 
-def position_snapshot_stale(as_of: datetime, slot_date: date) -> bool:
+def position_snapshot_stale(
+    as_of: datetime, slot_date: date, next_session: date | None = None
+) -> bool:
     """Contract: ``as_of`` older than 1 trading day ⇒ stale.
 
     A Friday refresh is still the most recent trading day's state on Monday
-    (only weekend days in between); one or more intervening weekdays means a
-    whole trading day's refresh was missed.
+    (only weekend days in between); a whole trading session between ``as_of``
+    and the slot means that session's refresh was missed.
 
-    Deliberately conservative approximation: "trading day" is counted as
-    calendar weekdays, so a market holiday between ``as_of`` and the slot
-    (e.g. Thanksgiving Friday, CN golden-week reopens) reads as a missed
-    refresh and voids a snapshot that is actually current. The degrade
-    direction is contract-safe — the trader sees "position data unavailable",
-    never stale numbers — at the cost of losing position context on the first
-    post-holiday slot. A per-ticker price-calendar check ("a date with a bar
-    ⇒ it traded", the settle step's anchor rule) would remove the false
-    positive but needs market data in what is otherwise a pure function.
+    ``next_session`` is the snapshot's broker-calendar session after
+    ``as_of`` (ledger contract): stale iff that session is earlier than the
+    slot. Without it, sessions are approximated as weekdays — a holiday then
+    reads as a missed refresh, which degrades to "position data unavailable",
+    never to stale numbers.
     """
     as_of_day = as_of.astimezone(timezone.utc).date()
-    return as_of_day < slot_date and _weekdays_between(as_of_day, slot_date) >= 1
+    if as_of_day >= slot_date:
+        return False
+    if next_session is not None:
+        return next_session < slot_date
+    return _weekdays_between(as_of_day, slot_date) >= 1
 
 
 def position_context_for(
@@ -823,7 +825,7 @@ def position_context_for(
     )
     if entry is None:
         return None
-    if position_snapshot_stale(snapshot.as_of, slot_date):
+    if position_snapshot_stale(snapshot.as_of, slot_date, snapshot.next_session):
         return (
             "position data unavailable (positions snapshot as_of "
             f"{to_utc_iso(snapshot.as_of)} is older than 1 trading day)"
