@@ -333,3 +333,52 @@ def test_cli_build_and_backfill(tmp_path, monkeypatch, capsys):
     assert "written:" in capsys.readouterr().out
     assert funnel.main(["backfill", "--since", D, "--until", D, "--session", "us"]) == 0
     assert (config.state_dir / "funnel" / "us" / f"{D}.json").is_file()
+
+
+@pytest.mark.unit
+def test_core_collect_failure_does_not_stop_a_ticker_that_ran(tmp_path):
+    """Review 45f1591 finding 1: the stop is the first exclusion after the
+    last passed stage — a core ticker analysed despite a failed collection
+    is pending, then stops where execution skipped it."""
+    config = make_config(tmp_path)
+    seed_slot(config, orders=False)
+    write_decision(config, ticker="BBB", date_iso=D, plan=BUY_PLAN)
+    with open(config.ticker_brief_dir / "collector.log", "a", encoding="utf-8") as handle:
+        handle.write(f"{D} | us | BBB | 0 | - | failed\n")
+    snap = funnel.build_snapshot(config, "us", DAY)
+    assert stage(snap, "BBB", "collect") == ("info", "failed", "reconstructed")
+    bbb = ticker_map(snap)["BBB"]
+    assert (bbb["final"], bbb["stop"]) == ("pending", None)
+
+    write_order(config, "BBB", "skip", reason="stale-quote")
+    bbb = ticker_map(funnel.build_snapshot(config, "us", DAY))["BBB"]
+    assert bbb["final"] == "excluded"
+    assert (bbb["stop"]["stage"], bbb["stop"]["code"]) == ("execute", "stale-quote")
+
+
+@pytest.mark.unit
+def test_recorded_core_collect_exclusion_does_not_stop_either(tmp_path):
+    """Events P1 wrote before the core rule still yield the right stop."""
+    config = make_config(tmp_path)
+    seed_slot(config)
+    events = FunnelEvents(config.state_dir, "us", DAY, "ticker_collectors")
+    events.emit("collect", "AAA", "excluded", "failed", "old core failure")
+    aaa = ticker_map(funnel.build_snapshot(config, "us", DAY))["AAA"]
+    assert (aaa["final"], aaa["stop"]) == ("order-live", None)
+
+
+@pytest.mark.unit
+def test_manual_runs_do_not_mark_execute_as_run(tmp_path):
+    """Review 45f1591 finding 2: a manual run's decision, order rows and
+    execute events on the slot day never turn scheduled tickers non-pending."""
+    config = make_config(tmp_path)
+    seed_slot(config, orders=False)
+    write_decision(config, ticker="MMM", trigger="manual", date_iso=D, plan=BUY_PLAN)
+    write_order(config, "MMM", "submitted", dry_run=True)
+    events = FunnelEvents(config.state_dir, "us", DAY, "execution_adapter")
+    events.emit("execute", "MMM", "passed", "submitted", "submitted (dry-run)",
+                run_id=f"{D}-us-MMM-brief-1", dry_run=True)
+    snap = funnel.build_snapshot(config, "us", DAY)
+    assert snap["context"]["execute_ran"] is False
+    assert ticker_map(snap)["AAA"]["final"] == "pending"
+    assert "MMM" not in ticker_map(snap)

@@ -269,9 +269,19 @@ class _Slot:
         inputs.rows("ticker_briefs/collector.log#slot", slot_lines)
 
         prefix = f"{self.day}-{self.session}-"
-        all_records = [
+        slot_records = [
             r for r in load_decision_records(self.config.ledger_dir)
-            if r.date == self.slot_date and r.session == self.session and r.trigger != "manual"
+            if r.date == self.slot_date and r.session == self.session
+        ]
+        # Manual runs share the slot's run_id prefix but are not the slot's
+        # decisions (they emit no trigger/decide events either): drop them,
+        # their order rows and their execute events.
+        manual = {r.run_id for r in slot_records if r.trigger == "manual"}
+        all_records = [r for r in slot_records if r.trigger != "manual"]
+        self.events = [
+            e for e in self.events
+            if not (e.get("stage") == "execute"
+                    and (e.get("details") or {}).get("run_id") in manual)
         ]
         inputs.rows(
             "ledger/decisions.jsonl#slot",
@@ -286,10 +296,14 @@ class _Slot:
         self.orders = [
             row for row in read_order_rows(self.config.ledger_dir)
             if str(row.get("run_id") or "").startswith(prefix)
+            and row.get("run_id") not in manual
             and self._written_on_slot_day(row)
         ]
         inputs.rows("ledger/orders.jsonl#slot", self.orders)
 
+        self.execute_ran = self.session == "us" and (
+            bool(self.orders) or any(e.get("stage") == "execute" for e in self.events)
+        )
         macro_dir = Path(self.config.macro_brief_dir)
         self.macro_verdict = _verdict(inputs, macro_dir / f"{self.day}.{self.session}.md")
         self.thresholds = self._thresholds()
@@ -424,11 +438,18 @@ class _Slot:
     def _collect(self) -> None:
         out = self.stages["collect"]
         core, opportunity = self._layers()
+        # Only core is collected without a usable pool; a core ticker is
+        # analysed anyway, so its failure is info (as a core eval fail).
+        core_set = set(core) if self.pool_used is not None else None
         for ticker, outcome in self.collector_rows.items():
             if outcome == "written":
                 out[ticker] = _entry("passed", "written", "brief written")
             elif outcome == "failed":
-                out[ticker] = _entry("excluded", "failed", "collector failed (reason not logged)")
+                is_core = core_set is None or ticker in core_set
+                out[ticker] = _entry(
+                    "info" if is_core else "excluded", "failed",
+                    "collector failed (reason not logged)",
+                )
         for ticker in (*core, *opportunity):
             if ticker not in out and self._brief(ticker).is_file():
                 out[ticker] = _entry(
@@ -563,7 +584,7 @@ class _Slot:
                     arm=records[0].arm,
                 )
             return
-        if not self.orders and not any(e.get("stage") == "execute" for e in self.events):
+        if not self.execute_ran:
             return  # the execute step has not run (pending)
         rows_by_run: dict[str, list[dict]] = {}
         for row in self.orders:
@@ -629,7 +650,7 @@ class _Slot:
                 },
                 "nomination_failed": nomination_failed,
                 "thresholds": self.thresholds,
-                "execute_ran": bool(self.stages["execute"]) and self.session == "us",
+                "execute_ran": self.execute_ran,
                 "events": len(self.events),
                 "inputs": dict(sorted(self.inputs.hashes.items())),
             },
@@ -650,10 +671,15 @@ class _Slot:
     def _ticker(self, ticker: str, layer: str | None) -> dict[str, Any]:
         trail = {stage: self.stages[stage][ticker] for stage in STAGES if ticker in self.stages[stage]}
         reached = [stage for stage in STAGES if stage in trail]
+        # The stop is the first exclusion after the last stage the ticker
+        # passed: an earlier exclusion it went on past (a core collect
+        # failure, a feeds-only HOLD …) did not stop it.
+        passed = [i for i, s in enumerate(reached) if trail[s]["outcome"] == "passed"]
+        after = reached[passed[-1] + 1:] if passed else reached
         stop = next(
             ({"stage": s, "code": trail[s]["code"], "reason": trail[s]["reason"],
               "provenance": trail[s]["provenance"]}
-             for s in reached if trail[s]["outcome"] == "excluded"),
+             for s in after if trail[s]["outcome"] == "excluded"),
             None,
         )
         execute = trail.get("execute")
@@ -664,7 +690,8 @@ class _Slot:
         elif (
             self.session == "us"
             and trail.get("decide", {}).get("outcome") == "passed"
-            and not self.stages["execute"]
+            and "execute" not in trail
+            and not self.execute_ran
         ):
             final = "pending"
         else:

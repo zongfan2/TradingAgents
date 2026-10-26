@@ -724,12 +724,22 @@ def _emit_collect_funnel(
     events: FunnelEvents, summary: CollectSummary, pool_result, *, subset: bool
 ) -> None:
     """Decision-funnel events (spec decision-funnel R1): one per collected
-    ticker, plus the pool tickers collection never reaches on purpose."""
+    ticker, plus the pool tickers collection never reaches on purpose.
+
+    A core ticker is analysed every slot with or without its brief, so its
+    failed collection is ``info`` (as a core eval ``fail`` is); only an
+    opportunity ticker's failure excludes it."""
+    pool = pool_result.pool
+    if pool is None or pool_result.staleness == "absent":
+        core = None  # only core tickers are collected without a usable pool
+    else:
+        core = {entry.ticker for entry in pool.core}
     for outcome in summary.outcomes:
         if outcome.outcome == "failed":
+            is_core = core is None or outcome.ticker in core
             events.emit(
-                "collect", outcome.ticker, "excluded", "failed", outcome.reason or "",
-                attempts=outcome.attempts,
+                "collect", outcome.ticker, "info" if is_core else "excluded", "failed",
+                outcome.reason or "", attempts=outcome.attempts,
             )
         else:
             events.emit(
@@ -738,7 +748,6 @@ def _emit_collect_funnel(
                 outcome.reason or "",
                 sources_count=outcome.sources_count, catalyst_score=outcome.catalyst_score,
             )
-    pool = pool_result.pool
     if subset or pool is None:
         return  # a manual subset says nothing about the layers it skipped
     if pool_result.staleness == "absent":

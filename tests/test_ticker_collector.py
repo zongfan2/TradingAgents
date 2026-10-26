@@ -997,7 +997,8 @@ def test_collect_records_outcomes_and_uncollected_watch(dirs, tmp_path):
     collect_all("us", as_of=AS_OF, runner=fake, funnel=events)
     codes = {e["ticker"]: (e["outcome"], e["code"], e["reason"]) for e in events.emitted}
     assert codes == {
-        "NVDA": ("excluded", "failed", "backend crashed"),
+        # Core is analysed without its brief: a failed collection is info.
+        "NVDA": ("info", "failed", "backend crashed"),
         "AVGO": ("passed", "written", ""),
         "WDC": ("excluded", "not-collected-watch", "watch layer is not collected"),
     }
@@ -1006,6 +1007,20 @@ def test_collect_records_outcomes_and_uncollected_watch(dirs, tmp_path):
     collect_all("us", as_of=AS_OF, runner=FakeBackend({"NVDA": [RuntimeError("x")]}),
                 tickers=["AVGO"], funnel=again)
     assert [(e["ticker"], e["code"]) for e in again.emitted] == [("AVGO", "exists")]
+
+
+@pytest.mark.unit
+def test_collect_failure_excludes_only_opportunity_tickers(dirs, tmp_path):
+    from pipeline.funnel_events import FunnelEvents
+
+    _brief_dir, pool_dir = dirs
+    write_pool(pool_dir)
+    fake = FakeBackend({"NVDA": [RuntimeError("a")], "AVGO": [RuntimeError("b")]})
+    events = FunnelEvents(tmp_path / "state", "us", AS_OF, "ticker_collectors")
+    collect_all("us", as_of=AS_OF, runner=fake, funnel=events)
+    assert {e["ticker"]: e["outcome"] for e in events.emitted} == {
+        "NVDA": "info", "AVGO": "excluded",
+    }
 
 
 @pytest.mark.unit

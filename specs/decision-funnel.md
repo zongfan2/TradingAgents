@@ -72,7 +72,7 @@ studies).
 |---|---|
 | `nominate` (pool_builder) | `nominated`, `wrong-session`, `duplicate`, `nomination-failed` (ticker `null`, `info`) |
 | `pool` (pool_builder) | `core`, `opportunity-enter`, `opportunity-stay`, `watch`, `carried-forward`, `dropped-low-score`, `dropped-gate-fail`, `cap-truncated`, `watch-cap`, `removed-low-score-streak`, `removed-gate-fail-streak`, `now-core`; `details.gate_rule`: `insufficient-bars`, `liquidity`, `bollinger-pass`, `bollinger-weekly-broken`, `bollinger-daily-extended`, `bollinger-both`, `volume-demotion`, `fetch-error`, `gate-error`; `details.thresholds` (entry/exit) |
-| `collect` (ticker_collector) | `written`, `exists`, `failed` (+ reason), `not-collected-watch`, `opportunity-dropped-stale-pool` |
+| `collect` (ticker_collector) | `written`, `exists`, `failed` (+ reason; `info` for core — a core ticker is analysed without its brief — `excluded` for opportunity), `not-collected-watch`, `opportunity-dropped-stale-pool` |
 | `evaluate` (evaluator) | `pass`, `warn`, `fail` (`info` for core — the brief is withheld but the ticker runs; `excluded` for opportunity), `eval-error`, `skipped-below-threshold`, `skipped-absent` |
 | `trigger` (analysis_runner) | `core`, `core-pair`, `catalyst`, `no-score`, `eval-fail`, `below-threshold`, `budget-dropped`, `already-done`, `macro-fail-feeds-only`; manual runs emit nothing |
 | `decide` (analysis_runner) | `BUY`, `SELL`, `HOLD`, `ERROR`; `details`: `arm`, `run_id`, `pair_id`, `pm_rating` (raw five-tier rating, now also in the child's result payload), `plan_valid`, `violations[]`, `error`, `flags`, `execute_eligible` |
@@ -104,7 +104,9 @@ no build timestamp — identical inputs give a byte-identical file):
 - `counts`: tickers with an entry per stage, plus `final` counts.
 - `tickers[]` (sorted): one entry per ticker ever considered (nominees, pool
   layers incl. `removed`, decisions) with `layer`, `furthest_stage`,
-  `final`, `stop` (the first stage whose outcome is `excluded`: stage, code,
+  `final`, `stop` (the first `excluded` stage **after the last stage the
+  ticker passed** — an exclusion it went on past, e.g. a core collect
+  failure recorded before the core rule, is not its stop: stage, code,
   reason, provenance; `null` if none), `provenance` (set over stages) and
   `stages`: per stage `outcome`, `code`, `reason`, `provenance`, `details`
   and the `events` behind it (both decide arms of a pair; every execute row
@@ -137,8 +139,9 @@ no build timestamp — identical inputs give a byte-identical file):
   execute step ran (order rows or execute events exist): non-candidates by
   `non_candidate_reason`, candidates by their order rows (a live
   submission sticks, else the arm's latest deciding row; brief arm first),
-  superseded attempts as `info`. Manual runs are left out (they emit no
-  events either).
+  superseded attempts as `info`. Manual runs are left out — their decision
+  rows, order rows and execute events — so a manual submit on the slot day
+  never marks the scheduled execute step as run (`pending` stays).
 - Built in-process by the orchestrator, recorded as status component
   `funnel`: at the end of every slot (cn and us) and again after the us
   `execute` job. A build failure is a `warn` on `funnel` (its error is
