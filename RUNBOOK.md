@@ -360,6 +360,19 @@ floods slots (the 30-run budget then drops catalyst runs). Entry/exit
 hysteresis (6.0 in / 4.0 out) is deliberately asymmetric — enter fast, exit
 slow; narrow it and the opportunity layer churns.
 
+**Judge threshold changes on the decision funnel** (specs/decision-funnel.md).
+Each slot writes `~/.tradingagents/funnel/<session>/<date>.json`, which records
+where every considered ticker stopped and why: `stop.code` (e.g.
+`below-threshold`, `watch`, `stale-quote`) and per-stage `provenance`
+(`recorded` / `reconstructed` / `unknown`). The orchestrator builds it at slot
+end and again after the us execute job; a build failure is only a `warn` on
+the `funnel` component. To rebuild by hand:
+
+```bash
+.venv/bin/python -m pipeline.funnel build --session us --date 2026-10-26
+.venv/bin/python -m pipeline.funnel backfill --since 2026-10-14   # every slot with inputs
+```
+
 ## 8. Troubleshooting
 
 **Missed slot.** The watchdog notifies once per session/day when a weekday

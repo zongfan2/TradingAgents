@@ -1,7 +1,7 @@
 # Spec: Decision funnel (per-slot exclusion record + webui page)
 
 **Builder**: Claude Code · **Status**: P1 implemented (2026-10-25; user
-signed off the plan), P2/P3 open · Contracts: new `funnel` event (model:
+signed off the plan), P2 implemented (2026-10-27), P3 open · Contracts: new `funnel` event (model:
 `pipeline/contracts/funnel.py`) + snapshot schemas (this spec);
 reads pool, brief/eval, ledger and orders contracts unchanged.
 
@@ -88,25 +88,66 @@ component; failures to write are log-only.
 
 ### R3 — Funnel snapshot (one file per slot)
 
-`python -m pipeline.funnel build --session S --date D` writes
-`~/.tradingagents/funnel/<session>/<date>.json` (atomic, deterministic for
-the same inputs):
+`python -m pipeline.funnel build --session S --date D` (`pipeline/funnel.py`)
+writes `~/.tradingagents/funnel/<session>/<date>.json` (atomic, sorted keys,
+no build timestamp — identical inputs give a byte-identical file):
 
-- `context`: macro verdict, pool `carried_forward`, the thresholds in force
-  (trigger 7.0, entry 6.0, exit 4.0, caps, from `config_snapshots`), input
-  file hashes.
-- `counts`: tickers reaching each stage.
-- `tickers[]`: one entry per ticker ever considered: `furthest_stage`,
-  `final` (`order-live` / `order-dry` / `excluded`), the `code` + `reason` at
-  the stage where it stopped, `provenance` (`recorded` from R1 events,
-  `reconstructed` from pool/brief/ledger/order files, `unknown`), and the full
-  per-stage trail (both arms for paired runs).
-- Built automatically at the end of a cn slot and after the us `execute`
-  (also at the end of the us slot, rebuilt after execute). A build failure is
-  a `warn` on a new status component `funnel`, never a slot failure.
-- `python -m pipeline.funnel backfill --since 2026-10-14` rebuilds past
-  slots from files alone; stages without events read `reconstructed` or
-  `unknown` (e.g. which gate rule fired, why a plan was invalid).
+- `context`: macro verdict (revision-bound, the runner's rule), pool
+  (`as_of_date` of the pool the collectors read, `carried_forward`, read
+  error), `nomination_failed`, `thresholds` (trigger from the slot's
+  `config_snapshots`, entry/exit from pool events, caps from the pool
+  contract; `thresholds.source` says `config-snapshot` / `events` /
+  `default` per value), `execute_ran`, the event count, and `inputs`: a
+  sha256 per file read — for the shared append-only files
+  (`decisions.jsonl`, `orders.jsonl`, `collector.log`) only the slot's rows
+  are hashed, so later days' appends never change an old snapshot.
+- `counts`: tickers with an entry per stage, plus `final` counts.
+- `tickers[]` (sorted): one entry per ticker ever considered (nominees, pool
+  layers incl. `removed`, decisions) with `layer`, `furthest_stage`,
+  `final`, `stop` (the first stage whose outcome is `excluded`: stage, code,
+  reason, provenance; `null` if none), `provenance` (set over stages) and
+  `stages`: per stage `outcome`, `code`, `reason`, `provenance`, `details`
+  and the `events` behind it (both decide arms of a pair; every execute row
+  and the superseded attempts).
+- `final`: `order-live` / `order-dry` (execute `passed`), `excluded` (a
+  stop), `pending` (us, decide passed, execute not run yet), `unknown`
+  (no stop, no order — e.g. a core ticker without a decision row).
+- Per (stage, ticker) a **recorded** R1 result (reduced by
+  `current_outcomes`) wins; otherwise the stage is **reconstructed** from
+  files by a rule the component applies deterministically, or **unknown**
+  with `code: null` — a code is never invented. Reconstruction rules:
+  nominate — nomination cache (wrong session by `session_for_ticker`, a
+  duplicate keeps its first nomination); pool — layers of the same-day pool
+  file (`opportunity-enter` when `entered_on` is the slot date, else
+  `-stay`; `carried-forward` on a carried pool), `removed[].reason` prefixes
+  (`score<` / `technical gate fail for` / `opportunity cap`), a nominee
+  missing from the pool is `unknown` (low score, gate fail and watch cap
+  are indistinguishable without the gate); collect — the slot's
+  `collector.log` rows (`written` / `failed`), watch is
+  `not-collected-watch`, a brief without a log row is `unknown`; evaluate —
+  the revision-bound eval verdict, `skipped-absent` without a same-day
+  brief, `skipped-below-threshold` for an opportunity brief under the
+  trigger; trigger — the decision rows (`core`, `core-pair`, `catalyst`,
+  `macro-fail-feeds-only` from the row's own macro verdict) or, for an
+  untriggered opportunity ticker, `no-score` / `eval-fail` /
+  `below-threshold` from its same-day brief (otherwise `unknown`: budget
+  guard or run failure); decide — latest attempt per (ticker, arm), the
+  strongest arm decides, violations/PM rating/error text are not in the
+  ledger; execute — cn rows are `non-us-session`; us only once the
+  execute step ran (order rows or execute events exist): non-candidates by
+  `non_candidate_reason`, candidates by their order rows (a live
+  submission sticks, else the arm's latest deciding row; brief arm first),
+  superseded attempts as `info`. Manual runs are left out (they emit no
+  events either).
+- Built in-process by the orchestrator, recorded as status component
+  `funnel`: at the end of every slot (cn and us) and again after the us
+  `execute` job. A build failure is a `warn` on `funnel` (its error is
+  appended to the execute notification) — never a slot or execute failure;
+  the module is imported lazily so even an import error cannot stop a slot.
+- `python -m pipeline.funnel backfill --since 2026-10-14 [--until D]
+  [--session S]` rebuilds every slot with inputs (a same-day pool file, an
+  event log or a decision row); one slot's failure is reported and the
+  rest still build.
 
 ### R4 — Webui page 6 "决策漏斗"
 
