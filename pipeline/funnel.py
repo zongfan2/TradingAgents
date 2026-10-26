@@ -54,6 +54,8 @@ from pipeline.execution_adapter import (
     read_order_rows,
 )
 from pipeline.funnel_events import (
+    EVENTS_SUFFIX,
+    FUNNEL_DIRNAME,
     current_outcomes,
     events_path,
     funnel_dir,
@@ -215,7 +217,8 @@ class _Slot:
 
     def load(self) -> None:
         inputs = self.inputs
-        text = inputs.text(events_path(self.config.state_dir, self.session, self.day))
+        # Hashed below by the kept lines only (later-day appends drop out).
+        text = inputs.text(events_path(self.config.state_dir, self.session, self.day), hashed=False)
         self.events: list[dict] = []
         for line in (text or "").splitlines():
             try:
@@ -281,12 +284,8 @@ class _Slot:
         # their order rows and their execute events.
         manual = {r.run_id for r in slot_records if r.trigger == "manual"}
         all_records = [r for r in slot_records if r.trigger != "manual"]
-        # ... but they share its attempt counter: the adapter's latest-attempt
-        # rule runs over every row, so a later manual attempt shadows the
-        # slot's own decision for that (ticker, arm) — the adapter then
-        # supersedes the slot's row and skips the manual one.
         scheduled = {(r.ticker, r.arm) for r in all_records}
-        self.shadowed: dict[tuple[str, str], DecisionRecord] = {
+        manual_latest = {
             (r.ticker, r.arm): r for r in _latest_attempts(slot_records)
             if r.trigger == "manual" and (r.ticker, r.arm) in scheduled
         }
@@ -295,6 +294,9 @@ class _Slot:
             if not (e.get("stage") == "execute"
                     and (e.get("details") or {}).get("run_id") in manual)
         ]
+        inputs.rows(
+            f"{FUNNEL_DIRNAME}/{self.session}/{self.day}{EVENTS_SUFFIX}#slot", self.events
+        )
         inputs.rows(
             "ledger/decisions.jsonl#slot",
             [r.model_dump(mode="json", by_alias=True) for r in all_records],
@@ -313,19 +315,46 @@ class _Slot:
         ]
         inputs.rows("ledger/orders.jsonl#slot", self.orders)
 
-        self.execute_ran = self.session == "us" and (
-            bool(self.orders) or any(e.get("stage") == "execute" for e in self.events)
-        )
+        execute_events = [e for e in self.events if e.get("stage") == "execute"]
+        self.execute_ran = self.session == "us" and bool(self.orders or execute_events)
+        self.shadowed = self._shadowed(manual_latest, execute_events)
         macro_dir = Path(self.config.macro_brief_dir)
         self.macro_verdict = _verdict(inputs, macro_dir / f"{self.day}.{self.session}.md")
         self.thresholds = self._thresholds()
 
+    def _shadowed(
+        self, manual_latest: dict[tuple[str, str], DecisionRecord], execute_events: list[dict]
+    ) -> dict[tuple[str, str], DecisionRecord]:
+        """(ticker, arm) whose slot decision a manual attempt shadowed.
+
+        Manual runs share the slot's attempt counter and the adapter's
+        latest-attempt rule runs over every row, so a manual attempt that
+        EXISTED when an execute run ran made that run supersede the slot's
+        row and skip the manual one. A manual rerun after execution shadows
+        nothing, and a live order the slot's row placed always stands."""
+        activity = [
+            t for t in (_instant(x.get("written_at")) for x in (*self.orders, *execute_events))
+            if t is not None
+        ]
+        live_runs = {
+            row.get("run_id") for row in self.orders
+            if row.get("kind") == "submitted" and not row.get("dry_run")
+            and row.get("broker_status") != "rejected"
+        } | {
+            (e.get("details") or {}).get("run_id") for e in execute_events
+            if e.get("code") == "submitted" and not (e.get("details") or {}).get("dry_run")
+        }
+        scheduled = {(r.ticker, r.arm): r for r in self.records}
+        return {
+            key: manual for key, manual in manual_latest.items()
+            if key in scheduled
+            and scheduled[key].run_id not in live_runs
+            and any(t > manual.decided_at for t in activity)
+        }
+
     def _written_on_slot_day(self, row: dict) -> bool:
-        try:
-            written = datetime.fromisoformat(str(row.get("written_at")).replace("Z", "+00:00"))
-            return session_date(self.session, written) == self.slot_date
-        except (TypeError, ValueError):
-            return False
+        written = _instant(row.get("written_at"))
+        return written is not None and session_date(self.session, written) == self.slot_date
 
     def _thresholds(self) -> dict[str, Any]:
         thresholds: dict[str, Any] = {
@@ -731,6 +760,14 @@ class _Slot:
             "provenance": provenance,
             "stages": trail,
         }
+
+
+def _instant(value: object) -> datetime | None:
+    try:
+        moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return moment if moment.tzinfo is not None else None
 
 
 def _compact(entry: Entry) -> dict[str, Any]:

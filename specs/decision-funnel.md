@@ -99,8 +99,8 @@ no build timestamp — identical inputs give a byte-identical file):
   contract; `thresholds.source` says `config-snapshot` / `events` /
   `default` per value), `execute_ran`, the event count, and `inputs`: a
   sha256 per file read — for the shared append-only files
-  (`decisions.jsonl`, `orders.jsonl`, `collector.log`) only the slot's rows
-  are hashed, so later days' appends never change an old snapshot.
+  (`decisions.jsonl`, `orders.jsonl`, `collector.log`) and the slot's own
+  event log only the slot's kept rows/events are hashed, so later days' appends never change an old snapshot.
 - `counts`: tickers with an entry per stage, plus `final` counts.
 - `tickers[]` (sorted): one entry per ticker ever considered (nominees, pool
   layers incl. `removed`, decisions) with `layer`, `furthest_stage`,
@@ -143,9 +143,13 @@ no build timestamp — identical inputs give a byte-identical file):
   rows, order rows and execute events — so a manual submit on the slot day
   never marks the scheduled execute step as run (`pending` stays). They do
   share the attempt counter, though: when a manual attempt is the latest
-  for a (ticker, arm) the adapter supersedes the slot's row and skips the
-  manual one, so that arm's execute stage is `manual-shadowed` (`excluded`,
-  `details.manual_run_id`), overriding the recorded `superseded`. Execute
+  for a (ticker, arm) **and was decided before an execute run** (some slot
+  order row or execute event is later than its `decided_at`), that run
+  superseded the slot's row and skipped the manual one, so the arm's
+  execute stage is `manual-shadowed` (`excluded`,
+  `details.manual_run_id`), overriding the recorded `superseded`. A manual
+  rerun after execution shadows nothing, and a live order the slot's row
+  placed (order row or recorded event) always stands. Execute
   events, like order rows, count only when written on the slot day
   (session-local): a later-day re-execution under the slot's run_id never
   changes the old snapshot.

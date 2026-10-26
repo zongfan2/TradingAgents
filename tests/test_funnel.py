@@ -422,8 +422,28 @@ def test_later_day_execute_events_do_not_change_an_old_snapshot(tmp_path):
     snap = funnel.build_snapshot(config, "us", DAY)
     assert ticker_map(snap)["AAA"]["final"] == "pending"
     assert snap["context"]["events"] == 0
-    # The events file itself is an input, so only its hash may differ.
-    rebuilt = json.loads(funnel.render_snapshot(snap))
-    original = json.loads(first)
-    rebuilt["context"]["inputs"].pop(f"funnel/us/{D}.events.jsonl", None)
-    assert rebuilt == original
+    # Byte-identical: the events file is hashed by its kept lines only.
+    assert funnel.write_snapshot(config, "us", DAY).read_bytes() == first
+
+
+@pytest.mark.unit
+def test_manual_rerun_after_execution_never_hides_the_live_order(tmp_path):
+    """Review a22eb2f finding 1: a manual attempt written after the execute
+    run shadowed nothing — the slot row's live order stands."""
+    config = make_config(tmp_path)
+    seed_slot(config)  # AAA brief-1 submitted live at 13:45Z
+    events = FunnelEvents(config.state_dir, "us", DAY, "execution_adapter", clock=on_slot_day)
+    events.emit("execute", "AAA", "passed", "submitted", "submitted (live)",
+                run_id=f"{D}-us-AAA-brief-1", arm="brief", dry_run=False)
+    row = write_decision(config, ticker="AAA", n=2, trigger="manual", date_iso=D, plan=BUY_PLAN)
+    path = config.ledger_dir / "decisions.jsonl"
+    lines = path.read_text().splitlines()
+    lines[-1] = json.dumps({**row, "decided_at": f"{D}T15:00:00Z"})  # after execute
+    path.write_text("\n".join(lines) + "\n")
+    snap = funnel.build_snapshot(config, "us", DAY)
+    assert stage(snap, "AAA", "execute") == ("passed", "submitted", "recorded")
+    assert ticker_map(snap)["AAA"]["final"] == "order-live"
+    # Even a manual attempt decided BEFORE execute never hides a live order.
+    lines[-1] = json.dumps({**row, "decided_at": f"{D}T12:00:00Z"})
+    path.write_text("\n".join(lines) + "\n")
+    assert ticker_map(funnel.build_snapshot(config, "us", DAY))["AAA"]["final"] == "order-live"
