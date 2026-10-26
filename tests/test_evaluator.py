@@ -1231,3 +1231,30 @@ def test_batch_backend_failure_is_an_eval_error_event(batch_dirs, tmp_path, caps
     )
     (event,) = events.emitted
     assert (event["code"], event["reason"]) == ("eval-error", "evaluation backend failed")
+
+
+@pytest.mark.unit
+def test_core_re_evaluation_fail_replaces_an_earlier_pass(batch_dirs, tmp_path, capsys):
+    """Review b9762bc: a core fail is ``info`` (the ticker still runs) but it
+    withholds the brief, so it must replace the earlier run's pass."""
+    from pipeline.funnel_events import FunnelEvents, current_outcomes, read_events
+
+    pool_dir, brief_dir = batch_dirs
+    day = "2026-08-03"
+    state = tmp_path / "state"
+    _write_pool(pool_dir, "us", day, core=("AMD",))
+    write_brief(brief_dir / "AMD", f"{day}.md", ticker_text(ticker="AMD", catalyst_score=8.0))
+    batch_tickers(
+        "us", date_str=day, runner=FakeRunner(judgment()),
+        funnel=FunnelEvents(state, "us", day, "ticker_evaluators"),
+    )
+    # Re-collected brief (new sha) ⇒ evaluated again, now failing.
+    write_brief(brief_dir / "AMD", f"{day}.md", ticker_text(ticker="AMD", catalyst_score=7.9))
+    failing = judgment(scores=dict.fromkeys(SCORE_DIMENSIONS, 1.0))
+    batch_tickers(
+        "us", date_str=day, runner=FakeRunner(failing),
+        funnel=FunnelEvents(state, "us", day, "ticker_evaluators"),
+    )
+    outcome = current_outcomes(read_events(state, "us", day))[("evaluate", "AMD")]
+    assert (outcome["outcome"], outcome["code"]) == ("info", "fail")
+    assert [e["code"] for e in outcome["notes"]] == ["pass"]

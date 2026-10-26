@@ -17,7 +17,10 @@ arms of a pair, a SELL's cancels next to its close, or a feeds-arm
 non-candidate next to the brief arm's order all keep the right result. A
 run with only ``info`` events (``already-done``, ``superseded``, the
 adapter's rerun ``dedupe``) never replaces a decision; other runs' events
-are kept as notes. The ``execute`` stage is the exception: a LIVE order a
+are kept as notes. An eval verdict (``pass``/``warn``/``fail``/
+``eval-error``) decides the ``evaluate`` stage even as ``info`` — a core
+ticker's ``fail`` withholds the brief, so a re-evaluation must replace an
+earlier ``pass``. The ``execute`` stage is the exception: a LIVE order a
 run placed stays at the broker, so the latest run with a live
 ``submitted`` decides there whatever later runs emit; dry-run submissions
 place nothing and follow the general rule.
@@ -166,6 +169,17 @@ def read_events(state_dir: str | Path, session: str, slot_date: date | str) -> l
 _STRENGTH = {"info": 0, "excluded": 1, "passed": 2}
 
 
+#: Eval verdicts decide the evaluate stage even as ``info`` (a core
+#: ticker's ``fail`` withholds the brief but the ticker still runs).
+_EVAL_VERDICTS = frozenset({"pass", "warn", "fail", "eval-error"})
+
+
+def _decides(event: dict) -> bool:
+    if event.get("outcome") in ("passed", "excluded"):
+        return True
+    return event.get("stage") == "evaluate" and event.get("code") in _EVAL_VERDICTS
+
+
 def _is_live_submission(event: dict) -> bool:
     details = event.get("details") or {}
     return (
@@ -188,7 +202,7 @@ def current_outcomes(events: list[dict]) -> dict[tuple[str, str | None], dict]:
         grouped.setdefault((event.get("stage"), event.get("ticker")), []).append(event)
     result: dict[tuple[str, str | None], dict] = {}
     for key, group in grouped.items():
-        deciding = [e.get("run") for e in group if e.get("outcome") in ("passed", "excluded")]
+        deciding = [e.get("run") for e in group if _decides(e)]
         run = deciding[-1] if deciding else group[-1].get("run")
         if key[0] == "execute":
             # A LIVE order stays at the broker whatever a later run emits, so

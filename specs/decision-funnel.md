@@ -51,7 +51,9 @@ studies).
   pair, carrying `details.arm`; a SELL's `cancel`s beside its close; a
   feeds-arm non-candidate beside the brief arm's order). A run with only
   `info` events (`already-done`, `superseded`, the adapter's rerun
-  `dedupe`) never replaces a decision;
+  `dedupe`) never replaces a decision — except that an eval verdict
+  (`pass`/`warn`/`fail`/`eval-error`) always decides `evaluate`, even as a
+  core ticker's `info` (a `fail` withholds the brief);
   other runs' events are kept as notes. So a rerun supersedes only what it
   re-decided. Exception, `execute`: a **live** order an earlier run placed
   stays at the broker whatever a rerun emits (its feeds-arm non-candidate,
