@@ -1435,11 +1435,17 @@ def _emit_pool_funnel(
             "pool", entry.ticker, "passed", "core", "core watchlist (always analysed)",
             score=entry.score, **gate_details(entry.ticker),
         )
+    # The score in force: a member absent from today's nomination keeps its
+    # carried score (the same value the pool file and reason text use).
+    in_force = {entry.ticker: entry.score for entry in lifecycle.opportunity}
+    in_force.update({entry.ticker: entry.last_score for entry in lifecycle.removed})
     for ticker, (outcome, code, reason) in lifecycle.funnel.items():
         nomination = nominated.get(ticker)
         events.emit(
             "pool", ticker, outcome, code, reason,
-            score=nomination.score if nomination is not None else None,
+            score=in_force.get(
+                ticker, nomination.score if nomination is not None else None
+            ),
             thresholds=thresholds,
             **gate_details(ticker),
         )

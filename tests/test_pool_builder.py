@@ -1769,7 +1769,11 @@ def test_build_pool_records_every_nominee_and_layer_decision(pool_dir, tmp_path)
     write_prior_pool(
         pool_dir,
         FRIDAY.isoformat(),
-        opportunity=[prior_opportunity("OLD", score=3.0, low=2), prior_opportunity("KEEP")],
+        opportunity=[
+            prior_opportunity("OLD", score=3.0, low=2),
+            prior_opportunity("KEEP"),
+            prior_opportunity("QUIET", score=6.5),  # not re-nominated, streak 0 ⇒ stays
+        ],
     )
     runner = FakeRunner(
         [
@@ -1803,6 +1807,7 @@ def test_build_pool_records_every_nominee_and_layer_decision(pool_dir, tmp_path)
         "NVDA": ("passed", "core"),
         "AVGO": ("passed", "opportunity-enter"),
         "KEEP": ("passed", "opportunity-stay"),
+        "QUIET": ("passed", "opportunity-stay"),
         "OLD": ("excluded", "removed-low-score-streak"),
         "MRVL": ("excluded", "watch"),
         "LOWW": ("excluded", "dropped-low-score"),
@@ -1814,6 +1819,10 @@ def test_build_pool_records_every_nominee_and_layer_decision(pool_dir, tmp_path)
     assert by_ticker["AVGO"]["details"]["gate_rule"] == "bollinger-pass"
     assert by_ticker["MRVL"]["reason"] == "score 5 in [exit 4, entry 6)"
     assert by_ticker["LOWW"]["details"]["thresholds"] == {"entry": 6.0, "exit": 4.0}
+    # Review cb2e8d9: carried scores, not null, for members absent from today.
+    assert by_ticker["QUIET"]["details"]["score"] == 6.5
+    assert by_ticker["OLD"]["details"]["score"] == 3.0
+    assert by_ticker["KEEP"]["details"]["score"] == 7.0  # today's nomination
 
 
 @pytest.mark.unit
