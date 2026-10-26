@@ -80,6 +80,7 @@ from pipeline.common import (
 )
 from pipeline.config import PipelineConfig, load_config
 from pipeline.contracts.ledger import (
+    NEXT_SESSION_MAX_DAYS,
     DecisionRecord,
     OpenOrderLeg,
     OrderRecord,
@@ -708,16 +709,11 @@ def trading_days_since(broker: AlpacaBroker, start: date, end: date) -> int:
     return len(broker.get_trading_days(start + timedelta(days=1), end))
 
 
-#: Longest US market closure plus weekends stays well inside this window
-#: (9/11: last session 2001-09-10, next 2001-09-17).
-_NEXT_SESSION_LOOKAHEAD_DAYS = 14
-
-
 def next_session_after(broker: AlpacaBroker, day: date) -> date | None:
     """First broker-calendar session strictly after ``day``; None when the
     lookahead window holds none."""
     sessions = broker.get_trading_days(
-        day + timedelta(days=1), day + timedelta(days=_NEXT_SESSION_LOOKAHEAD_DAYS)
+        day + timedelta(days=1), day + timedelta(days=NEXT_SESSION_MAX_DAYS)
     )
     return sessions[0] if sessions else None
 

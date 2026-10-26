@@ -169,7 +169,9 @@ means the runner injects "position data unavailable" instead of stale
 numbers.
 
 `next_session` (optional, nullable) is the first US trading session strictly
-after `as_of`'s UTC date, from the broker calendar at write time. The runner
+after `as_of`'s UTC date, from the broker calendar at write time; it must
+lie within 14 days after that date (the model rejects anything else — the
+longest US closure plus weekends, 9/11, spanned 7). The runner
 cannot query the broker (Rule 2), so this field is how it counts trading
 days: the snapshot is stale iff `next_session` is earlier than the slot
 date. Null or absent (calendar unavailable, or a pre-field snapshot) ⇒ the

@@ -1381,6 +1381,19 @@ def test_position_snapshot_staleness_uses_next_session_across_holidays():
 
 
 @pytest.mark.unit
+def test_load_positions_rejects_out_of_window_next_session(tmp_path):
+    """A far-future next_session would keep stale numbers looking fresh —
+    the snapshot is dropped instead (no position numbers reach the trader)."""
+    (tmp_path / "positions.json").write_text(
+        json.dumps(
+            {"as_of": "2026-11-25T20:00:00Z", "next_session": "2027-01-04", "equity": 1.0}
+        ),
+        encoding="utf-8",
+    )
+    assert ar.load_positions(tmp_path) is None
+
+
+@pytest.mark.unit
 def test_position_context_honors_snapshot_next_session():
     snapshot = PositionsSnapshot(
         as_of=datetime(2026, 11, 25, 20, 0, tzinfo=timezone.utc),
