@@ -151,6 +151,7 @@ resolves to the full configuration that produced the run.
 ```json
 {
   "as_of": "2026-08-04T12:20:00Z",
+  "next_session": "2026-08-05",
   "equity": 99985.65,
   "positions": [
     {"ticker": "NVDA", "qty": 12, "avg_entry": 283.6, "last_fill_at": "2026-08-03T14:32:00Z",
@@ -166,6 +167,14 @@ snapshot into the trader prompt. The adapter itself never reads it (it checks
 live broker state at submit time), and an `as_of` older than 1 trading day
 means the runner injects "position data unavailable" instead of stale
 numbers.
+
+`next_session` (optional, nullable) is the first US trading session strictly
+after `as_of`'s UTC date, from the broker calendar at write time. The runner
+cannot query the broker (Rule 2), so this field is how it counts trading
+days: the snapshot is stale iff `next_session` is earlier than the slot
+date. Null or absent (calendar unavailable, or a pre-field snapshot) ⇒ the
+runner falls back to counting weekdays, which can only over-report
+staleness around a holiday, never under-report it.
 
 ## outcomes.jsonl record (settle step only)
 

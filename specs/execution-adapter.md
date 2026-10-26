@@ -81,7 +81,9 @@ included — constructs a broker client.
     the new `entry_zone[0]` is above the ticker's last fill price
     (pyramid into strength — `pyramid_up_only`, default true; averaging down
     stays excluded); ≥ `add_spacing_days` (default 3) trading days since the
-    last fill; position market value + new order notional ≤
+    last fill, counted as broker-calendar sessions after the fill date up to
+    and including the slot date (calendar unavailable ⇒ skip `add-spacing`,
+    fail-closed); position market value + new order notional ≤
     `per_ticker_notional_cap` (default 20% of equity). Each violated
     condition skips with its specific reason. Every tranche is its own GTC
     bracket; a SELL close cancels all open orders for the ticker and closes
@@ -99,7 +101,9 @@ included — constructs a broker client.
   multi-day horizon — a DAY bracket would silently drop the stop at the close
   of entry day.
   - Entry-order lifecycle: `refresh` cancels any **unfilled** entry order older
-    than 1 trading day (the next slot's plan decides re-entry). Filled
+    than 1 trading day (the next slot's plan decides re-entry), counted in
+    broker-calendar sessions; if the calendar is unavailable the count falls
+    back to weekdays, which errs toward canceling earlier, never later. Filled
     positions keep their GTC stop/TP legs until a leg fills or a SELL close
     cancels them.
 - `qty = floor((equity × sizing.risk_pct/100) / (entry_zone[1] − stop))`,
@@ -120,7 +124,10 @@ included — constructs a broker client.
   the slot's `decisions.jsonl` rows itself (no in-process handoff), applies
   S1–S9 in order, and appends one `orders.jsonl` row per attempt/outcome —
   `intent` before each live submit, then `submitted`, or `skip` with a reason.
-- **R2**: broker interaction via `alpaca-py` pinned in requirements.
+- **R2**: broker interaction via `alpaca-py` pinned in requirements. The
+  broker seam exposes the calendar as both today's session (S8) and the
+  session dates in an inclusive date range (S9 spacing, stale-entry age,
+  `positions.json` `next_session`).
 - **R3**: `refresh` appends `refresh` rows with current broker status/fills
   for every non-terminal order (partial fills record `filled_qty` — protective
   legs follow the broker's own bracket qty adjustment; a `rejected`/`canceled`

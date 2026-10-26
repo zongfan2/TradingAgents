@@ -389,5 +389,8 @@ class PositionEntry(ContractModel):
 
 class PositionsSnapshot(ContractModel):
     as_of: UtcInstant
+    #: First US session strictly after ``as_of``'s UTC date (broker calendar);
+    #: None ⇒ unknown, the runner falls back to weekday counting.
+    next_session: date | None = None
     equity: float
     positions: list[PositionEntry] = Field(default_factory=list)
