@@ -771,7 +771,8 @@ def test_only_runs_a_single_component(tmp_path):
     runner = FakeRunner()
     assert run_slot(config, "us", runner, only="pool_builder") == 0
     status = read_status(config, "us")
-    assert list(status["components"]) == ["pool_builder"]
+    # The funnel snapshot (in-process, not a runner call) is rebuilt after any run.
+    assert list(status["components"]) == ["pool_builder", "funnel"]
     assert [name for name, _, _ in runner.calls] == ["pool_builder"]
 
 
@@ -782,7 +783,7 @@ def test_from_step_runs_only_later_steps(tmp_path):
     assert run_slot(config, "us", runner, from_step=4) == 0
     status = read_status(config, "us")
     assert sorted(status["components"]) == sorted(
-        ["ticker_collectors", "ticker_evaluators", "analysis_runner", "execution_adapter"]
+        ["ticker_collectors", "ticker_evaluators", "analysis_runner", "execution_adapter", "funnel"]
     )
     assert "macro_collector" not in status["components"]
 
@@ -2055,3 +2056,37 @@ def test_archive_keeps_only_the_tail_and_never_fails_the_slot(tmp_path):
         return {n: c["status"] for n, c in read_status(config, "us")["components"].items()}
 
     assert statuses(plain) == statuses(blocked)
+
+
+# ---------------------------------------------------------------------------
+# Decision funnel snapshot (specs/decision-funnel.md R3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_slot_end_builds_the_funnel_snapshot(tmp_path):
+    config = make_config(tmp_path)
+    assert run_slot(config, "cn", FakeRunner()) == 0
+    funnel = read_status(config, "cn")["components"]["funnel"]
+    assert (funnel["status"], funnel["error"]) == ("ok", None)
+    snapshot = config.state_dir / "funnel" / "cn" / f"{SLOT_DATE.isoformat()}.json"
+    assert json.loads(snapshot.read_text(encoding="utf-8"))["session"] == "cn"
+
+
+@pytest.mark.unit
+def test_funnel_failure_is_a_warn_never_a_slot_failure(tmp_path, monkeypatch):
+    from pipeline import funnel
+
+    def boom(*_args):
+        raise RuntimeError("disk\nfull")
+
+    monkeypatch.setattr(funnel, "write_snapshot", boom)
+    config = make_config(tmp_path)
+    notifier, sent = recording_notifier()
+    assert run_slot(config, "cn", FakeRunner(), notifier=notifier) == 0
+    record = read_status(config, "cn")["components"]["funnel"]
+    assert (record["status"], record["error"]) == ("warn", "funnel snapshot failed: disk full")
+    summary = " ".join(sent[-1])
+    assert "failures" not in summary
+    log = orchestrator.orchestrator_log_path(config).read_text(encoding="utf-8")
+    assert "| funnel | warn |" in log

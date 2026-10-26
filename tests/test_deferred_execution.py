@@ -771,3 +771,26 @@ def test_order_lines_render_live_cancel_and_cap():
         orchestrator.RunResult(0, stdout=execution_summary() + "\n")
     ) is None
     assert orchestrator._execution_order_lines(orchestrator.RunResult(0, stdout="x\n")) is None
+
+
+@pytest.mark.unit
+def test_execute_rebuilds_the_funnel_and_a_failure_only_annotates(tmp_path, monkeypatch):
+    from pipeline import funnel
+
+    config = deferred_config(tmp_path)
+    finished_slot(config)
+    built = []
+    monkeypatch.setattr(funnel, "write_snapshot", lambda cfg, session, day: built.append(session))
+    notifier, sent = recording_notifier()
+    assert make_orch(config, FakeRunner(), notifier).run_execution() == 0
+    assert built == ["us"]
+    assert read_status(config, "us")["components"]["funnel"]["status"] == "ok"
+
+    def boom(*_args):
+        raise RuntimeError("bad pool")
+
+    monkeypatch.setattr(funnel, "write_snapshot", boom)
+    notifier, sent = recording_notifier()
+    assert make_orch(config, FakeRunner(), notifier).run_execution() == 0
+    assert read_status(config, "us")["components"]["funnel"]["status"] == "warn"
+    assert "funnel snapshot failed: bad pool" in joined(sent)[-1]

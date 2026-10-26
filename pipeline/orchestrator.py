@@ -1079,9 +1079,41 @@ class Orchestrator:
         except Exception as exc:  # logging can never fail a slot or kill a thread
             logger.warning("component log write failed for %s: %s", name, exc)
 
+    # -- decision funnel (specs/decision-funnel.md R3) ------------------------
+
+    def _build_funnel(self) -> None:
+        """(Re)build the slot's funnel snapshot, recorded as component
+        ``funnel``. A failure is a ``warn`` — never a slot or execute failure.
+        Imported lazily, so even a broken funnel module cannot stop a slot."""
+        started = self.clock()
+        try:
+            from pipeline.funnel import write_snapshot
+
+            write_snapshot(self.config, self.session, self.slot_date)
+            status, error = "ok", None
+        except Exception as exc:
+            reason = " ".join(str(exc).split())[:300] or type(exc).__name__
+            logger.warning("funnel snapshot failed: %s", reason)
+            status, error = "warn", f"funnel snapshot failed: {reason}"
+        finished = self.clock()
+        duration = round((finished - started).total_seconds(), 1)
+        with contextlib.suppress(Exception):
+            self.status.update_component(
+                "funnel",
+                {
+                    "status": status,
+                    "started_at": to_utc_iso(started),
+                    "finished_at": to_utc_iso(finished),
+                    "duration_s": duration,
+                    "error": error,
+                },
+            )
+        self._log_component("funnel", status, duration, error)
+
     # -- end of slot --------------------------------------------------------
 
     def _finalize(self) -> int:
+        self._build_funnel()
         components = self.status.components_snapshot()
         counts: dict[str, int] = {}
         for record in components.values():
@@ -1158,6 +1190,7 @@ class Orchestrator:
                 return 1
             self._run_component(refresh)
             self._run_component(component)
+            self._build_funnel()  # rebuilt with the orders (us slot end built it first)
             snapshot = self.status.components_snapshot()
             refresh_record = snapshot.get(refresh.name, {})
             refresh_status = refresh_record.get("status", "failed")
@@ -1183,6 +1216,9 @@ class Orchestrator:
                 )
             if record.get("error"):
                 message += f"; {record['error']}"
+            funnel_error = snapshot.get("funnel", {}).get("error")
+            if funnel_error:
+                message += f"; {funnel_error}"
             # Re-finish before the (up to 15 s) notifier subprocess: the
             # status file must not depend on surviving it.
             self.status.finish_slot(to_utc_iso(self.clock()))
