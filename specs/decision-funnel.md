@@ -100,10 +100,13 @@ no build timestamp — identical inputs give a byte-identical file):
   `default` per value), `execute_ran`, the event count, and `inputs`: a
   sha256 per file read — for the shared append-only files
   (`decisions.jsonl`, `orders.jsonl`, `collector.log`) and the slot's own
-  event log only the slot's kept rows/events are hashed, so later days' appends never change an old snapshot.
+  event log only the slot's kept rows/events are hashed (manual decision
+  rows, which can shadow the slot's decision, under `#manual`), so later days' appends never change an old snapshot.
 - `counts`: tickers with an entry per stage, plus `final` counts.
 - `tickers[]` (sorted): one entry per ticker ever considered (nominees, pool
-  layers incl. `removed`, decisions) with `layer`, `furthest_stage`,
+  layers incl. `removed`, decisions) with `layer` (from the pool the
+  components served — the same-day one or a warn-stale one — else the core
+  yaml fallback), `furthest_stage`,
   `final`, `stop` (the first `excluded` stage **after the last stage the
   ticker passed** — an exclusion it went on past, e.g. a core collect
   failure recorded before the core rule, is not its stop: stage, code,
@@ -112,7 +115,9 @@ no build timestamp — identical inputs give a byte-identical file):
   and the `events` behind it (both decide arms of a pair; every execute row
   and the superseded attempts).
 - `final`: `order-live` / `order-dry` (execute `passed`), `excluded` (a
-  stop), `pending` (us, decide passed, execute not run yet), `unknown`
+  stop), `pending` (us, execute not run yet, and some arm is an execution
+  candidate — a ticker with none, e.g. brief HOLD + feeds BUY, is excluded
+  at execute by `non_candidate_reason` already), `unknown`
   (no stop, no order — e.g. a core ticker without a decision row).
 - Per (stage, ticker) a **recorded** R1 result (reduced by
   `current_outcomes`) wins; otherwise the stage is **reconstructed** from

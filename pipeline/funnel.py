@@ -311,6 +311,13 @@ class _Slot:
             "ledger/decisions.jsonl#slot",
             [r.model_dump(mode="json", by_alias=True) for r in all_records],
         )
+        # Manual rows can shadow the slot's decision (manual-shadowed), so
+        # they are an input too — under their own label.
+        inputs.rows(
+            "ledger/decisions.jsonl#manual",
+            [r.model_dump(mode="json", by_alias=True)
+             for r in slot_records if r.trigger == "manual"],
+        )
         self.records: list[DecisionRecord] = _latest_attempts(all_records)
         current = {id(r) for r in self.records}
         self.superseded = [r for r in all_records if id(r) not in current]
@@ -528,8 +535,10 @@ class _Slot:
                         f"pool {self.pool_gap_days} day(s) old — opportunity layer dropped",
                         gap_days=self.pool_gap_days,
                     ))
-        if self.pool is not None and self.pool_used is self.pool:
-            for entry in self.pool.watch:
+        if self.pool_used is not None:
+            # The collectors skip the watch layer of whatever pool they
+            # served (a same-day or a warn-stale one) and say so.
+            for entry in self.pool_used.watch:
                 out.setdefault(
                     entry.ticker,
                     _entry("excluded", "not-collected-watch", "watch layer is not collected"),
@@ -658,7 +667,21 @@ class _Slot:
                 )
             return
         if not self.execute_ran:
-            return  # the execute step has not run (pending)
+            # Not run yet: a ticker with no candidate arm (HOLD brief + BUY
+            # feeds, …) is already excluded by the adapter's pure shape
+            # filter; only one with a candidate arm is pending.
+            for ticker, records in self._by_ticker().items():
+                reasons = [non_candidate_reason(record) for record in records]
+                if all(reasons):
+                    entries = [
+                        _entry("excluded", reason, f"not an execution candidate: {reason}",
+                               arm=record.arm, run_id=record.run_id, decision=record.decision)
+                        for record, reason in zip(records, reasons, strict=True)
+                    ]
+                    best = dict(_strongest(entries))
+                    best["events"] = [_compact(entry) for entry in entries]
+                    out[ticker] = best
+            return
         rows_by_run: dict[str, list[dict]] = {}
         for row in self.orders:
             rows_by_run.setdefault(str(row.get("run_id")), []).append(row)
@@ -731,7 +754,9 @@ class _Slot:
                 "macro_verdict": self.macro_verdict,
                 "pool": {
                     "as_of_date": self.pool_used.as_of_date.isoformat() if self.pool_used else None,
-                    "carried_forward": self.pool.carried_forward if self.pool else None,
+                    "carried_forward": (
+                        self.pool_used.carried_forward if self.pool_used else None
+                    ),
                     "error": self.pool_error,
                     "core_fallback": self.core_fallback is not None,
                     "core_error": self.core_error,
@@ -748,9 +773,9 @@ class _Slot:
 
     def _layer_map(self) -> dict[str, str]:
         layers: dict[str, str] = {}
-        if self.pool is not None:
+        if self.pool_used is not None:  # the same-day pool, or a warn-stale one
             for name in ("core", "opportunity", "watch", "removed"):
-                for entry in getattr(self.pool, name):
+                for entry in getattr(self.pool_used, name):
                     layers.setdefault(entry.ticker, name)
         for ticker in self.core_fallback or ():
             layers.setdefault(ticker, "core")

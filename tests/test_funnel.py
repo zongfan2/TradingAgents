@@ -501,3 +501,52 @@ def test_no_usable_pool_falls_back_to_core_yaml(tmp_path):
     )
     assert snap["context"]["pool"]["core_fallback"] is True
     assert "pools/core.us.yaml" in snap["context"]["inputs"]
+
+
+@pytest.mark.unit
+def test_warn_stale_pool_serves_layers_and_watch(tmp_path):
+    """Review dafcbf1 finding 1: a pool within the staleness cap but not of
+    the slot day still gives layers and the uncollected watch members."""
+    config = make_config(tmp_path)
+    seed_slot(config, orders=False)
+    pool = config.pool_dir / "us" / f"{D}.json"
+    data = json.loads(pool.read_text())
+    data["as_of_date"] = "2026-10-21"  # gap 2 ≤ cap 3 ⇒ warn
+    pool.unlink()
+    write_json(config.pool_dir / "us" / "2026-10-21.json", data)
+    snap = funnel.build_snapshot(config, "us", DAY)
+    tickers = ticker_map(snap)
+    assert (tickers["AAA"]["layer"], tickers["CCC"]["layer"]) == ("core", "opportunity")
+    assert stage(snap, "EEE", "collect") == ("excluded", "not-collected-watch", "reconstructed")
+    assert stage(snap, "AAA", "pool") is None  # no pool was built on the slot day
+    assert snap["context"]["pool"]["as_of_date"] == "2026-10-21"
+    assert snap["context"]["pool"]["carried_forward"] is False
+
+
+@pytest.mark.unit
+def test_manual_rows_are_a_declared_input(tmp_path):
+    """Review dafcbf1 finding 2: manual rows can change the execute stage, so
+    they are hashed (under #manual)."""
+    config = make_config(tmp_path)
+    seed_slot(config)
+    before = funnel.build_snapshot(config, "us", DAY)
+    append_manual(config, "CCC", 2, f"{D}T12:00:00Z")
+    after = funnel.build_snapshot(config, "us", DAY)
+    assert stage(after, "CCC", "execute") != stage(before, "CCC", "execute")
+    assert "ledger/decisions.jsonl#manual" not in before["context"]["inputs"]
+    assert "ledger/decisions.jsonl#manual" in after["context"]["inputs"]
+
+
+@pytest.mark.unit
+def test_feeds_only_buy_is_not_pending(tmp_path):
+    """Review dafcbf1 finding 3: brief HOLD + feeds BUY passes decide but can
+    never execute — excluded by the shape filter even before execute runs."""
+    config = make_config(tmp_path)
+    write_decision(config, ticker="AAA", date_iso=D, plan=None, decision="HOLD")
+    write_decision(config, ticker="AAA", arm="feeds", date_iso=D, plan=BUY_PLAN)
+    snap = funnel.build_snapshot(config, "us", DAY)
+    aaa = ticker_map(snap)["AAA"]
+    assert snap["context"]["execute_ran"] is False
+    assert stage(snap, "AAA", "decide")[0] == "passed"
+    assert stage(snap, "AAA", "execute") == ("excluded", "hold", "reconstructed")
+    assert aaa["final"] == "excluded"
