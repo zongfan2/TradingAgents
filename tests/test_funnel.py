@@ -550,3 +550,60 @@ def test_feeds_only_buy_is_not_pending(tmp_path):
     assert stage(snap, "AAA", "decide")[0] == "passed"
     assert stage(snap, "AAA", "execute") == ("excluded", "hold", "reconstructed")
     assert aaa["final"] == "excluded"
+
+
+@pytest.mark.unit
+def test_snapshot_contract_is_strict_for_writers_lenient_for_readers(tmp_path):
+    """Review 3a34391 finding 1 (specs/README.md rule 5)."""
+    from pydantic import ValidationError
+
+    from pipeline.contracts.funnel import FunnelSnapshot
+
+    config = make_config(tmp_path)
+    seed_slot(config)
+    snap = json.loads(funnel.write_snapshot(config, "us", DAY).read_text(encoding="utf-8"))
+    FunnelSnapshot.model_validate(snap)
+    with pytest.raises(ValidationError):
+        FunnelSnapshot.model_validate({**snap, "surprise": 1})
+    assert FunnelSnapshot.parse_lenient({**snap, "surprise": 1}).session == "us"
+    # An unknown stage must carry no code, and a code needs a known stage.
+    bad = json.loads(json.dumps(snap))
+    bad["tickers"][0]["stages"]["nominate"]["provenance"] = "unknown"
+    with pytest.raises(ValidationError):
+        FunnelSnapshot.model_validate(bad)
+
+
+@pytest.mark.unit
+def test_invalid_snapshot_is_never_written(tmp_path, monkeypatch):
+    from pydantic import ValidationError
+
+    config = make_config(tmp_path)
+    seed_slot(config)
+    real = funnel.build_snapshot
+    monkeypatch.setattr(funnel, "build_snapshot", lambda *a: {**real(*a), "surprise": 1})
+    with pytest.raises(ValidationError):
+        funnel.write_snapshot(config, "us", DAY)
+    assert not (config.state_dir / "funnel" / "us" / f"{D}.json").exists()
+
+
+@pytest.mark.unit
+def test_collector_rerun_skip_reads_exists(tmp_path):
+    """Review 3a34391 finding 2: a rerun's 'skipped' row (brief on disk)."""
+    config = make_config(tmp_path)
+    seed_slot(config)
+    with open(config.ticker_brief_dir / "collector.log", "a", encoding="utf-8") as handle:
+        handle.write(f"{D} | us | AAA | - | - | skipped\n")
+    snap = funnel.build_snapshot(config, "us", DAY)
+    assert stage(snap, "AAA", "collect") == ("passed", "exists", "reconstructed")
+
+
+@pytest.mark.unit
+def test_refresh_rows_do_not_count_as_an_execute_run(tmp_path):
+    """Review 3a34391 finding 3: refresh never applies the latest-attempt
+    rule, so a refresh after a manual attempt shadows nothing."""
+    config = make_config(tmp_path)
+    seed_slot(config)  # CCC skip stale-quote at 13:45Z
+    append_manual(config, "CCC", 2, f"{D}T15:00:00Z")
+    write_order(config, "CCC", "refresh", written_at=f"{D}T16:00:00Z")
+    snap = funnel.build_snapshot(config, "us", DAY)
+    assert stage(snap, "CCC", "execute") == ("excluded", "stale-quote", "reconstructed")

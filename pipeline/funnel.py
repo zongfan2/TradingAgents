@@ -45,6 +45,7 @@ from pipeline.common import (
 )
 from pipeline.config import PipelineConfig, load_config
 from pipeline.contracts.briefs import split_frontmatter
+from pipeline.contracts.funnel import SNAPSHOT_SCHEMA_VERSION, FunnelSnapshot
 from pipeline.contracts.ledger import DecisionRecord
 from pipeline.contracts.pool import OPPORTUNITY_CAP, WATCH_CAP, PoolFile, read_pool
 from pipeline.execution_adapter import (
@@ -64,7 +65,7 @@ from pipeline.funnel_events import (
 
 logger = logging.getLogger(__name__)
 
-SNAPSHOT_SCHEMA = 1
+SNAPSHOT_SCHEMA = SNAPSHOT_SCHEMA_VERSION
 STAGES = ("nominate", "pool", "collect", "evaluate", "trigger", "decide", "execute")
 RECORDED, RECONSTRUCTED, UNKNOWN = "recorded", "reconstructed", "unknown"
 FINALS = ("order-live", "order-dry", "excluded", "pending", "unknown")
@@ -349,8 +350,11 @@ class _Slot:
         EXISTED when an execute run ran made that run supersede the slot's
         row and skip the manual one. A manual rerun after execution shadows
         nothing, and a live order the slot's row placed always stands."""
+        # A submit run writes intent/submitted/skip rows; refresh/cancel rows
+        # come from refresh, which never applies the latest-attempt rule.
+        submit_rows = [r for r in self.orders if r.get("kind") in ("intent", "submitted", "skip")]
         activity = [
-            t for t in (_instant(x.get("written_at")) for x in (*self.orders, *execute_events))
+            t for t in (_instant(x.get("written_at")) for x in (*submit_rows, *execute_events))
             if t is not None
         ]
         live_runs = {
@@ -516,6 +520,8 @@ class _Slot:
         for ticker, outcome in self.collector_rows.items():
             if outcome == "written":
                 out[ticker] = _entry("passed", "written", "brief written")
+            elif outcome == "skipped":  # a rerun found the brief on disk
+                out[ticker] = _entry("passed", "exists", "brief already on disk")
             elif outcome == "failed":
                 is_core = core_set is None or ticker in core_set
                 out[ticker] = _entry(
@@ -916,8 +922,10 @@ def render_snapshot(snapshot: dict[str, Any]) -> str:
 
 
 def write_snapshot(config: PipelineConfig, session: str, slot_date: date) -> Path:
-    """Build and atomically write one slot's snapshot; returns its path."""
+    """Build, validate (strict writer side of the contract) and atomically
+    write one slot's snapshot; returns its path."""
     snapshot = build_snapshot(config, session, slot_date)
+    FunnelSnapshot.model_validate(snapshot)
     return atomic_write(snapshot_path(config.state_dir, session, slot_date), render_snapshot(snapshot))
 
 

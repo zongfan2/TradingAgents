@@ -90,7 +90,10 @@ component; failures to write are log-only.
 
 `python -m pipeline.funnel build --session S --date D` (`pipeline/funnel.py`)
 writes `~/.tradingagents/funnel/<session>/<date>.json` (atomic, sorted keys,
-no build timestamp — identical inputs give a byte-identical file):
+no build timestamp — identical inputs give a byte-identical file). Contract
+model: `pipeline/contracts/funnel.py` `FunnelSnapshot` — the writer
+validates strictly before writing, readers (P3) use `parse_lenient`; a
+stage is `unknown` exactly when its `code` is null.
 
 - `context`: macro verdict (revision-bound, the runner's rule), pool
   (`as_of_date` of the pool the collectors read, `carried_forward`, read
@@ -135,7 +138,8 @@ no build timestamp — identical inputs give a byte-identical file):
   (`score<` / `technical gate fail for` / `opportunity cap`), a nominee
   missing from the pool is `unknown` (low score, gate fail and watch cap
   are indistinguishable without the gate); collect — the slot's
-  `collector.log` rows (`written` / `failed`), watch is
+  `collector.log` rows (`written`; `skipped` on a rerun ⇒ `exists`;
+  `failed`), watch is
   `not-collected-watch`, a brief without a log row is `unknown`; evaluate —
   the revision-bound eval verdict, `skipped-absent` without a same-day
   brief, `skipped-below-threshold` for an opportunity brief under the
@@ -154,7 +158,8 @@ no build timestamp — identical inputs give a byte-identical file):
   never marks the scheduled execute step as run (`pending` stays). They do
   share the attempt counter, though: when a manual attempt is the latest
   for a (ticker, arm) **and was decided before an execute run** (some slot
-  order row or execute event is later than its `decided_at`), that run
+  submit row — `intent`/`submitted`/`skip`, not refresh — or execute event
+  is later than its `decided_at`), that run
   superseded the slot's row and skipped the manual one, so the arm's
   execute stage is `manual-shadowed` (`excluded`,
   `details.manual_run_id`), overriding the recorded `superseded`. A manual
@@ -205,6 +210,12 @@ The server is already in the user's tailnet (`desktop-p5u8dva.tailc36a4b.ts.net`
   list: it is an internal append-only JSONL log on the existing
   `locked_append` (the same primitive as `orders.jsonl`), with no external
   integration. No survey was done; none is claimed.
+- **P2 (snapshot builder)** is a new component but adds no mechanism from
+  the rule's list: a pure, offline fold of files the pipeline already
+  writes, reusing the components' own rules and readers (`read_pool`,
+  `load_decision_records`, `non_candidate_reason`, `current_outcomes`,
+  `read_core_yaml`), no external integration or dependency. No survey was
+  done; none is claimed.
 - **P3 (R5 Tailscale serve)** is an external integration: survey prior art
   (Tailscale's own serve/funnel docs and 2–3 maintained projects exposing a
   loopback app over a tailnet) and record it here before P3 is built.
