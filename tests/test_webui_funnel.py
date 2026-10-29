@@ -253,3 +253,26 @@ def test_page_hides_write_controls_when_read_only():
         assert line in access
     assert "catch (e) { writable = false; }" in access  # unreachable ⇒ read-only
     assert "refreshAccess();" in js[js.index("function init()"):]
+
+
+@pytest.mark.unit
+def test_session_switch_resets_the_statistics_range_and_spec_points_at_the_runbook():
+    """Review 79b5b57: the cross-date range is recomputed per session, and
+    the spec's operator-steps reference names the RUNBOOK section that has
+    them."""
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    js = (root / "webui" / "static" / "pipeline.js").read_text(encoding="utf-8")
+    handler = js[js.index('$("#funnelSession").addEventListener'):]
+    handler = handler[: handler.index("});")]
+    reset = handler.index('$("#faSince").value = ""; $("#faUntil").value = "";')
+    assert reset < handler.index("loadFunnel();")
+
+    spec = (root / "specs" / "decision-funnel.md").read_text(encoding="utf-8")
+    section = re.search(r"RUNBOOK §(\d+)", spec[spec.index("### R5"):]).group(1)
+    runbook = (root / "RUNBOOK.md").read_text(encoding="utf-8")
+    start = runbook.index(f"\n## {section}.")
+    end = runbook.find("\n## ", start + 1)
+    assert "tailscale serve --bg 8321" in runbook[start:end]

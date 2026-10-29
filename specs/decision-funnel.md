@@ -247,7 +247,7 @@ its own, and marks Funnel traffic with `Tailscale-Funnel-Request`
 - Works from a phone with the Tailscale app; the SSH tunnel keeps working.
   AWS is not needed.
 - Operator steps (enable HTTPS certificates for the tailnet, `tailscale
-  serve --bg`, set the env, restart the webui task): RUNBOOK §3a.
+  serve --bg`, set the env, restart the webui task): RUNBOOK §4 ("Read-only viewing over Tailscale").
 
 ## Prior art (specs/README.md rule 6)
 

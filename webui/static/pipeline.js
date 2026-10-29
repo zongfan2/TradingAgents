@@ -655,6 +655,8 @@ function init() {
     b.classList.add("active");
     funnelSession = b.dataset.session;
     $("#funnelAgg").innerHTML = "";
+    // The default range is per session: recompute it from this session's dates.
+    $("#faSince").value = ""; $("#faUntil").value = "";
     loadFunnel();
   });
   $("#funnelDate").onchange = loadFunnelSnapshot;
