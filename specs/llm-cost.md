@@ -81,7 +81,7 @@ The user also has **$200/month of Anthropic credits** to use before DeepSeek.
   `claude`, `deepseek`. `TRADINGAGENTS_ANTHROPIC_MONTHLY_BUDGET_USD`
   (default 190).
 - Before each **job** (not per slot; one choice covers both arms of a pair,
-  so an A/B pair never splits across providers), the runner sums this calendar month's
+  so the budget crossing never splits an A/B pair), the runner sums this calendar month's
   (UTC) `cost_usd` over `provider == anthropic` lines. Below the cap and no
   exhaustion marker → `claude`; otherwise `deepseek`. The spend is a pure
   fold over the append-only ledger — no mutable budget state (LiteLLM's
@@ -91,7 +91,10 @@ The user also has **$200/month of Anthropic credits** to use before DeepSeek.
 - A child failing with Anthropic's "credit balance is too low" error writes
   `~/.tradingagents/llm_budget/<YYYY-MM>.exhausted` (atomic; its existence is
   the state) and that run is rerun once on `deepseek` (as are the job's
-  remaining arms). Only the final result is written to the decision ledger;
+  remaining arms). This is the one way a pair can split across providers
+  (first arm on Claude, second on DeepSeek): those runs carry the flag
+  `llm-profile-switched`, and the pair's rows have different `preset`s, so
+  a per-preset A/B aggregate never counts it as a complete pair. Only the final result is written to the decision ledger;
   the failed Claude attempt appears only in `llm_usage.jsonl` (`run_id`
   null). Other errors are not retried here.
 - The per-profile config digest is resolved before the child starts, so a

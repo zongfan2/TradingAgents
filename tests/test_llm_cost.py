@@ -431,3 +431,30 @@ def test_digest_failure_happens_before_any_spend(tmp_path, monkeypatch):
     assert child.specs == []
     assert outcome.summary["errors"] == 2
     assert read_usage(config.state_dir) == []
+
+
+@pytest.mark.unit
+def test_credit_exhaustion_mid_pair_is_flagged(tmp_path):
+    """Review 7e34f46: the only way a pair splits providers is a credit error
+    on a later arm — those runs carry llm-profile-switched."""
+    config = make_config(tmp_path)
+    write_pool(config, "us", SLOT, core=("AAA",))
+    macro = write_brief(config.macro_brief_dir / "2026-08-07.us.md")
+    write_eval(macro, "pass")
+
+    class FeedsCreditChild(UsageChild):
+        def __call__(self, spec, timeout):
+            env = dict(spec.env)
+            if spec.arm == "feeds" and env.get("TRADINGAGENTS_LLM_PROVIDER") == "anthropic":
+                self.specs.append(spec)
+                return ar.ChildResult(1, None, "Your credit balance is too low", usage={})
+            return super().__call__(spec, timeout)
+
+    settings = ar.RunnerSettings(ab_pairing="paired", ab_core_pairs_per_slot=1,
+                                 llm_routing="claude-first", analysis_job_concurrency=1)
+    _, emitted = run(config, make_resolvers(macro), FeedsCreditChild(), settings=settings)
+    presets = {r.arm: r.preset for r in read_records(config)}
+    assert presets == {"brief": "claude", "feeds": "deepseek"}
+    flags = {line["arm"]: line["flags"] or [] for line in emitted}
+    assert "llm-profile-switched" in flags["feeds"]
+    assert "llm-profile-switched" not in flags["brief"]

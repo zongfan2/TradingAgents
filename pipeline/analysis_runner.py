@@ -1008,11 +1008,11 @@ def _extract_usage(stdout: str) -> dict | None:
 
 
 class _LlmRouter:
-    """Per-run profile choice + per-profile config digests (llm-cost R2).
+    """Per-job profile choice + per-profile config digests (llm-cost R2).
 
-    Thread-safe: jobs run concurrently; each run asks for a profile right
-    before its child starts, so a run never mixes providers and the budget
-    is re-read for every run."""
+    Thread-safe: jobs run concurrently; each job asks for a profile right
+    before its first child starts (both arms of a pair share it), so a run
+    never mixes providers and the budget is re-read for every job."""
 
     def __init__(
         self,
@@ -1419,6 +1419,7 @@ def _run_job_impl(
     # provider (the A/B contrast is the information source, not the model);
     # it only changes when Anthropic reports the credits gone.
     profile: Profile | None = router.choose().profile if router is not None else None
+    switched_profile = False  # a credit-exhausted rerun moved this job to DeepSeek
     for arm_index, arm in enumerate(job.arms):
         # Resolved before the child spends anything: a snapshot write failure
         # must fail the run before tokens are billed, not after.
@@ -1461,6 +1462,7 @@ def _run_job_impl(
                 models=result.usage or {}, error=result.error, clock=clock,
             )
             profile = DEEPSEEK  # also for the job's remaining arms
+            switched_profile = True
             run_digest = router.digest(profile)
             spec = replace(spec, env=tuple(sorted(profile.env.items())))
             try:
@@ -1514,6 +1516,10 @@ def _run_job_impl(
             logger.warning("run failed for %s (%s arm): %s", job.ticker, arm, error)
 
         run_flags = list(job_flags)
+        if switched_profile:
+            # Arms before the switch ran on Claude: a pair with this flag mixes
+            # providers and is not an A/B contrast of information sources.
+            run_flags.append("llm-profile-switched")
         if arm == "brief":
             run_flags += _revision_drift_flags(fresh_macro, None if withhold else fresh_ticker)
         fields = {
