@@ -65,7 +65,10 @@ talks to the broker.
   whose `Host` is not `127.0.0.1`/`localhost` (any port) are rejected with
   400 (2026-10-22: the always-on webui task makes DNS rebinding from a local
   browser a standing risk). Remote viewing is an SSH tunnel to
-  `localhost:<port>`.
+  `localhost:<port>`, or (2026-10-29, decision-funnel R5) a tailnet name
+  added by `TRADINGAGENTS_WEBUI_ALLOWED_HOSTS` behind `tailscale serve`,
+  which is **read-only**: write actions require a loopback Host and no
+  proxy forwarding header; Funnel traffic is refused.
 
 ## Acceptance criteria
 

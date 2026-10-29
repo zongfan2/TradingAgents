@@ -24,6 +24,15 @@ the EXECUTION_HALT toggle):
 - GET  /api/pipeline/decisions      decision rows joined with orders/outcomes
 - GET/POST /api/pipeline/halt       EXECUTION_HALT kill-switch toggle
 - POST /api/pipeline/trigger        manual analysis run (never auto-executed)
+- GET  /api/pipeline/access         whether this request may use write actions
+- GET  /api/pipeline/funnel/...     decision-funnel snapshots, aggregate, CSV
+                                    (specs/decision-funnel.md R4)
+
+Remote viewing (decision-funnel R5): ``TRADINGAGENTS_WEBUI_ALLOWED_HOSTS``
+adds names (the tailnet name behind ``tailscale serve``) to the Host
+allowlist; such requests are READ-ONLY — every non-GET method is 403 unless
+the request is local (loopback Host and no proxy forwarding header), and
+Tailscale Funnel (public internet) traffic is refused outright.
 
 Run:  .venv/bin/python -m webui.server   (binds 127.0.0.1 only — R4: the
 write actions must not be reachable from the network; `uvicorn webui.server:app`
@@ -35,6 +44,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import os
 import re
 import subprocess
 import threading
@@ -44,14 +54,15 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from pipeline.common import SESSION_TZ, SESSIONS, session_date, session_for_ticker
 from pipeline.config import PipelineConfig, load_config as load_pipeline_config, parse_slot_time
-from webui import aggregates as ledger_aggregates
+from webui import aggregates as ledger_aggregates, funnel_view
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ENV_PATH = REPO_ROOT / ".env"
@@ -97,10 +108,90 @@ LANGUAGES = ["English", "Chinese", "Japanese", "Korean", "Hindi", "Spanish",
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
 app = FastAPI(title="TradingAgents Web UI")
-#: Loopback names only (specs/webui-pages.md R4): with the always-on webui
-#: task a DNS-rebinding page must not reach the write endpoints.
-ALLOWED_HOSTS = ["127.0.0.1", "localhost"]
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
+#: Loopback names (specs/webui-pages.md R4): with the always-on webui task a
+#: DNS-rebinding page must not reach the write endpoints.
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost")
+ALLOWED_HOSTS_ENV = "TRADINGAGENTS_WEBUI_ALLOWED_HOSTS"
+_HOSTNAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$")
+#: Set by any reverse proxy in front of us — ``tailscale serve`` always
+#: overwrites X-Forwarded-For/-Host and adds Tailscale-User-* (it preserves
+#: the client's Host, so a tailnet client could send ``Host: localhost``:
+#: the Host alone never proves a request is local).
+FORWARDING_HEADERS = (
+    "x-forwarded-for", "x-forwarded-host", "forwarded", "x-real-ip",
+    "tailscale-user-login", "tailscale-user-name", "tailscale-headers-info",
+)
+FUNNEL_HEADER = "tailscale-funnel-request"
+READ_ONLY_METHODS = ("GET", "HEAD", "OPTIONS")
+
+
+def parse_allowed_hosts(raw: str | None) -> list[str]:
+    """Extra Host names from ``TRADINGAGENTS_WEBUI_ALLOWED_HOSTS``
+    (comma/space separated). Only plain hostnames: a wildcard, port, scheme
+    or path is skipped with a warning — the allowlist must never open up."""
+    extra: list[str] = []
+    for item in re.split(r"[,\s]+", raw or ""):
+        name = item.strip().lower().rstrip(".")
+        if not name:
+            continue
+        if not _HOSTNAME_RE.match(name) or name in LOOPBACK_HOSTS:
+            logging.getLogger(__name__).warning(
+                "%s: ignoring %r (plain hostnames only)", ALLOWED_HOSTS_ENV, item
+            )
+            continue
+        if name not in extra:
+            extra.append(name)
+    return extra
+
+
+def _allowed_hosts_setting() -> str | None:
+    # The webui task runs uvicorn directly (no orchestrator dotenv load), so
+    # the repo .env is read here; the process env wins. Tests set
+    # TRADINGAGENTS_SKIP_DOTENV (the orchestrator's convention).
+    if os.environ.get(ALLOWED_HOSTS_ENV) or os.environ.get("TRADINGAGENTS_SKIP_DOTENV"):
+        return os.environ.get(ALLOWED_HOSTS_ENV)
+    return _read_env_file_at(ENV_PATH).get(ALLOWED_HOSTS_ENV)
+
+
+def _request_host(headers: dict[str, str]) -> str:
+    host = headers.get("host", "")
+    if host.startswith("["):  # [v6]:port
+        return host.split("]", 1)[0] + "]"
+    return host.rsplit(":", 1)[0].lower() if ":" in host else host.lower()
+
+
+def request_is_local(headers: dict[str, str]) -> bool:
+    """Loopback Host AND no proxy forwarding header: only then may a request
+    use the write actions (halt toggle, trigger, config, analyze)."""
+    if _request_host(headers) not in LOOPBACK_HOSTS:
+        return False
+    return not any(name in headers for name in FORWARDING_HEADERS)
+
+
+class ReadOnlyRemoteMiddleware:
+    """Decision-funnel R5: remote (tailnet) requests are read-only, and
+    Funnel (public internet) requests are refused. Runs inside the
+    TrustedHost check, so a foreign Host is still a 400 first."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
+        if FUNNEL_HEADER in headers:
+            response = JSONResponse(
+                {"detail": "not served over Tailscale Funnel (tailnet only)"}, status_code=403
+            )
+            return await response(scope, receive, send)
+        if scope["method"] not in READ_ONLY_METHODS and not request_is_local(headers):
+            response = JSONResponse(
+                {"detail": "read-only from a remote host — use localhost (ssh tunnel) to change state"},
+                status_code=403,
+            )
+            return await response(scope, receive, send)
+        return await self.app(scope, receive, send)
 
 _runs: dict[str, dict] = {}
 _run_lock = threading.Lock()
@@ -129,15 +220,27 @@ def _parse_env_line(raw: str) -> tuple[str, str] | None:
     return key, value
 
 
-def _read_env_file() -> dict[str, str]:
+def _read_env_file_at(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
-    if ENV_PATH.exists():
-        for raw in ENV_PATH.read_text(encoding="utf-8").splitlines():
+    if path.exists():
+        for raw in path.read_text(encoding="utf-8").splitlines():
             parsed = _parse_env_line(raw)
             if parsed:
                 # Later duplicates win, matching dotenv's own precedence.
                 values[parsed[0]] = parsed[1]
     return values
+
+
+def _read_env_file() -> dict[str, str]:
+    return _read_env_file_at(ENV_PATH)
+
+
+#: Host allowlist: loopback plus the configured remote names. Middleware
+#: order (last added = outermost): TrustedHost (400 for a foreign Host)
+#: wraps the read-only check.
+ALLOWED_HOSTS = [*LOOPBACK_HOSTS, *parse_allowed_hosts(_allowed_hosts_setting())]
+app.add_middleware(ReadOnlyRemoteMiddleware)
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
 
 
 def _write_env_updates(updates: dict[str, str | None]) -> None:
@@ -782,6 +885,89 @@ def get_pipeline_decisions(
 
 class HaltPayload(BaseModel):
     halted: bool
+
+
+# -- page 6: decision funnel (specs/decision-funnel.md R4) — read-only --------
+
+def _funnel_session(session: str) -> str:
+    if session not in SESSIONS:
+        raise HTTPException(status_code=404, detail=f"unknown session {session!r}")
+    return session
+
+
+def _funnel_date(value: str | None, field: str = "date") -> str | None:
+    if value is not None and not _DATE_RE.match(value):
+        raise HTTPException(status_code=422, detail=f"{field} must be YYYY-MM-DD")
+    return value
+
+
+@app.get("/api/pipeline/funnel/dates")
+def get_funnel_dates():
+    config = _pipeline_config()
+    return {"dates": funnel_view.snapshot_dates(config.state_dir), "halted": _halted(config)}
+
+
+@app.get("/api/pipeline/funnel/aggregate")
+def get_funnel_aggregate(session: str, since: str | None = None, until: str | None = None):
+    """Counts over every snapshot of a session in [since, until] (computed on
+    demand, never persisted). Unreadable snapshots are listed, not fatal."""
+    session = _funnel_session(session)
+    since, until = _funnel_date(since, "since"), _funnel_date(until, "until")
+    config = _pipeline_config()
+    snapshots, skipped = [], []
+    for day in funnel_view.snapshot_dates(config.state_dir)[session]:
+        if (since and day < since) or (until and day > until):
+            continue
+        snap, error = funnel_view.read_snapshot(config.state_dir, session, day)
+        if snap is None:
+            skipped.append({"date": day, "reason": error})
+        else:
+            snapshots.append(snap)
+    result = funnel_view.aggregate(snapshots)
+    return {**result, "session": session, "since": since, "until": until,
+            "skipped": skipped, "halted": _halted(config)}
+
+
+def _funnel_snapshot(session: str, date: str | None) -> tuple[str | None, dict | None, str | None]:
+    config = _pipeline_config()
+    day = _funnel_date(date) or next(iter(funnel_view.snapshot_dates(config.state_dir)[session]), None)
+    if day is None:
+        return None, None, "not yet run"
+    snap, error = funnel_view.read_snapshot(config.state_dir, session, day)
+    return day, snap, error
+
+
+@app.get("/api/pipeline/funnel/{session}")
+def get_funnel_snapshot(session: str, date: str | None = None):
+    """One slot's snapshot (default: the session's latest)."""
+    day, snap, error = _funnel_snapshot(_funnel_session(session), date)
+    config = _pipeline_config()
+    if snap is None:
+        return {"present": False, "date": day, "message": error, "halted": _halted(config)}
+    return {"present": True, "date": day, "snapshot": snap, "halted": _halted(config)}
+
+
+@app.get("/api/pipeline/funnel/{session}/csv")
+def get_funnel_csv(session: str, date: str | None = None):
+    day, snap, error = _funnel_snapshot(_funnel_session(session), date)
+    if snap is None:
+        raise HTTPException(status_code=404, detail=error or "not yet run")
+    return Response(
+        funnel_view.snapshot_csv(snap),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="funnel-{session}-{day}.csv"'},
+    )
+
+
+@app.get("/api/pipeline/access")
+def get_pipeline_access(request: Request):
+    """Whether this request may use the write actions (the page hides them
+    when not): only a local request — loopback Host, no proxy headers."""
+    headers = {k.lower(): v for k, v in request.headers.items()}
+    return {
+        "writable": request_is_local(headers),
+        "remote_user": headers.get("tailscale-user-login"),
+    }
 
 
 @app.get("/api/pipeline/halt")
