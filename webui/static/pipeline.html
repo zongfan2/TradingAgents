@@ -16,7 +16,9 @@
     <button data-page="briefs">简报</button>
     <button data-page="ab">A/B 对比</button>
     <button data-page="decisions">决策与订单</button>
+    <button data-page="funnel">决策漏斗</button>
   </nav>
+  <span id="readOnlyBadge" class="badge badge-warn" hidden title="经 tailnet 访问：只读。改状态请用 ssh 隧道访问 localhost">只读</span>
   <button id="haltToggle" class="mini-btn halt-toggle" title="EXECUTION_HALT 开关">…</button>
 </header>
 
@@ -84,7 +86,7 @@
 
   <!-- Page 5: decisions & orders -->
   <section id="page-decisions" class="pipeline-page" hidden>
-    <div class="card">
+    <div class="card" id="triggerCard">
       <div class="trigger-row">
         <label>手动分析 <input id="trigTicker" placeholder="NVDA / 0700.HK" size="10"></label>
         <label>日期 <input id="trigDate" type="date"></label>
@@ -102,6 +104,45 @@
         <button id="fApply" class="mini-btn">筛选</button>
       </div>
       <div id="decisionsBody"></div>
+    </div>
+  </section>
+
+  <!-- Page 6: decision funnel (specs/decision-funnel.md R4) — read-only -->
+  <section id="page-funnel" class="pipeline-page" hidden>
+    <div class="card">
+      <div class="pool-head">
+        <div class="seg" id="funnelSession">
+          <button data-session="us" class="active">US</button>
+          <button data-session="cn">CN</button>
+        </div>
+        <select id="funnelDate"></select>
+        <a id="funnelCsv" class="mini-btn" href="#" download>导出 CSV</a>
+        <span id="funnelMeta" class="run-meta"></span>
+      </div>
+      <div id="funnelContext" class="funnel-context"></div>
+      <div id="funnelBars" class="funnel-bars"></div>
+    </div>
+    <div class="card">
+      <div class="dec-filters">
+        <select id="ffStage"><option value="">停止阶段（全部）</option></select>
+        <select id="ffCode"><option value="">原因代码（全部）</option></select>
+        <select id="ffFinal"><option value="">最终结果（全部）</option></select>
+        <input id="ffTicker" placeholder="ticker" size="8">
+        <span class="run-meta">来源：<span class="badge st-ok">记录</span> 事件日志 ·
+          <span class="badge st-warn">重建</span> 由文件推导 ·
+          <span class="badge st-skipped">未知</span> 原因未记录</span>
+      </div>
+      <div id="funnelTable"></div>
+    </div>
+    <div class="card">
+      <div class="ab-controls">
+        <h3 class="sec-title">跨日统计</h3>
+        <label>起始 <input id="faSince" type="date"></label>
+        <label>截止 <input id="faUntil" type="date"></label>
+        <button id="faApply" class="mini-btn">统计</button>
+        <span class="run-meta">按需计算，从不落盘</span>
+      </div>
+      <div id="funnelAgg"></div>
     </div>
   </section>
 

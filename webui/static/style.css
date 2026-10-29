@@ -319,3 +319,25 @@ input, select { font-family: inherit; }
   background: var(--card-2); border: 1px solid var(--border); color: var(--ink);
   border-radius: 8px; padding: 6px 10px; font-size: 13px;
 }
+
+/* ---------- page 6: decision funnel ---------- */
+.funnel-context { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 12px 0; font-size: 13px; color: var(--ink-2); }
+.funnel-context b { color: var(--ink); font-weight: 600; }
+.funnel-bars { display: grid; grid-template-columns: max-content 1fr max-content; gap: 6px 10px; align-items: center; font-size: 13px; }
+.funnel-bar { height: 14px; border-radius: 4px; background: var(--accent); opacity: .75; min-width: 2px; }
+.funnel-finals { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.funnel-row { cursor: pointer; }
+.funnel-row:hover td { background: var(--card-2); }
+.funnel-trail td { background: var(--card-2); }
+.funnel-trail table { width: 100%; font-size: 12px; }
+.funnel-trail td.reason, .ptable td.reason { max-width: 520px; color: var(--ink-2); }
+.badge.fin-order-live { background: rgba(0,200,5,.16); color: var(--up); }
+.badge.fin-order-dry { background: rgba(59,130,246,.15); color: #5ba0f6; }
+.badge.fin-excluded { background: rgba(255,80,0,.12); color: var(--down); }
+.badge.fin-pending { background: rgba(245,166,35,.12); color: var(--amber); }
+.badge.fin-unknown { background: var(--card-2); color: var(--ink-2); }
+.link-btn { background: none; border: none; color: var(--accent); font-size: 12px; padding: 0 4px; }
+@media (max-width: 720px) {
+  .funnel-trail td.reason, .ptable td.reason { max-width: 220px; }
+  .ptable { font-size: 12px; }
+}

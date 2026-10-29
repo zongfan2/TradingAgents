@@ -222,3 +222,10 @@ def test_csv_export_one_row_per_ticker_and_neutralised_formulas(fsrv):
     text = funnel_view.snapshot_csv(snap)
     assert "'=HYPERLINK(1)" in text and ",=HYPERLINK" not in text
     assert client(fsrv).get("/api/pipeline/funnel/cn/csv").status_code == 404
+
+
+@pytest.mark.unit
+def test_page_six_is_served_with_the_tab(fsrv):
+    html = client(fsrv, TAILNET, "https").get("/pipeline.html")
+    assert html.status_code == 200
+    assert 'data-page="funnel"' in html.text and 'id="page-funnel"' in html.text
