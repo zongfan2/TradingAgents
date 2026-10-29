@@ -843,6 +843,8 @@ class Orchestrator:
         #: notification (spec: "plans produced, orders submitted/dry-run,
         #: pairs run, failures"). ``None`` until the runner reports a summary.
         self._analysis_counts: dict[str, int] | None = None
+        #: Step 6's LLM routing/cost line (llm-cost R2), when the runner routed.
+        self._analysis_llm: str | None = None
         #: Step 7's parsed adapter-summary counts for the same notification.
         self._execution_counts: dict[str, int] | None = None
         #: Step 7's per-order lines for the Lark summary (None: no summary).
@@ -998,6 +1000,7 @@ class Orchestrator:
             elif name == "analysis_runner":
                 status, error = _analysis_runner_outcome(result)
                 self._analysis_counts = _analysis_summary_counts(result)
+                self._analysis_llm = _analysis_llm_text(result)
             elif name == "execution_adapter":
                 status, error = _execution_adapter_outcome(result)
                 self._execution_counts = _execution_summary_counts(result)
@@ -1146,6 +1149,8 @@ class Orchestrator:
                 f"invalid plans {counts['invalid_plans']}, "
                 f"run errors {counts['errors']}, {orders_text}"
             )
+            if self._analysis_llm:
+                message += f"; {self._analysis_llm}"
         if problems:
             message += "; failures: " + ", ".join(problems)
         # End-of-slot summary is always sent (dedup key still guards retries).
@@ -1424,6 +1429,28 @@ def _analysis_summary_counts(result: RunResult) -> dict[str, int] | None:
         return value if isinstance(value, int) else 0
 
     return {key: count(key) for key in ("planned", "completed", "errors", "invalid_plans", "pairs")}
+
+
+def _analysis_llm_text(result: RunResult) -> str | None:
+    """``LLM claude 12/deepseek 3 $1.84; Anthropic month $42.10/$190`` from
+    the runner summary's ``llm`` block (specs/llm-cost.md R2), else None."""
+    line = _last_nonempty_line(result.stdout)
+    try:
+        summary = json.loads(line) if line else None
+    except json.JSONDecodeError:
+        return None
+    llm = summary.get("llm") if isinstance(summary, dict) else None
+    if not isinstance(llm, dict):
+        return None
+    try:
+        profiles = "/".join(f"{name} {n}" for name, n in sorted((llm.get("profiles") or {}).items()))
+        return (
+            f"LLM {profiles or 'no runs'} ${float(llm.get('cost_usd') or 0):.2f}; "
+            f"Anthropic month ${float(llm.get('anthropic_month_usd') or 0):.2f}"
+            f"/${float(llm.get('anthropic_budget_usd') or 0):.0f}"
+        )
+    except (TypeError, ValueError, AttributeError):
+        return None
 
 
 def _analysis_runner_outcome(result: RunResult) -> tuple[str, str | None]:

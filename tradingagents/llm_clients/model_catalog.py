@@ -94,10 +94,14 @@ MODEL_OPTIONS: ProviderModeOptions = {
     },
     "anthropic": {
         "quick": [
+            ("Claude Haiku 5.5 - Current Haiku, fast and inexpensive", "claude-haiku-5-5"),
+            ("Claude Sonnet 5.5 - Current Sonnet, speed and capability", "claude-sonnet-5-5"),
             ("Claude Sonnet 5 - Best speed and intelligence balance", "claude-sonnet-5"),
             ("Claude Haiku 4.5 - Fastest with near-frontier intelligence", "claude-haiku-4-5"),
         ],
         "deep": [
+            ("Claude Opus 5.5 - Current Opus", "claude-opus-5-5"),
+            ("Claude Sonnet 5.5 - Current Sonnet", "claude-sonnet-5-5"),
             ("Claude Fable 5 - Most capable, long-running agents", "claude-fable-5"),
             ("Claude Opus 4.8 - Frontier agentic coding and reasoning", "claude-opus-4-8"),
             ("Claude Sonnet 5 - Near-frontier intelligence at Sonnet cost", "claude-sonnet-5"),
@@ -132,12 +136,14 @@ MODEL_OPTIONS: ProviderModeOptions = {
     # handles the reasoning_content round-trip).
     "deepseek": {
         "quick": [
-            ("DeepSeek V4 Flash - Latest fast model, thinking + non-thinking", "deepseek-v4-flash"),
+            ("DeepSeek Flash - Latest fast model (V4.1), thinking + non-thinking", "deepseek-flash"),
+            ("DeepSeek V4 Flash - Retired alias, served and billed as Flash", "deepseek-v4-flash"),
             ("Custom model ID", "custom"),
         ],
         "deep": [
             ("DeepSeek V4 Pro - Latest flagship", "deepseek-v4-pro"),
-            ("DeepSeek V4 Flash - Fast, supports thinking", "deepseek-v4-flash"),
+            ("DeepSeek Flash - Fast, supports thinking", "deepseek-flash"),
+            ("DeepSeek V4 Flash - Retired alias, served and billed as Flash", "deepseek-v4-flash"),
             ("Custom model ID", "custom"),
         ],
     },

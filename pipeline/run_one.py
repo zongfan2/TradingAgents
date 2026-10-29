@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import inspect
 import json
 import logging
 import os
@@ -54,6 +55,7 @@ from pathlib import Path
 from pipeline.common import SESSIONS
 from pipeline.config import load_config
 from pipeline.contracts.ledger import Arm, TradePlan
+from pipeline.llm_usage import UsageCallback
 
 logger = logging.getLogger("pipeline.run_one")
 
@@ -65,6 +67,10 @@ ARMS: tuple[Arm, ...] = ("brief", "feeds")
 #: ``redirect_stdout`` (C extensions, future grandchildren inheriting fd 1)
 #: cannot corrupt the protocol — even without a trailing newline.
 RESULT_SENTINEL = "TRADINGAGENTS_RUN_ONE_RESULT "
+#: Tag of the usage line a FAILED run prints (a completed run carries its
+#: usage inside the result payload) — tokens spent before a failure are
+#: still billed (specs/llm-cost.md R1).
+USAGE_SENTINEL = "TRADINGAGENTS_RUN_ONE_USAGE "
 
 #: Fenced code block, optionally tagged ``json`` — the trader emits the plan
 #: as the LAST such block after its free-text reasoning.
@@ -221,10 +227,12 @@ def normalize_decision(raw: object, plan: dict | None) -> str:
 #: Injectable graph seam: ``(position_context, debug) -> graph`` where the
 #: graph exposes ``propagate``, ``save_reports``, and ``quick_thinking_llm``
 #: (the trader's LLM — the repair-reprompt uses the same model).
+#: ``(position_context, debug)``; a factory that also accepts ``callbacks=``
+#: receives the run's usage callback (the default one does).
 GraphFactory = Callable[[str | None, bool], object]
 
 
-def _default_graph_factory(position_context: str | None, debug: bool):
+def _default_graph_factory(position_context: str | None, debug: bool, callbacks=None):
     # Import AFTER apply_run_env: DEFAULT_CONFIG applies TRADINGAGENTS_*
     # overrides at import time (compare/run.py precedent).
     from tradingagents.default_config import DEFAULT_CONFIG
@@ -233,13 +241,27 @@ def _default_graph_factory(position_context: str | None, debug: bool):
     config = DEFAULT_CONFIG.copy()
     config["trade_plan_emit"] = True
     config["position_context"] = position_context
-    return TradingAgentsGraph(debug=debug, config=config)
+    return TradingAgentsGraph(debug=debug, config=config, callbacks=callbacks)
 
 
-def run_once(args, graph_factory: GraphFactory) -> dict:
+def _build_graph(factory: GraphFactory, position_context: str | None, debug: bool, usage: UsageCallback):
+    try:
+        signature = inspect.signature(factory)
+        accepts = "callbacks" in signature.parameters or any(
+            p.kind is inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values()
+        )
+    except (TypeError, ValueError):
+        accepts = False
+    if accepts:
+        return factory(position_context, debug, callbacks=[usage])
+    return factory(position_context, debug)
+
+
+def run_once(args, graph_factory: GraphFactory, usage: UsageCallback | None = None) -> dict:
     """Run the graph and assemble the result payload (stdout JSON line)."""
+    usage = usage if usage is not None else UsageCallback()
     asset_type = "crypto" if args.ticker.upper().endswith("-USD") else "stock"
-    graph = graph_factory(args.position_context, args.debug)
+    graph = _build_graph(graph_factory, args.position_context, args.debug, usage)
     final_state, signal = graph.propagate(args.ticker, args.date, asset_type=asset_type)
 
     trader_text = str(final_state.get("trader_investment_plan") or "")
@@ -264,6 +286,7 @@ def run_once(args, graph_factory: GraphFactory) -> dict:
         "plan_error": plan_error,
         "repair_used": repair_used,
         "report_dir": report_dir,
+        "usage": usage.summary(),
     }
 
 
@@ -311,21 +334,34 @@ def main(argv: list[str] | None = None, graph_factory: GraphFactory | None = Non
 
     factory = graph_factory or _default_graph_factory
     real_stdout = sys.stdout
+    usage = UsageCallback(stream=real_stdout, sentinel=USAGE_SENTINEL)
     try:
         # stdout discipline: the graph and its dependencies print freely; the
         # parent parses stdout as exactly one JSON line, so everything the run
         # produces is redirected to stderr and only the result line goes out.
         with contextlib.redirect_stdout(sys.stderr):
-            result = run_once(args, factory)
+            result = run_once(args, factory, usage)
     except KeyboardInterrupt:
+        _print_usage(usage, real_stdout)
         print("run-one: interrupted", file=sys.stderr)
         return 130
     except Exception as exc:
         logger.debug("run failure detail", exc_info=True)
+        _print_usage(usage, real_stdout)
         print(f"run-one: {' '.join(str(exc).split()) or exc.__class__.__name__}", file=sys.stderr)
         return 1
     print(RESULT_SENTINEL + json.dumps(result, ensure_ascii=False), file=real_stdout)
     return 0
+
+
+def _print_usage(usage: UsageCallback, stream) -> None:
+    """A failed run's spend, for the parent's usage ledger (best-effort)."""
+    try:
+        summary = usage.summary()
+        if summary:
+            print(USAGE_SENTINEL + json.dumps(summary, ensure_ascii=False), file=stream, flush=True)
+    except Exception:  # accounting never changes how a run fails
+        pass
 
 
 if __name__ == "__main__":

@@ -401,6 +401,19 @@ the `funnel` component. To rebuild by hand:
 .venv/bin/python -m pipeline.funnel backfill --since 2026-10-14   # every slot with inputs
 ```
 
+**Analysis LLM routing and cost** (specs/llm-cost.md). `TRADINGAGENTS_LLM_ROUTING=claude-first`
+runs each analysis on Claude (quick roles `claude-haiku-5-5` effort low,
+judges `claude-opus-5-5` effort medium) while this calendar month's (UTC)
+Anthropic spend is below `TRADINGAGENTS_ANTHROPIC_MONTHLY_BUDGET_USD` (190),
+then on DeepSeek (`deepseek-v4-pro` / `deepseek-flash`, quick role without
+thinking). `claude` / `deepseek` pin one profile; unset keeps the legacy
+single-provider env. Every run's tokens and cost land in
+`~/.tradingagents/llm_usage.jsonl`; the end-of-slot notification shows the
+slot's LLM cost and the month's Anthropic spend. If Anthropic answers
+"credit balance is too low", the runner writes
+`~/.tradingagents/llm_budget/<YYYY-MM>.exhausted` and reruns that run on
+DeepSeek — delete the marker to go back to Claude after topping up.
+
 ## 8. Troubleshooting
 
 **Missed slot.** The watchdog notifies once per session/day when a weekday

@@ -28,6 +28,14 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_GOOGLE_THINKING_LEVEL":   "google_thinking_level",
     "TRADINGAGENTS_OPENAI_REASONING_EFFORT": "openai_reasoning_effort",
     "TRADINGAGENTS_ANTHROPIC_EFFORT":        "anthropic_effort",
+    # Per-role overrides (specs/llm-cost.md R3): the two judging roles and
+    # the report/debate roles need different depths. Unset falls back to
+    # anthropic_effort.
+    "TRADINGAGENTS_ANTHROPIC_DEEP_EFFORT":   "anthropic_deep_effort",
+    "TRADINGAGENTS_ANTHROPIC_QUICK_EFFORT":  "anthropic_quick_effort",
+    # DeepSeek V4 thinks by default (effort high); "disabled" turns it off
+    # for the quick role only (specs/llm-cost.md R4).
+    "TRADINGAGENTS_DEEPSEEK_QUICK_THINKING": "deepseek_quick_thinking",
 }
 
 
@@ -40,6 +48,7 @@ _BOOL_FALSE = ("false", "0", "no", "off")
 _ENV_CHOICES = {
     "macro_source": ("feeds", "brief"),
     "ticker_source": ("feeds", "brief"),
+    "deepseek_quick_thinking": ("enabled", "disabled"),
 }
 
 
@@ -66,10 +75,15 @@ def _coerce(value: str, reference):
     return value
 
 
-def _apply_env_overrides(config: dict) -> dict:
-    """Apply TRADINGAGENTS_* env vars to the config dict in-place."""
+def _apply_env_overrides(config: dict, env=None) -> dict:
+    """Apply TRADINGAGENTS_* env vars to the config dict in-place.
+
+    ``env`` defaults to the process environment; callers that need the config
+    another environment would produce (the analysis runner's per-profile
+    config digest) pass that mapping instead."""
+    env = os.environ if env is None else env
     for env_var, key in _ENV_OVERRIDES.items():
-        raw = os.environ.get(env_var)
+        raw = env.get(env_var)
         if raw is None or raw == "":
             continue
         try:
@@ -109,6 +123,9 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "google_thinking_level": None,      # "high", "minimal", etc.
     "openai_reasoning_effort": None,    # "medium", "high", "low"
     "anthropic_effort": None,           # "high", "medium", "low"
+    "anthropic_deep_effort": None,      # per-role override of anthropic_effort
+    "anthropic_quick_effort": None,
+    "deepseek_quick_thinking": None,    # None = provider default (on); "disabled"
     # Sampling temperature, forwarded to every provider when set. None leaves
     # each provider at its own default. Lower values reduce run-to-run
     # variation on models that honor it; reasoning models largely ignore it

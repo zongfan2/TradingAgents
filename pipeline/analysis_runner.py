@@ -43,6 +43,7 @@ import re
 import signal
 import subprocess
 import sys
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
@@ -77,7 +78,21 @@ from pipeline.contracts.ledger import (
 )
 from pipeline.contracts.pool import PoolReadResult, read_pool
 from pipeline.funnel_events import FunnelEvents, best_effort
-from pipeline.run_one import REPAIR_PROMPT, RESULT_SENTINEL
+from pipeline.llm_routing import (
+    DEEPSEEK,
+    DEFAULT_ANTHROPIC_MONTHLY_BUDGET_USD,
+    ROUTING_CHOICES,
+    Profile,
+    RoutingDecision,
+    choose_profile,
+)
+from pipeline.llm_usage import (
+    append_usage,
+    is_credit_exhausted_error,
+    mark_exhausted,
+    month_spend,
+)
+from pipeline.run_one import REPAIR_PROMPT, RESULT_SENTINEL, USAGE_SENTINEL
 
 logger = logging.getLogger("pipeline.analysis_runner")
 
@@ -103,6 +118,11 @@ MAX_RUNS_ENV = "TRADINGAGENTS_MAX_RUNS_PER_SLOT"
 EXECUTE_ON_MISSING_EVAL_ENV = "TRADINGAGENTS_EXECUTE_ON_MISSING_EVAL"
 RUN_TIMEOUT_ENV = "TRADINGAGENTS_ANALYSIS_RUN_TIMEOUT"
 PRESET_ENV = "TRADINGAGENTS_ANALYSIS_PRESET"
+#: specs/llm-cost.md R2 — unset keeps the legacy single-provider behavior
+#: (the analysis LLM comes from the inherited env, the ledger preset from
+#: TRADINGAGENTS_ANALYSIS_PRESET).
+LLM_ROUTING_ENV = "TRADINGAGENTS_LLM_ROUTING"
+ANTHROPIC_BUDGET_ENV = "TRADINGAGENTS_ANTHROPIC_MONTHLY_BUDGET_USD"
 
 _AB_PAIRING_CHOICES = ("off", "paired")
 
@@ -119,10 +139,18 @@ class RunnerSettings:
     run_timeout_seconds: float = 1800.0
     preset: str = "default"
     analysis_job_concurrency: int = 2
+    llm_routing: str | None = None
+    anthropic_monthly_budget_usd: float = DEFAULT_ANTHROPIC_MONTHLY_BUDGET_USD
 
     def __post_init__(self) -> None:
         if self.analysis_job_concurrency <= 0:
             raise ValueError("analysis_job_concurrency must be greater than zero")
+        if self.llm_routing is not None and self.llm_routing not in ROUTING_CHOICES:
+            raise ValueError(
+                f"llm_routing {self.llm_routing!r} — expected one of {ROUTING_CHOICES}"
+            )
+        if not self.anthropic_monthly_budget_usd >= 0:
+            raise ValueError("anthropic_monthly_budget_usd must be >= 0")
         if self.ab_pairing not in _AB_PAIRING_CHOICES:
             raise ValueError(
                 f"ab_pairing {self.ab_pairing!r} — expected one of {_AB_PAIRING_CHOICES}"
@@ -154,6 +182,10 @@ def load_settings(
         in {"1", "true", "yes", "on"},
         run_timeout_seconds=float(raw(RUN_TIMEOUT_ENV) or defaults.run_timeout_seconds),
         preset=preset_override or raw(PRESET_ENV) or defaults.preset,
+        llm_routing=raw(LLM_ROUTING_ENV).lower() or None,
+        anthropic_monthly_budget_usd=float(
+            raw(ANTHROPIC_BUDGET_ENV) or defaults.anthropic_monthly_budget_usd
+        ),
     )
 
 
@@ -734,10 +766,13 @@ _GRAPH_CONFIG_KEYS = (
     "google_thinking_level",
     "openai_reasoning_effort",
     "anthropic_effort",
+    "anthropic_deep_effort",
+    "anthropic_quick_effort",
+    "deepseek_quick_thinking",
 )
 
 
-def effective_analysis_config() -> dict:
+def effective_analysis_config(env_overrides: Mapping[str, str] | None = None) -> dict:
     """The analysis-side effective configuration (config-digest input).
 
     Covers what actually differentiates analysis runs: the graph's resolved
@@ -752,10 +787,21 @@ def effective_analysis_config() -> dict:
         POSITION_MAINTAIN_INSTRUCTIONS,
         TRADE_PLAN_INSTRUCTIONS,
     )
-    from tradingagents.default_config import DEFAULT_CONFIG
+    from tradingagents.default_config import DEFAULT_CONFIG, _apply_env_overrides
 
+    graph_config = DEFAULT_CONFIG
+    if env_overrides:
+        # The config a child with this profile overlay resolves (llm-cost R2).
+        # An empty override CLEARS an inherited knob (the child then sees the
+        # shipped default, None for every key a profile clears).
+        from tradingagents.default_config import _ENV_OVERRIDES
+
+        graph_config = _apply_env_overrides(dict(DEFAULT_CONFIG), {**os.environ, **env_overrides})
+        for env_var, value in env_overrides.items():
+            if value == "" and env_var in _ENV_OVERRIDES:
+                graph_config[_ENV_OVERRIDES[env_var]] = None
     return {
-        "graph": {key: DEFAULT_CONFIG.get(key) for key in _GRAPH_CONFIG_KEYS},
+        "graph": {key: graph_config.get(key) for key in _GRAPH_CONFIG_KEYS},
         "prompt_templates": {
             "trader.trade_plan_instructions": sha256_text(TRADE_PLAN_INSTRUCTIONS),
             "trader.position_maintain_instructions": sha256_text(POSITION_MAINTAIN_INSTRUCTIONS),
@@ -890,6 +936,8 @@ class ChildSpec:
     arm: Arm
     withhold_ticker_brief: bool = False
     position_context: str | None = None
+    #: The routed profile's env overlay (llm-cost R2); empty = inherited env.
+    env: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -897,6 +945,9 @@ class ChildResult:
     returncode: int
     payload: dict | None = None
     error: str | None = None
+    #: Per-model token usage (completed runs: from the payload; failed runs:
+    #: the child's usage line), or None when nothing was reported.
+    usage: dict | None = None
 
 
 ChildRunner = Callable[[ChildSpec, float], ChildResult]
@@ -942,6 +993,67 @@ def _extract_result_payload(stdout: str) -> dict | None:
     return None
 
 
+def _extract_usage(stdout: str) -> dict | None:
+    """A failed child's usage line (``pipeline.run_one.USAGE_SENTINEL``)."""
+    for line in reversed(stdout.splitlines()):
+        index = line.rfind(USAGE_SENTINEL)
+        if index < 0:
+            continue
+        try:
+            usage, _end = json.JSONDecoder().raw_decode(line[index + len(USAGE_SENTINEL):].lstrip())
+        except json.JSONDecodeError:
+            return None
+        return usage if isinstance(usage, dict) else None
+    return None
+
+
+class _LlmRouter:
+    """Per-job profile choice + per-profile config digests (llm-cost R2).
+
+    Thread-safe: jobs run concurrently; each job asks for a profile right
+    before its first child starts (both arms of a pair share it), so a run
+    never mixes providers and the budget is re-read for every job."""
+
+    def __init__(
+        self,
+        config: PipelineConfig,
+        settings: RunnerSettings,
+        clock: Callable[[], datetime],
+    ) -> None:
+        self.config = config
+        self.settings = settings
+        self.clock = clock
+        self._lock = threading.Lock()
+        self._digests: dict[str, str] = {}
+        self.last_decision: RoutingDecision | None = None
+
+    def choose(self) -> RoutingDecision:
+        decision = choose_profile(
+            self.config.state_dir,
+            self.settings.llm_routing,
+            self.settings.anthropic_monthly_budget_usd,
+            self.clock(),
+        )
+        with self._lock:
+            self.last_decision = decision
+        return decision
+
+    def digest(self, profile: Profile) -> str:
+        with self._lock:
+            cached = self._digests.get(profile.name)
+            if cached is None:
+                cached = write_config_digest(
+                    self.config.ledger_dir,
+                    replace(self.settings, preset=profile.name),
+                    effective_analysis_config(profile.env),
+                )
+                self._digests[profile.name] = cached
+            return cached
+
+    def month_spend(self) -> float:
+        return month_spend(self.config.state_dir, self.clock().strftime("%Y-%m"), "anthropic")
+
+
 def make_child_runner(config: PipelineConfig) -> ChildRunner:
     """Default child boundary: one ``pipeline.run_one`` subprocess per run.
 
@@ -970,7 +1082,7 @@ def make_child_runner(config: PipelineConfig) -> ChildRunner:
             argv.append("--withhold-ticker-brief")
         if spec.position_context:
             argv.extend(["--position-context", spec.position_context])
-        env = {**os.environ, **base_env}
+        env = {**os.environ, **base_env, **dict(spec.env)}
         try:
             proc = subprocess.Popen(
                 argv,
@@ -987,15 +1099,22 @@ def make_child_runner(config: PipelineConfig) -> ChildRunner:
         except subprocess.TimeoutExpired:
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.killpg(proc.pid, signal.SIGKILL)
-            proc.communicate()  # reap + drain after the group kill
-            return ChildResult(-1, None, f"run timed out after {int(timeout)}s")
+            stdout, _stderr = proc.communicate()  # reap + drain after the group kill
+            # The child streams its running usage after every LLM call, so a
+            # killed run still reports what it spent (llm-cost R1).
+            return ChildResult(
+                -1, None, f"run timed out after {int(timeout)}s", _extract_usage(stdout)
+            )
         if proc.returncode != 0:
             reason = _last_nonempty_line(stderr) or f"exit {proc.returncode}"
-            return ChildResult(proc.returncode, None, reason[:300])
+            return ChildResult(proc.returncode, None, reason[:300], _extract_usage(stdout))
         payload = _extract_result_payload(stdout)
         if payload is None:
-            return ChildResult(0, None, "child exited 0 without a parseable result line")
-        return ChildResult(0, payload)
+            return ChildResult(
+                0, None, "child exited 0 without a parseable result line", _extract_usage(stdout)
+            )
+        usage = payload.get("usage")
+        return ChildResult(0, payload, usage=usage if isinstance(usage, dict) else None)
 
     return run
 
@@ -1223,6 +1342,7 @@ def _run_job(
     digest: str,
     positions: PositionsSnapshot | None,
     log_path: Path,
+    router: _LlmRouter | None = None,
 ) -> JobOutcome:
     """Run one complete ticker job without letting one worker abort the slot."""
     outcome = JobOutcome()
@@ -1243,6 +1363,7 @@ def _run_job(
             positions=positions,
             log_path=log_path,
             outcome=outcome,
+            router=router,
         )
     except Exception as exc:
         error = f"job worker raised: {_one_line(exc)}"
@@ -1267,6 +1388,7 @@ def _run_job_impl(
     positions: PositionsSnapshot | None,
     log_path: Path,
     outcome: JobOutcome,
+    router: _LlmRouter | None = None,
 ) -> JobOutcome:
     """Run one ticker's arms sequentially and append each row immediately."""
     records = outcome.records
@@ -1293,7 +1415,17 @@ def _run_job_impl(
         job_flags.append("ticker-eval-fail-withheld")
     context = position_context_for(positions, job.ticker, slot_date)
     pair_id: str | None = None  # minted under flock with the pair's first row
+    # llm-cost R2: one profile per JOB, so both arms of a pair run on the same
+    # provider (the A/B contrast is the information source, not the model);
+    # it only changes when Anthropic reports the credits gone.
+    profile: Profile | None = router.choose().profile if router is not None else None
+    # Profiles the job's earlier arms actually ran on: a pair is split only
+    # when a later arm runs on a different one (credit exhaustion mid-pair).
+    ran_profiles: set[str] = set()
     for arm_index, arm in enumerate(job.arms):
+        # Resolved before the child spends anything: a snapshot write failure
+        # must fail the run before tokens are billed, not after.
+        run_digest = router.digest(profile) if router is not None and profile is not None else digest
         spec = ChildSpec(
             ticker=job.ticker,
             date=date_iso,
@@ -1301,6 +1433,7 @@ def _run_job_impl(
             arm=arm,
             withhold_ticker_brief=withhold and arm == "brief",
             position_context=context,
+            env=tuple(sorted(profile.env.items())) if profile is not None else (),
         )
         logger.info(
             "run %s %s arm=%s trigger=%s%s",
@@ -1314,6 +1447,29 @@ def _run_job_impl(
             result = child_runner(spec, settings.run_timeout_seconds)
         except Exception as exc:  # R3: the slot never aborts on one ticker
             result = ChildResult(-1, None, f"child runner raised: {exc}")
+        if (
+            profile is not None
+            and profile.provider == "anthropic"
+            and result.returncode != 0
+            and is_credit_exhausted_error(result.error)
+        ):
+            # llm-cost R2: the credits are gone — mark the month and rerun
+            # this run once on DeepSeek; only the final result is recorded.
+            month = clock().strftime("%Y-%m")
+            mark_exhausted(config.state_dir, month, result.error or "credit balance too low")
+            logger.warning("%s: anthropic credits exhausted — retrying on deepseek", job.ticker)
+            append_usage(
+                config.state_dir, run_id=None, date=date_iso, session=session,
+                ticker=job.ticker, arm=arm, profile=profile.name,
+                models=result.usage or {}, error=result.error, clock=clock,
+            )
+            profile = DEEPSEEK  # also for the job's remaining arms
+            run_digest = router.digest(profile)
+            spec = replace(spec, env=tuple(sorted(profile.env.items())))
+            try:
+                result = child_runner(spec, settings.run_timeout_seconds)
+            except Exception as exc:
+                result = ChildResult(-1, None, f"child runner raised: {exc}")
 
         try:
             decided_at = to_utc_iso(clock())
@@ -1361,6 +1517,12 @@ def _run_job_impl(
             logger.warning("run failed for %s (%s arm): %s", job.ticker, arm, error)
 
         run_flags = list(job_flags)
+        if profile is not None:
+            if ran_profiles - {profile.name}:
+                # An earlier arm ran on another provider: this pair mixes
+                # providers and is not an A/B contrast of information sources.
+                run_flags.append("llm-profile-switched")
+            ran_profiles.add(profile.name)
         if arm == "brief":
             run_flags += _revision_drift_flags(fresh_macro, None if withhold else fresh_ticker)
         fields = {
@@ -1369,7 +1531,7 @@ def _run_job_impl(
             "session": session,
             "ticker": job.ticker,
             "arm": arm,
-            "preset": settings.preset,
+            "preset": profile.name if profile is not None else settings.preset,
             "trigger": job.trigger,
             "catalyst_score": job.catalyst_score,
             "macro_eval_verdict": fresh_macro.verdict,
@@ -1380,7 +1542,7 @@ def _run_job_impl(
                     fresh_ticker.ref if arm == "brief" and not withhold else None
                 ),
                 "pool": pool_ref,
-                "config_digest": digest,
+                "config_digest": run_digest,
             },
             "decided_at": decided_at,
             "decision": decision,
@@ -1401,6 +1563,13 @@ def _run_job_impl(
             records.append(record)
             if job.paired:
                 pair_id = record.pair_id
+        usage_line = append_usage(
+            config.state_dir,
+            run_id=record.run_id if record is not None else None,
+            date=date_iso, session=session, ticker=job.ticker, arm=arm,
+            profile=profile.name if profile is not None else settings.preset,
+            models=result.usage or {}, error=error, clock=clock,
+        )
         if violations:
             logger.warning(
                 "plan invalid for %s (%s): %s",
@@ -1440,6 +1609,8 @@ def _run_job_impl(
             "violations": violations or None,
             "pm_rating": pm_rating,
             "repair_used": repair_used,
+            "profile": profile.name if profile is not None else None,
+            "cost_usd": usage_line["cost_usd"] if usage_line else None,
             "flags": run_flags or None,
             "execute_eligible": (
                 record is not None  # no ledger row ⇒ nothing to join/execute
@@ -1540,7 +1711,8 @@ def run_slot(
         if events is not None:
             _emit_trigger_funnel(events, jobs, untriggered, skipped, dropped)
 
-    digest = write_config_digest(config.ledger_dir, settings)
+    router = _LlmRouter(config, settings, clock) if settings.llm_routing else None
+    digest = write_config_digest(config.ledger_dir, settings) if router is None else ""
     positions = load_positions(config.ledger_dir)
     log_path = config.state_dir / RUNNER_LOG_NAME
 
@@ -1565,6 +1737,7 @@ def run_slot(
                     digest=digest,
                     positions=positions,
                     log_path=log_path,
+                    router=router,
                 ): (index, job)
                 for index, job in enumerate(jobs)
             }
@@ -1604,6 +1777,18 @@ def run_slot(
         "dropped": dropped,
         "run_ids": [line["run_id"] for line in run_lines if line["run_id"]],
     }
+    if router is not None:
+        profiles: dict[str, int] = {}
+        for line in run_lines:
+            if line.get("profile"):
+                profiles[line["profile"]] = profiles.get(line["profile"], 0) + 1
+        summary["llm"] = {
+            "routing": settings.llm_routing,
+            "profiles": profiles,
+            "cost_usd": round(sum(line.get("cost_usd") or 0.0 for line in run_lines), 4),
+            "anthropic_month_usd": round(router.month_spend(), 2),
+            "anthropic_budget_usd": settings.anthropic_monthly_budget_usd,
+        }
     return SlotOutcome(summary=summary, records=records)
 
 
