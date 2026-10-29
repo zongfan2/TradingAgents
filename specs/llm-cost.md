@@ -1,7 +1,7 @@
 # Spec: LLM cost — usage ledger, Claude-first routing, run-volume cuts
 
-**Builder**: Claude Code · **Status**: Draft (2026-10-29; user decisions
-recorded below) · Contracts: new `llm_usage.jsonl` line schema (this spec);
+**Builder**: Claude Code · **Status**: Phase 1 implemented (R1–R4,
+2026-10-29; user decisions recorded below), Phases 2–3 open · Contracts: new `llm_usage.jsonl` line schema (this spec);
 the decision ledger is unchanged (`preset` already names the run's profile).
 Changes upstream agent behavior (DeepSeek thinking, prompt order) — this
 spec is the authorization AGENTS.md requires.
@@ -148,9 +148,13 @@ caches common prefixes automatically. Behavior is otherwise unchanged
 
 ## Rollout
 
-1. Phase 1: R1 + R2 + R3 (+ the A/B summary, then `AB_PAIRING=off`).
+1. Phase 1: R1 + R2 + R3 + R4 (R4 is part of the `deepseek` profile), the
+   A/B summary, then `AB_PAIRING=off` (done 2026-10-29). Verified live: Opus
+   5.5 returns a `PortfolioDecision` via `json_schema`; Haiku 5.5 accepts
+   effort `low`; `deepseek-flash` with thinking disabled reports 0
+   reasoning tokens (33 vs 65 output tokens on the same one-line prompt).
 2. Phase 2: R6.
-3. Phase 3: R4 + R5, measured with R1.
+3. Phase 3: R5, measured with R1.
 
 Each phase: deterministic gate + Claude review (trading decisions' model
 and inputs change; new ledger; scheduling of runs).
