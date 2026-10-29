@@ -157,6 +157,9 @@ class UsageCallback(BaseCallbackHandler):
         self.models: dict[str, dict[str, Any]] = {}
         self._stream = stream
         self._sentinel = sentinel
+        # One lock covers snapshot + write, so the LAST streamed line is
+        # always the latest total even when graph nodes run in parallel.
+        self._print_lock = threading.Lock()
 
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
         try:
@@ -167,9 +170,11 @@ class UsageCallback(BaseCallbackHandler):
                         continue
                     model, tokens = parsed
                     self._add(model or "unknown", tokens)
-            if self._stream is not None and self.models:
-                print(self._sentinel + json.dumps(self.summary(), ensure_ascii=False),
-                      file=self._stream, flush=True)
+            if self._stream is not None:
+                with self._print_lock:
+                    if self.models:
+                        print(self._sentinel + json.dumps(self.summary(), ensure_ascii=False),
+                              file=self._stream, flush=True)
         except Exception as exc:  # accounting never fails a run
             logger.warning("usage accounting skipped a call: %s", exc)
 

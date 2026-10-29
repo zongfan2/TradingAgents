@@ -458,3 +458,50 @@ def test_credit_exhaustion_mid_pair_is_flagged(tmp_path):
     flags = {line["arm"]: line["flags"] or [] for line in emitted}
     assert "llm-profile-switched" in flags["feeds"]
     assert "llm-profile-switched" not in flags["brief"]
+
+
+@pytest.mark.unit
+def test_first_arm_credit_exhaustion_keeps_an_unsplit_pair_unflagged(tmp_path):
+    """Review ba019fd: a switch on the FIRST arm leaves both arms on DeepSeek
+    — a valid pair, so no split flag."""
+    config = make_config(tmp_path)
+    write_pool(config, "us", SLOT, core=("AAA",))
+    macro = write_brief(config.macro_brief_dir / "2026-08-07.us.md")
+    write_eval(macro, "pass")
+    settings = ar.RunnerSettings(ab_pairing="paired", ab_core_pairs_per_slot=1,
+                                 llm_routing="claude-first", analysis_job_concurrency=1)
+    _, emitted = run(config, make_resolvers(macro), UsageChild(credit_error=True), settings=settings)
+    assert {r.preset for r in read_records(config)} == {"deepseek"}
+    assert all("llm-profile-switched" not in (line["flags"] or []) for line in emitted)
+
+
+@pytest.mark.unit
+def test_streamed_total_is_never_stale_under_concurrency():
+    """Review ba019fd: the last streamed line is always the latest total."""
+    import threading
+    import time
+
+    class SlowStream:
+        def __init__(self):
+            self.lines = []
+
+        def write(self, text):
+            time.sleep(0.001)
+            self.lines.append(text)
+
+        def flush(self):
+            pass
+
+    stream = SlowStream()
+    cb = UsageCallback(stream=stream, sentinel="TAG ")
+    message = AIMessage(content="x", usage_metadata={"input_tokens": 1, "output_tokens": 1,
+                                                     "total_tokens": 2},
+                        response_metadata={"model_name": "claude-haiku-5-5"})
+    threads = [threading.Thread(target=lambda: [cb.on_llm_end(_result(message)) for _ in range(5)])
+               for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    last = [line for line in stream.lines if line.startswith("TAG ")][-1]
+    assert json.loads(last[4:])["claude-haiku-5-5"]["calls"] == 40

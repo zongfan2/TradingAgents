@@ -92,8 +92,9 @@ The user also has **$200/month of Anthropic credits** to use before DeepSeek.
   `~/.tradingagents/llm_budget/<YYYY-MM>.exhausted` (atomic; its existence is
   the state) and that run is rerun once on `deepseek` (as are the job's
   remaining arms). This is the one way a pair can split across providers
-  (first arm on Claude, second on DeepSeek): those runs carry the flag
-  `llm-profile-switched`, and the pair's rows have different `preset`s, so
+  (first arm on Claude, second on DeepSeek): the later arm's run carries the
+  flag `llm-profile-switched` (only when an earlier arm of the job really ran
+  on another profile — a switch on the first arm keeps the pair on DeepSeek), and the pair's rows have different `preset`s, so
   a per-preset A/B aggregate never counts it as a complete pair. Only the final result is written to the decision ledger;
   the failed Claude attempt appears only in `llm_usage.jsonl` (`run_id`
   null). Other errors are not retried here.

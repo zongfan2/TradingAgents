@@ -1419,7 +1419,9 @@ def _run_job_impl(
     # provider (the A/B contrast is the information source, not the model);
     # it only changes when Anthropic reports the credits gone.
     profile: Profile | None = router.choose().profile if router is not None else None
-    switched_profile = False  # a credit-exhausted rerun moved this job to DeepSeek
+    # Profiles the job's earlier arms actually ran on: a pair is split only
+    # when a later arm runs on a different one (credit exhaustion mid-pair).
+    ran_profiles: set[str] = set()
     for arm_index, arm in enumerate(job.arms):
         # Resolved before the child spends anything: a snapshot write failure
         # must fail the run before tokens are billed, not after.
@@ -1462,7 +1464,6 @@ def _run_job_impl(
                 models=result.usage or {}, error=result.error, clock=clock,
             )
             profile = DEEPSEEK  # also for the job's remaining arms
-            switched_profile = True
             run_digest = router.digest(profile)
             spec = replace(spec, env=tuple(sorted(profile.env.items())))
             try:
@@ -1516,10 +1517,12 @@ def _run_job_impl(
             logger.warning("run failed for %s (%s arm): %s", job.ticker, arm, error)
 
         run_flags = list(job_flags)
-        if switched_profile:
-            # Arms before the switch ran on Claude: a pair with this flag mixes
-            # providers and is not an A/B contrast of information sources.
-            run_flags.append("llm-profile-switched")
+        if profile is not None:
+            if ran_profiles - {profile.name}:
+                # An earlier arm ran on another provider: this pair mixes
+                # providers and is not an A/B contrast of information sources.
+                run_flags.append("llm-profile-switched")
+            ran_profiles.add(profile.name)
         if arm == "brief":
             run_flags += _revision_drift_flags(fresh_macro, None if withhold else fresh_ticker)
         fields = {
