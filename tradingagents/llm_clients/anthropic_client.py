@@ -20,22 +20,37 @@ _EFFORT_EXACT = {
     "claude-mythos-preview",  # non-standard preview name; effort-capable
     "claude-mythos-5",        # Fable 5 twin (Project Glasswing); effort-capable
 }
-_EFFORT_MODEL = re.compile(r"^claude-(opus|sonnet|fable)-(\d+)(?:-(\d+))?$")
-_EFFORT_MIN_VERSION = {"opus": (4, 5), "sonnet": (4, 6), "fable": (5, 0)}
+_EFFORT_MODEL = re.compile(r"^claude-(opus|sonnet|fable|haiku)-(\d+)(?:-(\d+))?$")
+# Haiku 5.5 takes ``effort`` (default medium); earlier Haiku versions 400.
+_EFFORT_MIN_VERSION = {"opus": (4, 5), "sonnet": (4, 6), "fable": (5, 0), "haiku": (5, 5)}
+# Models that reject a forced ``tool_choice`` (``any``/``tool``) with a 400:
+# Opus 5.5+, Sonnet 5.5+, Fable 5.1+. langchain-anthropic's default
+# structured-output method forces the tool, so these use native structured
+# output (``json_schema``) instead (specs/llm-cost.md R3).
+_NO_FORCED_TOOL_MIN_VERSION = {"opus": (5, 5), "sonnet": (5, 5), "fable": (5, 1)}
+
+
+def _model_version(model: str) -> tuple[str, tuple[int, int]] | None:
+    match = _EFFORT_MODEL.match(model.lower())
+    if not match:
+        return None
+    minor = int(match.group(3)) if match.group(3) else 0
+    return match.group(1), (int(match.group(2)), minor)
 
 
 def _supports_effort(model: str) -> bool:
     """Whether Anthropic accepts the ``effort`` parameter for this model."""
-    model_lc = model.lower()
-    if model_lc in _EFFORT_EXACT:
+    if model.lower() in _EFFORT_EXACT:
         return True
-    match = _EFFORT_MODEL.match(model_lc)
-    if not match:
+    parsed = _model_version(model)
+    return parsed is not None and parsed[1] >= _EFFORT_MIN_VERSION[parsed[0]]
+
+
+def _rejects_forced_tool_choice(model: str) -> bool:
+    parsed = _model_version(model)
+    if parsed is None or parsed[0] not in _NO_FORCED_TOOL_MIN_VERSION:
         return False
-    family = match.group(1)
-    major = int(match.group(2))
-    minor = int(match.group(3)) if match.group(3) else 0
-    return (major, minor) >= _EFFORT_MIN_VERSION[family]
+    return parsed[1] >= _NO_FORCED_TOOL_MIN_VERSION[parsed[0]]
 
 
 class NormalizedChatAnthropic(ChatAnthropic):
@@ -48,6 +63,13 @@ class NormalizedChatAnthropic(ChatAnthropic):
 
     def invoke(self, input, config=None, **kwargs):
         return normalize_content(super().invoke(input, config, **kwargs))
+
+    def with_structured_output(self, schema, *, include_raw=False, **kwargs):
+        # The default method forces tool_choice, a 400 on Opus/Sonnet 5.5 and
+        # Fable 5.1; the managers would then silently fall back to free text.
+        if "method" not in kwargs and _rejects_forced_tool_choice(self.model):
+            kwargs["method"] = "json_schema"
+        return super().with_structured_output(schema, include_raw=include_raw, **kwargs)
 
 
 class AnthropicClient(BaseLLMClient):
