@@ -38,7 +38,7 @@ specifies Flash for every model-assisted backup role without activating it.
 | [execution-adapter.md](execution-adapter.md) | Alpaca **paper** bracket orders, fail-closed guards | Claude Code | **Implemented** |
 | [orchestrator.md](orchestrator.md) | Per-session scheduling, ordering, settle job, status file, notifications | Claude Code | **Implemented** |
 | [webui-pages.md](webui-pages.md) | Status banner, pool/briefs views, A/B aggregates, halt toggle | Claude Code | **Implemented** |
-| [decision-funnel.md](decision-funnel.md) | Per-slot exclusion record (event log, snapshot, webui page) | Claude Code | **P1/P2 implemented** — P3 open |
+| [decision-funnel.md](decision-funnel.md) | Per-slot exclusion record (event log, snapshot, webui page) | Claude Code | **Implemented** (P1–P3) |
 
 ## System overview
 

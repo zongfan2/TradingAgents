@@ -249,9 +249,37 @@ slot_time + 1 h), **pool view** (all four lists, gate verdicts, a
 `carried_forward` warning badge), **briefs view** (macro + ticker briefs with
 eval verdicts and flagged claims), **A/B aggregates** (computed on demand from
 the ledger, never persisted), **decisions & orders** (decision rows joined
-with order state and outcomes). Its only two write actions: a manual analysis
+with order state and outcomes), **决策漏斗** (decision funnel: where every
+considered ticker stopped and why, per slot, plus cross-date statistics and a
+CSV export — specs/decision-funnel.md). Its only two write actions: a manual analysis
 trigger (`trigger: manual` — never auto-executed) and the `EXECUTION_HALT`
 toggle.
+
+**Read-only viewing over Tailscale** (phone / another machine, no SSH;
+decision-funnel R5). The tailnet URL can read every page but every write is
+refused (403), and Tailscale **Funnel** (public internet) traffic is refused
+outright — never run `tailscale funnel` for this port. One-time setup:
+
+1. Tailscale admin console → DNS: MagicDNS on, **HTTPS Certificates
+   enabled** (serve needs them).
+2. Add the server's tailnet name to the Host allowlist in `.env` (plain
+   hostname only — wildcards/ports are ignored):
+   `TRADINGAGENTS_WEBUI_ALLOWED_HOSTS=desktop-p5u8dva.tailc36a4b.ts.net`,
+   then restart the webui (it reads the value at start): stop the running
+   `uvicorn webui.server:app` process; the `pipeline.webui` task starts it
+   again within 10 minutes (or run the task by hand).
+3. On the Windows host (PowerShell, or from WSL via
+   `"/mnt/c/Program Files/Tailscale/tailscale.exe"`):
+   `tailscale serve --bg 8321` — proxies `https://desktop-p5u8dva.tailc36a4b.ts.net`
+   to `127.0.0.1:8321` (WSL localhost forwarding). Check with
+   `tailscale serve status`; remove with `tailscale serve reset`.
+4. Open `https://desktop-p5u8dva.tailc36a4b.ts.net/pipeline.html` on a device
+   in the tailnet: the header shows **只读** and the halt toggle and manual
+   trigger are hidden. Change state only through the SSH tunnel
+   (`http://localhost:8321`) or `touch ~/.tradingagents/EXECUTION_HALT`.
+
+Every device that can reach this node in the tailnet can read the pages
+(positions, decisions, briefs) — keep the tailnet ACLs to your own devices.
 
 ## 5. Dry-run ramp to paper execution
 

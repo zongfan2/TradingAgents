@@ -1,7 +1,7 @@
 # Spec: Decision funnel (per-slot exclusion record + webui page)
 
 **Builder**: Claude Code · **Status**: P1 implemented (2026-10-25; user
-signed off the plan), P2 implemented (2026-10-27), P3 open · Contracts: new `funnel` event (model:
+signed off the plan), P2 implemented (2026-10-27), P3 implemented (2026-10-29) · Contracts: new `funnel` event (model:
 `pipeline/contracts/funnel.py`) + snapshot schemas (this spec);
 reads pool, brief/eval, ledger and orders contracts unchanged.
 
@@ -188,29 +188,66 @@ stage is `unknown` exactly when its `code` is null.
 
 ### R4 — Webui page 6 "决策漏斗"
 
-- `GET /api/pipeline/funnel/dates`, `GET /api/pipeline/funnel/{session}?date=`,
-  `GET /api/pipeline/funnel/aggregate?session=&since=` (counts by
-  stage × code over dates; per-ticker exclusion frequency).
-- Page: date/session picker; context strip (macro, thresholds); stage counts
-  as a horizontal funnel; a table of tickers with stage reached, code,
-  reason, detail, provenance badge, filterable by stage/code; each row links
-  to the existing brief and decision views; CSV export of the table.
-- Read-only. Missing files render "not yet run" (webui R1).
+Implemented in `webui/server.py` + `webui/funnel_view.py` (pure functions)
++ `webui/static/pipeline.{html,js}`:
+
+- `GET /api/pipeline/funnel/dates` — snapshot dates per session, newest
+  first.
+- `GET /api/pipeline/funnel/{session}?date=` — one snapshot (default: the
+  latest), read with the contract's lenient reader; missing → `present:
+  false, message: "not yet run"`; unreadable/invalid → a message, never a
+  500. A malformed date is 422, an unknown session 404.
+- `GET /api/pipeline/funnel/aggregate?session=&since=&until=` — computed on
+  demand, never persisted: finals, stop counts by stage × code (an
+  unexplained stop counts under code `null`), per-date counts, and
+  per-ticker slots / exclusions / orders / most frequent stops.
+  Unreadable snapshots are listed under `skipped`, never fatal.
+- `GET /api/pipeline/funnel/{session}/csv?date=` — one row per ticker
+  (stop stage/code/reason/provenance and one `outcome:code` column per
+  stage); cells starting with `= + - @` are prefixed with `'` (CSV
+  injection: reasons are model-written text).
+- Page: session + date picker; context strip (macro verdict, pool date +
+  carried-forward / core-yaml fallback badges, thresholds with their
+  source, execute ran / not run / uncertain, event count); stage counts as
+  horizontal bars + final counts; a ticker table filterable by stop stage,
+  code, final and ticker, with provenance badges 记录/重建/未知; a row
+  expands to the per-stage trail (both arms) with links to the brief and
+  to the decisions page prefiltered to that date/session/ticker; CSV
+  export; a cross-date statistics card.
 
 ### R5 — Remote viewing over Tailscale (no public exposure)
 
-The server is already in the user's tailnet (`desktop-p5u8dva.tailc36a4b.ts.net`).
-`tailscale serve` proxies a tailnet-only URL to `127.0.0.1:8321`:
+The server is in the user's tailnet (`desktop-p5u8dva.tailc36a4b.ts.net`);
+`tailscale serve` (on the Windows host) proxies a tailnet-only HTTPS URL to
+`127.0.0.1:8321` (WSL localhost forwarding). Tailscale's serve proxy
+preserves the client's `Host`, overwrites `X-Forwarded-For` /
+`X-Forwarded-Host`, strips client-sent `Tailscale-User-*` headers and sets
+its own, and marks Funnel traffic with `Tailscale-Funnel-Request`
+(ipn/ipnlocal/serve.go, see Prior art). Therefore:
 
-- New env `TRADINGAGENTS_WEBUI_ALLOWED_HOSTS` adds the tailnet name to the
-  Host allowlist (webui R4).
-- **Write endpoints** (POST: halt toggle, manual trigger, config) accept only
-  loopback Host names, so the tailnet URL is read-only; the halt switch
-  stays reachable via `ssh dev`.
+- `TRADINGAGENTS_WEBUI_ALLOWED_HOSTS` (process env, else the repo `.env`,
+  read at server start) adds plain hostnames to the Host allowlist;
+  wildcards, ports, schemes and paths are skipped with a warning. A
+  foreign Host is still 400 (TrustedHost runs first).
+- A request is **local** only with a loopback `Host` **and** no forwarding
+  header (`X-Forwarded-For`, `X-Forwarded-Host`, `Forwarded`, `X-Real-IP`,
+  `Tailscale-User-*` (prefix), `Tailscale-Headers-Info`,
+  `Tailscale-App-Capabilities`) — the Host alone never
+  proves it, since a tailnet client can send `Host: localhost` through
+  serve. Every non-GET/HEAD/OPTIONS request that is not local is 403, so
+  the tailnet URL is read-only: halt toggle, manual trigger, settings and
+  analyze stay loopback-only (the halt switch remains reachable via the
+  SSH tunnel or `touch ~/.tradingagents/EXECUTION_HALT`).
+- Any request with `Tailscale-Funnel-Request` is 403 — the pipeline is
+  never served to the public internet, even if Funnel is turned on by
+  mistake.
+- `GET /api/pipeline/access` tells the page whether writes are allowed;
+  the page hides the halt toggle and the manual trigger and shows 只读
+  when not.
 - Works from a phone with the Tailscale app; the SSH tunnel keeps working.
-- AWS is not needed. A public, no-Tailscale link would mean publishing a
-  read-only static export (S3 + CloudFront + auth); out of scope unless
-  asked.
+  AWS is not needed.
+- Operator steps (enable HTTPS certificates for the tailnet, `tailscale
+  serve --bg`, set the env, restart the webui task): RUNBOOK §4 ("Read-only viewing over Tailscale").
 
 ## Prior art (specs/README.md rule 6)
 
@@ -224,9 +261,32 @@ The server is already in the user's tailnet (`desktop-p5u8dva.tailc36a4b.ts.net`
   `load_decision_records`, `non_candidate_reason`, `current_outcomes`,
   `read_core_yaml`), no external integration or dependency. No survey was
   done; none is claimed.
-- **P3 (R5 Tailscale serve)** is an external integration: survey prior art
-  (Tailscale's own serve/funnel docs and 2–3 maintained projects exposing a
-  loopback app over a tailnet) and record it here before P3 is built.
+- **P3 (R4 page)** reuses the webui's own vanilla-JS page pattern; no new
+  dependency.
+- **P3 (R5 Tailscale serve)** — surveyed 2026-10-29; no code copied (the
+  design is taken, nothing else):
+  - Tailscale itself — https://github.com/tailscale/tailscale @ `7304dd42c15f`
+    (serve.go last changed `3a38840ccc77`), BSD-3-Clause; docs
+    https://tailscale.com/kb/1312/serve. Taken: serve is tailnet-only (Funnel
+    is the public variant, per port, last command wins); the reverse proxy
+    keeps `r.Out.Host = r.In.Host`, sets `X-Forwarded-Host`, overwrites
+    `X-Forwarded-For` with the peer address, deletes client-sent
+    `Tailscale-User-Login/-Name/-Profile-Pic`, `Tailscale-Funnel-Request`,
+    `Tailscale-Headers-Info` before setting its own, and adds
+    `Tailscale-Funnel-Request: ?1` on Funnel traffic. Known issue avoided:
+    because Host is passed through, Host-based loopback checks alone are
+    spoofable through serve — hence the forwarding-header rule above.
+    Identity headers are absent for tagged nodes, so they are not used for
+    authorization, only displayed.
+  - Open WebUI — https://github.com/open-webui/open-webui @ `f7ac7ee10962`,
+    custom license (NOASSERTION; nothing copied); its Tailscale SSO guide
+    trusts `Tailscale-User-Login` only with the backend bound to
+    localhost. Taken: keep the bind on 127.0.0.1 so only serve can add the
+    headers.
+  - TSDProxy — https://github.com/almeidapaulopt/tsdproxy @ `cc0c124946d2`,
+    MIT. Exposes containers as tailnet nodes via tsnet; not used: one
+    loopback app needs no extra node or dependency — the official CLI's
+    serve is enough.
 
 ## Rollout
 

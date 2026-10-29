@@ -1,4 +1,5 @@
-/* TradingAgents Pipeline dashboard (specs/webui-pages.md pages 1-5).
+/* TradingAgents Pipeline dashboard (specs/webui-pages.md pages 1-5, page 6:
+   specs/decision-funnel.md R4).
    Vanilla JS, renders exclusively from the local /api/pipeline/* endpoints.
    The markdown helpers are copied from app.js (each page's script is
    standalone: app.js boots the trading SPA and would crash on this DOM). */
@@ -420,9 +421,203 @@ function pollTrigger(id) {
   }, 3000);
 }
 
+/* ---------------- page 6: decision funnel (read-only) ---------------- */
+const STAGES = ["nominate", "pool", "collect", "evaluate", "trigger", "decide", "execute"];
+const STAGE_LABEL = {
+  nominate: "提名", pool: "股票池", collect: "简报采集", evaluate: "简报评估",
+  trigger: "触发", decide: "决策", execute: "执行",
+};
+const FINAL_LABEL = {
+  "order-live": "实盘下单", "order-dry": "模拟下单", excluded: "排除",
+  pending: "待执行", unknown: "未知",
+};
+const PROV = {
+  recorded: ["st-ok", "记录"], reconstructed: ["st-warn", "重建"], unknown: ["st-skipped", "未知"],
+};
+const OUTCOME_LABEL = { passed: "通过", excluded: "排除", info: "信息" };
+let funnelSession = "us";
+let funnelSnap = null;
+
+function finalBadge(f) { return `<span class="badge fin-${esc(f)}">${esc(FINAL_LABEL[f] || f)}</span>`; }
+function provBadge(p) {
+  const [cls, label] = PROV[p] || ["st-unknown", p];
+  return `<span class="badge ${cls}">${esc(label)}</span>`;
+}
+function codeText(code) { return code == null ? "（未记录）" : code; }
+
+async function loadFunnel() {
+  let dates;
+  try { dates = (await api("/api/pipeline/funnel/dates")).dates[funnelSession] || []; }
+  catch (e) { $("#funnelTable").innerHTML = emptyCard(`读取失败：${e.message}`); return; }
+  const sel = $("#funnelDate");
+  const keep = dates.includes(sel.value) ? sel.value : dates[0];
+  sel.innerHTML = dates.map((d) => `<option ${d === keep ? "selected" : ""}>${esc(d)}</option>`).join("");
+  if (!$("#faSince").value && dates.length) $("#faSince").value = dates[dates.length - 1];
+  await loadFunnelSnapshot();
+}
+
+async function loadFunnelSnapshot() {
+  const day = $("#funnelDate").value;
+  funnelSnap = null;
+  ["#funnelContext", "#funnelBars", "#funnelTable"].forEach((id) => { $(id).innerHTML = ""; });
+  $("#funnelCsv").hidden = true;
+  if (!day) { $("#funnelTable").innerHTML = emptyCard("not yet run — 尚无漏斗快照"); return; }
+  let res;
+  try { res = await api(`/api/pipeline/funnel/${funnelSession}?date=${encodeURIComponent(day)}`); }
+  catch (e) { $("#funnelTable").innerHTML = emptyCard(`读取失败：${e.message}`); return; }
+  if (!res.present) { $("#funnelTable").innerHTML = emptyCard(res.message || "not yet run"); return; }
+  funnelSnap = res.snapshot;
+  const csv = $("#funnelCsv");
+  csv.href = `/api/pipeline/funnel/${funnelSession}/csv?date=${encodeURIComponent(day)}`;
+  csv.hidden = false;
+  renderFunnelContext();
+  renderFunnelBars();
+  fillFunnelFilters();
+  renderFunnelTable();
+}
+
+function renderFunnelContext() {
+  const c = funnelSnap.context, t = c.thresholds, pool = c.pool;
+  const exec = c.execute_uncertain ? "不确定" : (c.execute_ran ? "已运行" : "未运行");
+  const parts = [
+    `宏观评估 ${verdictBadge(c.macro_verdict)}`,
+    `股票池 <b>${esc(pool.as_of_date || "无")}</b>${pool.carried_forward ? ' <span class="badge badge-warn">carried_forward</span>' : ""}${pool.core_fallback ? ' <span class="badge badge-warn">core.yaml 兜底</span>' : ""}`,
+    `触发阈值 <b>${esc(t.trigger)}</b>（${esc(t.source.trigger)}）`,
+    `入池/出池 <b>${esc(t.entry)} / ${esc(t.exit)}</b>`,
+    `上限 机会 <b>${esc(t.opportunity_cap)}</b> 观察 <b>${esc(t.watch_cap)}</b>`,
+    `执行 <b>${exec}</b>`,
+    `事件 <b>${esc(c.events)}</b> 条`,
+  ];
+  if (c.nomination_failed) parts.push(`<span class="badge badge-warn">提名失败：${esc(c.nomination_failed)}</span>`);
+  $("#funnelContext").innerHTML = parts.map((x) => `<span>${x}</span>`).join("");
+  $("#funnelMeta").textContent = `${funnelSnap.tickers.length} 只股票`;
+}
+
+function renderFunnelBars() {
+  const counts = funnelSnap.counts;
+  const max = Math.max(1, ...STAGES.map((s) => counts[s]));
+  const rows = STAGES.map((s) => `
+    <span>${esc(STAGE_LABEL[s])}</span>
+    <div class="funnel-bar" style="width:${(100 * counts[s] / max).toFixed(1)}%"></div>
+    <span class="mono">${esc(counts[s])}</span>`).join("");
+  const finals = Object.entries(counts.final)
+    .filter(([, n]) => n > 0)
+    .map(([f, n]) => `${finalBadge(f)} <span class="mono">${esc(n)}</span>`).join(" ");
+  $("#funnelBars").innerHTML = rows + `<div class="funnel-finals" style="grid-column:1/-1">${finals}</div>`;
+}
+
+function fillFunnelFilters() {
+  const stages = new Set(), codes = new Set(), finals = new Set();
+  for (const t of funnelSnap.tickers) {
+    finals.add(t.final);
+    if (t.stop) { stages.add(t.stop.stage); codes.add(codeText(t.stop.code)); }
+  }
+  const fill = (id, label, values, fmt) => {
+    const el = $(id), cur = el.value;
+    el.innerHTML = `<option value="">${label}</option>` + [...values].sort()
+      .map((v) => `<option value="${esc(v)}" ${v === cur ? "selected" : ""}>${esc(fmt(v))}</option>`).join("");
+  };
+  fill("#ffStage", "停止阶段（全部）", stages, (v) => STAGE_LABEL[v] || v);
+  fill("#ffCode", "原因代码（全部）", codes, (v) => v);
+  fill("#ffFinal", "最终结果（全部）", finals, (v) => FINAL_LABEL[v] || v);
+}
+
+function renderFunnelTable() {
+  if (!funnelSnap) return;
+  const fs = $("#ffStage").value, fc = $("#ffCode").value, ff = $("#ffFinal").value;
+  const ft = $("#ffTicker").value.trim().toUpperCase();
+  const rows = funnelSnap.tickers.filter((t) =>
+    (!fs || (t.stop && t.stop.stage === fs)) &&
+    (!fc || (t.stop && codeText(t.stop.code) === fc)) &&
+    (!ff || t.final === ff) &&
+    (!ft || t.ticker.toUpperCase().includes(ft)));
+  if (!rows.length) { $("#funnelTable").innerHTML = emptyCard("没有符合条件的股票"); return; }
+  const body = rows.map((t) => {
+    const stop = t.stop;
+    return `<tr class="funnel-row" data-ticker="${esc(t.ticker)}">
+      <td class="mono">${esc(t.ticker)}</td>
+      <td>${esc(t.layer || "—")}</td>
+      <td>${esc(STAGE_LABEL[t.furthest_stage] || "—")}</td>
+      <td>${finalBadge(t.final)}</td>
+      <td>${stop ? esc(STAGE_LABEL[stop.stage] || stop.stage) : "—"}</td>
+      <td class="mono">${stop ? esc(codeText(stop.code)) : "—"}</td>
+      <td class="reason">${stop ? esc(stop.reason || "") : ""}</td>
+      <td>${stop ? provBadge(stop.provenance) : t.provenance.map(provBadge).join(" ")}</td>
+    </tr>`;
+  }).join("");
+  $("#funnelTable").innerHTML = `<table class="ptable"><thead><tr>
+    <th>Ticker</th><th>层</th><th>最远阶段</th><th>结果</th><th>停止阶段</th><th>代码</th><th>原因</th><th>来源</th>
+    </tr></thead><tbody>${body}</tbody></table>`;
+}
+
+function trailHtml(t) {
+  const rows = STAGES.filter((s) => t.stages[s]).map((s) => {
+    const e = t.stages[s];
+    const arms = (e.events || []).length > 1
+      ? `<div class="run-meta">${e.events.map((ev) =>
+          `${esc((ev.details && ev.details.arm) || "")} ${esc(OUTCOME_LABEL[ev.outcome] || ev.outcome)} ${esc(codeText(ev.code))}`).join(" · ")}</div>`
+      : "";
+    return `<tr><td>${esc(STAGE_LABEL[s])}</td><td>${esc(OUTCOME_LABEL[e.outcome] || e.outcome)}</td>
+      <td class="mono">${esc(codeText(e.code))}</td><td class="reason">${esc(e.reason || "")}${arms}</td>
+      <td>${provBadge(e.provenance)}</td></tr>`;
+  }).join("");
+  const day = funnelSnap.date;
+  return `<td colspan="8"><table>${rows}</table>
+    <button class="link-btn" data-brief="${esc(t.ticker)}/${esc(day)}.md">查看简报</button>
+    <button class="link-btn" data-decisions="${esc(t.ticker)}">查看决策与订单</button></td>`;
+}
+
+function toggleTrail(row) {
+  const next = row.nextElementSibling;
+  if (next && next.classList.contains("funnel-trail")) { next.remove(); return; }
+  const t = funnelSnap.tickers.find((x) => x.ticker === row.dataset.ticker);
+  if (!t) return;
+  const tr = document.createElement("tr");
+  tr.className = "funnel-trail";
+  tr.innerHTML = trailHtml(t);
+  row.after(tr);
+}
+
+async function loadFunnelAgg() {
+  const q = new URLSearchParams({ session: funnelSession });
+  if ($("#faSince").value) q.set("since", $("#faSince").value);
+  if ($("#faUntil").value) q.set("until", $("#faUntil").value);
+  let a;
+  try { a = await api(`/api/pipeline/funnel/aggregate?${q}`); }
+  catch (e) { $("#funnelAgg").innerHTML = emptyCard(`统计失败：${e.message}`); return; }
+  if (!a.slots) { $("#funnelAgg").innerHTML = emptyCard("区间内没有快照"); return; }
+  const finals = Object.entries(a.finals).filter(([, n]) => n > 0)
+    .map(([f, n]) => `${finalBadge(f)} <span class="mono">${esc(n)}</span>`).join(" ");
+  const stops = a.stops.map((r) => `<tr><td>${esc(STAGE_LABEL[r.stage] || r.stage)}</td>
+    <td class="mono">${esc(codeText(r.code))}</td><td class="mono">${esc(r.count)}</td></tr>`).join("");
+  const tickers = a.tickers.slice(0, 40).map((r) => `<tr><td class="mono">${esc(r.ticker)}</td>
+    <td class="mono">${esc(r.slots)}</td><td class="mono">${esc(r.excluded)}</td><td class="mono">${esc(r.orders)}</td>
+    <td class="reason">${r.stops.slice(0, 3).map((x) => `${esc(x.stop)} ×${esc(x.count)}`).join(" · ")}</td></tr>`).join("");
+  const skipped = a.skipped.length
+    ? `<p class="run-meta">跳过 ${a.skipped.length} 个无法读取的快照：${a.skipped.map((x) => esc(x.date)).join(", ")}</p>` : "";
+  $("#funnelAgg").innerHTML = `<p class="run-meta">${esc(a.slots)} 个时段</p>
+    <div class="funnel-finals">${finals}</div>${skipped}
+    <h3 class="sec-title">停止原因（阶段 × 代码）</h3>
+    <table class="ptable"><thead><tr><th>阶段</th><th>代码</th><th>次数</th></tr></thead><tbody>${stops}</tbody></table>
+    <h3 class="sec-title">个股（按被排除次数）</h3>
+    <table class="ptable"><thead><tr><th>Ticker</th><th>出现</th><th>排除</th><th>下单</th><th>常见停止点</th></tr></thead>
+    <tbody>${tickers}</tbody></table>`;
+}
+
+/* ---------------- access: hide write actions when read-only ---------------- */
+async function refreshAccess() {
+  let writable = false;
+  try { writable = !!(await api("/api/pipeline/access")).writable; }
+  catch (e) { writable = false; }
+  $("#haltToggle").hidden = !writable;
+  $("#triggerCard").hidden = !writable;
+  $("#readOnlyBadge").hidden = writable;
+}
+
 /* ---------------- tabs + init ---------------- */
 const LOADERS = {
   status: loadStatus, pool: loadPool, briefs: loadBriefs, ab: loadAB, decisions: loadDecisions,
+  funnel: loadFunnel,
 };
 function showPage(page) {
   document.querySelectorAll(".pipeline-page").forEach((s) => { s.hidden = s.id !== `page-${page}`; });
@@ -453,6 +648,34 @@ function init() {
   $("#abPaired").onchange = loadAB;
   $("#fApply").onclick = loadDecisions;
   $("#trigBtn").onclick = runTrigger;
+  $("#funnelSession").addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    document.querySelectorAll("#funnelSession button").forEach((x) => x.classList.remove("active"));
+    b.classList.add("active");
+    funnelSession = b.dataset.session;
+    $("#funnelAgg").innerHTML = "";
+    // The default range is per session: recompute it from this session's dates.
+    $("#faSince").value = ""; $("#faUntil").value = "";
+    loadFunnel();
+  });
+  $("#funnelDate").onchange = loadFunnelSnapshot;
+  ["#ffStage", "#ffCode", "#ffFinal"].forEach((id) => { $(id).onchange = renderFunnelTable; });
+  $("#ffTicker").oninput = renderFunnelTable;
+  $("#faApply").onclick = loadFunnelAgg;
+  $("#funnelTable").addEventListener("click", (e) => {
+    const brief = e.target.closest("[data-brief]");
+    if (brief) { showPage("briefs"); openBrief("ticker", brief.dataset.brief); return; }
+    const dec = e.target.closest("[data-decisions]");
+    if (dec) {
+      $("#fDate").value = funnelSnap.date; $("#fSession").value = funnelSession;
+      $("#fTicker").value = dec.dataset.decisions; $("#fArm").value = "";
+      showPage("decisions"); return;
+    }
+    const row = e.target.closest(".funnel-row");
+    if (row) toggleTrail(row);
+  });
+  refreshAccess();
   refreshHalt();
   setInterval(refreshHalt, 30000);
   showPage("status");
