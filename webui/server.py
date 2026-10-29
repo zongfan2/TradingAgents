@@ -119,8 +119,10 @@ _HOSTNAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z
 #: the Host alone never proves a request is local).
 FORWARDING_HEADERS = (
     "x-forwarded-for", "x-forwarded-host", "forwarded", "x-real-ip",
-    "tailscale-user-login", "tailscale-user-name", "tailscale-headers-info",
+    "tailscale-headers-info", "tailscale-app-capabilities",
 )
+#: The whole identity family serve sets (Login, Name, Profile-Pic, …).
+FORWARDING_PREFIXES = ("tailscale-user-",)
 FUNNEL_HEADER = "tailscale-funnel-request"
 READ_ONLY_METHODS = ("GET", "HEAD", "OPTIONS")
 
@@ -165,7 +167,9 @@ def request_is_local(headers: dict[str, str]) -> bool:
     use the write actions (halt toggle, trigger, config, analyze)."""
     if _request_host(headers) not in LOOPBACK_HOSTS:
         return False
-    return not any(name in headers for name in FORWARDING_HEADERS)
+    return not any(
+        name in FORWARDING_HEADERS or name.startswith(FORWARDING_PREFIXES) for name in headers
+    )
 
 
 class ReadOnlyRemoteMiddleware:

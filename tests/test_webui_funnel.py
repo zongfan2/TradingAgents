@@ -101,6 +101,9 @@ def test_forwarded_request_is_remote_even_with_a_loopback_host(fsrv):
         {"X-Forwarded-For": "100.64.0.7"},
         {"X-Forwarded-Host": "localhost"},
         {"Tailscale-User-Login": "someone@example.com"},
+        {"Tailscale-User-Profile-Pic": "https://x"},
+        {"Tailscale-Headers-Info": "x"},
+        {"Tailscale-App-Capabilities": "{}"},
         {"Forwarded": "for=100.64.0.7"},
     ):
         assert local.post("/api/pipeline/halt", json={"halted": True}, headers=header).status_code == 403
@@ -229,3 +232,24 @@ def test_page_six_is_served_with_the_tab(fsrv):
     html = client(fsrv, TAILNET, "https").get("/pipeline.html")
     assert html.status_code == 200
     assert 'data-page="funnel"' in html.text and 'id="page-funnel"' in html.text
+
+
+@pytest.mark.unit
+def test_page_hides_write_controls_when_read_only():
+    """Review fe26529: the page asks /api/pipeline/access and hides the halt
+    toggle and the manual trigger (and shows 只读) when writes are refused."""
+    from pathlib import Path
+
+    static = Path(__file__).resolve().parent.parent / "webui" / "static"
+    js = (static / "pipeline.js").read_text(encoding="utf-8")
+    html = (static / "pipeline.html").read_text(encoding="utf-8")
+    assert 'id="triggerCard"' in html and 'id="readOnlyBadge"' in html
+    access = js[js.index("async function refreshAccess"):]
+    access = access[: access.index("\n}\n") + 3]
+    assert '"/api/pipeline/access"' in access
+    for line in ('$("#haltToggle").hidden = !writable;',
+                 '$("#triggerCard").hidden = !writable;',
+                 '$("#readOnlyBadge").hidden = writable;'):
+        assert line in access
+    assert "catch (e) { writable = false; }" in access  # unreachable ⇒ read-only
+    assert "refreshAccess();" in js[js.index("function init()"):]

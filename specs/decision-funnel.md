@@ -231,7 +231,8 @@ its own, and marks Funnel traffic with `Tailscale-Funnel-Request`
   foreign Host is still 400 (TrustedHost runs first).
 - A request is **local** only with a loopback `Host` **and** no forwarding
   header (`X-Forwarded-For`, `X-Forwarded-Host`, `Forwarded`, `X-Real-IP`,
-  `Tailscale-User-*`, `Tailscale-Headers-Info`) — the Host alone never
+  `Tailscale-User-*` (prefix), `Tailscale-Headers-Info`,
+  `Tailscale-App-Capabilities`) — the Host alone never
   proves it, since a tailnet client can send `Host: localhost` through
   serve. Every non-GET/HEAD/OPTIONS request that is not local is 403, so
   the tailnet URL is read-only: halt toggle, manual trigger, settings and
