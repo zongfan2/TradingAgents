@@ -307,3 +307,127 @@ def test_usage_failure_never_fails_the_run(tmp_path, monkeypatch):
     outcome, _ = run(config, resolvers, UsageChild(),
                      settings=ar.RunnerSettings(ab_pairing="off", llm_routing="claude"))
     assert outcome.summary["completed"] == 2 and outcome.summary["errors"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Review 0bc3254 regressions
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_timed_out_child_still_reports_its_streamed_spend(tmp_path, monkeypatch):
+    """Finding 1: the child streams its running usage after every call, so a
+    run killed on timeout still bills what it spent."""
+    import subprocess
+
+    streamed = (
+        'TRADINGAGENTS_RUN_ONE_USAGE {"claude-opus-5-5": {"calls": 1, "cost_usd": 0.5}}\n'
+        'TRADINGAGENTS_RUN_ONE_USAGE {"claude-opus-5-5": {"calls": 2, "cost_usd": 1.25}}\n'
+    )
+
+    class Proc:
+        pid = 4242
+        calls = 0
+
+        def communicate(self, timeout=None):
+            Proc.calls += 1
+            if Proc.calls == 1:
+                raise subprocess.TimeoutExpired("run_one", timeout)
+            return streamed, ""
+
+    monkeypatch.setattr(ar.subprocess, "Popen", lambda *a, **k: Proc())
+    monkeypatch.setattr(ar.os, "killpg", lambda *a: None)
+    child = ar.make_child_runner(make_config(tmp_path))
+    result = child(ar.ChildSpec(ticker="AAA", date="2026-10-29", session="us", arm="brief"), 1.0)
+    assert result.error.startswith("run timed out")
+    assert result.usage == {"claude-opus-5-5": {"calls": 2, "cost_usd": 1.25}}
+
+
+@pytest.mark.unit
+def test_usage_callback_streams_the_running_total():
+    import io
+
+    stream = io.StringIO()
+    cb = UsageCallback(stream=stream, sentinel="TAG ")
+    message = AIMessage(content="x", usage_metadata={"input_tokens": 10, "output_tokens": 2,
+                                                     "total_tokens": 12},
+                        response_metadata={"model_name": "claude-haiku-5-5"})
+    cb.on_llm_end(_result(message))
+    cb.on_llm_end(_result(message))
+    lines = stream.getvalue().splitlines()
+    assert len(lines) == 2 and json.loads(lines[-1][4:])["claude-haiku-5-5"]["calls"] == 2
+
+
+@pytest.mark.unit
+def test_profiles_clear_inherited_provider_agnostic_knobs(monkeypatch):
+    """Finding 2: a legacy relay backend_url / temperature / shared effort in
+    the parent env never reaches a routed child (and the digest says so)."""
+    from tradingagents import default_config
+
+    monkeypatch.setitem(default_config.DEFAULT_CONFIG, "backend_url", "https://api.deepseek.com")
+    monkeypatch.setitem(default_config.DEFAULT_CONFIG, "temperature", 0.2)
+    monkeypatch.setitem(default_config.DEFAULT_CONFIG, "anthropic_effort", "high")
+    monkeypatch.setenv("TRADINGAGENTS_LLM_BACKEND_URL", "https://api.deepseek.com")
+    for profile in (CLAUDE, DEEPSEEK):
+        assert profile.env["TRADINGAGENTS_LLM_BACKEND_URL"] == ""
+        assert profile.env["TRADINGAGENTS_TEMPERATURE"] == ""
+        graph = ar.effective_analysis_config(profile.env)["graph"]
+        assert graph["backend_url"] is None and graph["temperature"] is None
+        assert graph["anthropic_effort"] is None
+    assert ar.effective_analysis_config(CLAUDE.env)["graph"]["anthropic_deep_effort"] == "medium"
+    assert ar.effective_analysis_config(DEEPSEEK.env)["graph"]["anthropic_deep_effort"] is None
+
+
+@pytest.mark.unit
+def test_snapshot_ids_and_unknown_claude_models_never_count_zero(tmp_path):
+    """Finding 3: a dated snapshot id prices as its alias; an unlisted Claude
+    model is budgeted at the Claude ceiling (flagged unpriced)."""
+    cb = UsageCallback()
+    for model in ("claude-opus-5-5-20261001", "claude-octavo-9"):
+        cb.on_llm_end(_result(AIMessage(
+            content="x", usage_metadata={"input_tokens": 1_000_000, "output_tokens": 0,
+                                         "total_tokens": 1_000_000},
+            response_metadata={"model_name": model})))
+    summary = cb.summary()
+    assert summary["claude-opus-5-5-20261001"]["priced"] is True
+    assert summary["claude-opus-5-5-20261001"]["cost_usd"] == pytest.approx(4.0)
+    assert summary["claude-octavo-9"]["priced"] is False
+    assert summary["claude-octavo-9"]["cost_usd"] == pytest.approx(4.0)  # Opus ceiling rate
+    append_usage(tmp_path, run_id="r", date="2026-10-29", session="us", ticker="A", arm="brief",
+                 profile="claude", models=summary, clock=lambda: OCT)
+    assert month_spend(tmp_path, "2026-10", "anthropic") == pytest.approx(8.0)
+    assert call_cost("deepseek-new", {"input": 5}) is None
+
+
+@pytest.mark.unit
+def test_both_arms_of_a_pair_run_on_one_profile(tmp_path):
+    """Finding 4: the budget crossing between the arms must not split a pair."""
+    config = make_config(tmp_path)
+    write_pool(config, "us", SLOT, core=("AAA",))
+    macro = write_brief(config.macro_brief_dir / "2026-08-07.us.md")
+    write_eval(macro, "pass")
+    settings = ar.RunnerSettings(ab_pairing="paired", ab_core_pairs_per_slot=1,
+                                 llm_routing="claude-first", anthropic_monthly_budget_usd=0.3)
+    child = UsageChild()  # each claude run costs 0.4 > budget after the first arm
+    run(config, make_resolvers(macro), child, settings=settings)
+    records = read_records(config)
+    assert sorted(r.arm for r in records) == ["brief", "feeds"]
+    assert {r.preset for r in records} == {"claude"}
+    assert len({r.pair_id for r in records}) == 1
+
+
+@pytest.mark.unit
+def test_digest_failure_happens_before_any_spend(tmp_path, monkeypatch):
+    """Finding 5: the per-profile snapshot is written before the child runs."""
+    config, resolvers = _slot(tmp_path)
+    child = UsageChild()
+
+    def boom(*_a, **_k):
+        raise OSError("snapshot dir unwritable")
+
+    monkeypatch.setattr(ar, "write_config_digest", boom)
+    outcome, _ = run(config, resolvers, child,
+                     settings=ar.RunnerSettings(ab_pairing="off", llm_routing="claude"))
+    assert child.specs == []
+    assert outcome.summary["errors"] == 2
+    assert read_usage(config.state_dir) == []

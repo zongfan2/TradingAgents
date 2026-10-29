@@ -42,18 +42,23 @@ The user also has **$200/month of Anthropic credits** to use before DeepSeek.
 
 ### R1 — Usage ledger (measure first)
 
-- `run_one` attaches a LangChain callback that sums, per model,
-  `usage_metadata` from every LLM call: input, output, cache-read,
-  cache-write and reasoning tokens, and the call count. The result payload
-  gains `usage: {<model>: {...}}` (best-effort: a callback failure records
-  nothing and never fails the run).
+- `run_one` attaches a LangChain callback (`pipeline/llm_usage.py`
+  `UsageCallback`) that sums, per model, `usage_metadata` from every LLM
+  call: input, output, cache-read, cache-write and reasoning tokens, and the
+  call count. The result payload gains `usage: {<model>: {...}}`; the
+  running total is also written to stdout after **every** call
+  (`USAGE_SENTINEL` line), so a run that fails or is killed on timeout still
+  reports what it spent. Best-effort: a callback failure never fails a run.
 - The analysis runner appends one line per run to
   `~/.tradingagents/llm_usage.jsonl` (`locked_append`, append-only):
   `{schema, written_at, run_id, date, session, ticker, arm, profile,
   provider, models: {<model>: {calls, input, output, cache_read,
   cache_write, reasoning, cost_usd}}, cost_usd, priced}`.
-- `cost_usd` from a price table in `pipeline/llm_prices.py` (USD per 1 M
-  tokens; `priced: false` with cost 0 for an unknown model, never a guess):
+- `cost_usd` from the price table in `pipeline/llm_usage.py` (USD per 1 M
+  tokens). A dated snapshot id (`-YYYYMMDD`) prices as its alias. An
+  unlisted **Claude** model is budgeted at the most expensive listed Claude
+  rate (flagged `priced: false`, warned) so the Anthropic budget never
+  undercounts; any other unlisted model is `priced: false` with cost 0:
   `claude-opus-5-5` 4 / 20 (cache read 0.20, cache write 1.25×),
   `claude-haiku-5-5` 0.10 / 0.50 (prompt ≤ 100 K; 0.50 / 2.50 above),
   DeepSeek per the user's console (configurable; Flash 0.14 / 0.28,
@@ -62,15 +67,21 @@ The user also has **$200/month of Anthropic credits** to use before DeepSeek.
 
 ### R2 — Claude-first routing with a monthly budget
 
-- Profiles (`pipeline/llm_profiles.py`): `claude` (above) and `deepseek`
+- Profiles (`pipeline/llm_routing.py`): `claude` (above) and `deepseek`
   (deep `deepseek-v4-pro`, quick `deepseek-flash` — the current name;
   `deepseek-v4-flash` is a retired alias billed as Flash). The profile sets
   the child's `TRADINGAGENTS_LLM_PROVIDER` / `_DEEP_THINK_LLM` /
-  `_QUICK_THINK_LLM` / effort env and becomes the ledger `preset`.
+  `_QUICK_THINK_LLM` / effort env and becomes the ledger `preset`. Both
+  profiles also **clear** the provider-agnostic knobs a legacy
+  single-provider `.env` may carry (`LLM_BACKEND_URL`, `TEMPERATURE`, the
+  shared `ANTHROPIC_EFFORT`, `OPENAI_REASONING_EFFORT`,
+  `GOOGLE_THINKING_LEVEL`) with empty values — a relay URL must never send
+  Claude requests elsewhere; the config digest records them as None.
 - `TRADINGAGENTS_LLM_ROUTING`: `claude-first` (default once deployed),
   `claude`, `deepseek`. `TRADINGAGENTS_ANTHROPIC_MONTHLY_BUDGET_USD`
   (default 190).
-- Before each run (not per slot), the runner sums this calendar month's
+- Before each **job** (not per slot; one choice covers both arms of a pair,
+  so an A/B pair never splits across providers), the runner sums this calendar month's
   (UTC) `cost_usd` over `provider == anthropic` lines. Below the cap and no
   exhaustion marker → `claude`; otherwise `deepseek`. The spend is a pure
   fold over the append-only ledger — no mutable budget state (LiteLLM's
@@ -79,9 +90,12 @@ The user also has **$200/month of Anthropic credits** to use before DeepSeek.
   ≈ $0.5), inside the $10 margin.
 - A child failing with Anthropic's "credit balance is too low" error writes
   `~/.tradingagents/llm_budget/<YYYY-MM>.exhausted` (atomic; its existence is
-  the state) and the job is retried once on `deepseek` (next attempt
-  number — the ledger's latest-attempt rule makes it current). Other errors
-  are not retried here.
+  the state) and that run is rerun once on `deepseek` (as are the job's
+  remaining arms). Only the final result is written to the decision ledger;
+  the failed Claude attempt appears only in `llm_usage.jsonl` (`run_id`
+  null). Other errors are not retried here.
+- The per-profile config digest is resolved before the child starts, so a
+  snapshot write failure fails the run before any token is spent.
 - The end-of-slot notification adds month-to-date Anthropic spend and the
   profile used.
 

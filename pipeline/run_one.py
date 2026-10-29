@@ -334,7 +334,7 @@ def main(argv: list[str] | None = None, graph_factory: GraphFactory | None = Non
 
     factory = graph_factory or _default_graph_factory
     real_stdout = sys.stdout
-    usage = UsageCallback()
+    usage = UsageCallback(stream=real_stdout, sentinel=USAGE_SENTINEL)
     try:
         # stdout discipline: the graph and its dependencies print freely; the
         # parent parses stdout as exactly one JSON line, so everything the run

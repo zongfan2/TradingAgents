@@ -792,7 +792,14 @@ def effective_analysis_config(env_overrides: Mapping[str, str] | None = None) ->
     graph_config = DEFAULT_CONFIG
     if env_overrides:
         # The config a child with this profile overlay resolves (llm-cost R2).
+        # An empty override CLEARS an inherited knob (the child then sees the
+        # shipped default, None for every key a profile clears).
+        from tradingagents.default_config import _ENV_OVERRIDES
+
         graph_config = _apply_env_overrides(dict(DEFAULT_CONFIG), {**os.environ, **env_overrides})
+        for env_var, value in env_overrides.items():
+            if value == "" and env_var in _ENV_OVERRIDES:
+                graph_config[_ENV_OVERRIDES[env_var]] = None
     return {
         "graph": {key: graph_config.get(key) for key in _GRAPH_CONFIG_KEYS},
         "prompt_templates": {
@@ -1092,8 +1099,12 @@ def make_child_runner(config: PipelineConfig) -> ChildRunner:
         except subprocess.TimeoutExpired:
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.killpg(proc.pid, signal.SIGKILL)
-            proc.communicate()  # reap + drain after the group kill
-            return ChildResult(-1, None, f"run timed out after {int(timeout)}s")
+            stdout, _stderr = proc.communicate()  # reap + drain after the group kill
+            # The child streams its running usage after every LLM call, so a
+            # killed run still reports what it spent (llm-cost R1).
+            return ChildResult(
+                -1, None, f"run timed out after {int(timeout)}s", _extract_usage(stdout)
+            )
         if proc.returncode != 0:
             reason = _last_nonempty_line(stderr) or f"exit {proc.returncode}"
             return ChildResult(proc.returncode, None, reason[:300], _extract_usage(stdout))
@@ -1404,8 +1415,14 @@ def _run_job_impl(
         job_flags.append("ticker-eval-fail-withheld")
     context = position_context_for(positions, job.ticker, slot_date)
     pair_id: str | None = None  # minted under flock with the pair's first row
+    # llm-cost R2: one profile per JOB, so both arms of a pair run on the same
+    # provider (the A/B contrast is the information source, not the model);
+    # it only changes when Anthropic reports the credits gone.
+    profile: Profile | None = router.choose().profile if router is not None else None
     for arm_index, arm in enumerate(job.arms):
-        profile: Profile | None = router.choose().profile if router is not None else None
+        # Resolved before the child spends anything: a snapshot write failure
+        # must fail the run before tokens are billed, not after.
+        run_digest = router.digest(profile) if router is not None and profile is not None else digest
         spec = ChildSpec(
             ticker=job.ticker,
             date=date_iso,
@@ -1443,7 +1460,8 @@ def _run_job_impl(
                 ticker=job.ticker, arm=arm, profile=profile.name,
                 models=result.usage or {}, error=result.error, clock=clock,
             )
-            profile = DEEPSEEK
+            profile = DEEPSEEK  # also for the job's remaining arms
+            run_digest = router.digest(profile)
             spec = replace(spec, env=tuple(sorted(profile.env.items())))
             try:
                 result = child_runner(spec, settings.run_timeout_seconds)
@@ -1515,9 +1533,7 @@ def _run_job_impl(
                     fresh_ticker.ref if arm == "brief" and not withhold else None
                 ),
                 "pool": pool_ref,
-                "config_digest": (
-                    router.digest(profile) if router is not None and profile is not None else digest
-                ),
+                "config_digest": run_digest,
             },
             "decided_at": decided_at,
             "decision": decision,

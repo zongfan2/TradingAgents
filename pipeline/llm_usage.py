@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -73,9 +74,31 @@ def provider_for_model(model: str) -> str:
     return "other"
 
 
+_DATE_SUFFIX = re.compile(r"-\d{8}$")
+#: An unlisted Claude model is billed at the most expensive listed Claude
+#: rate (flagged ``priced: false``) so the Anthropic budget never undercounts.
+_CLAUDE_CEILING = max(
+    (price for model, price in PRICES.items() if model.startswith("claude-")),
+    key=lambda price: price.output,
+)
+
+
+def price_for(model: str) -> tuple[Price | None, bool]:
+    """``(price, exact)``: a snapshot id (``-YYYYMMDD``) resolves to its
+    alias; an unknown Claude model gets the ceiling rate (``exact=False``);
+    any other unknown model has no price (never guessed)."""
+    price = PRICES.get(model) or PRICES.get(_DATE_SUFFIX.sub("", model))
+    if price is not None:
+        return price, True
+    if model.startswith("claude-"):
+        logger.warning("no price for %s — budgeting it at the Claude ceiling rate", model)
+        return _CLAUDE_CEILING, False
+    return None, False
+
+
 def call_cost(model: str, tokens: dict[str, int]) -> float | None:
-    """USD for one call; ``None`` for a model without a price (never guessed)."""
-    price = PRICES.get(model)
+    """USD for one call; ``None`` for a non-Claude model without a price."""
+    price, _exact = price_for(model)
     if price is None:
         return None
     input_total = tokens.get("input", 0)
@@ -122,12 +145,18 @@ except ImportError:  # pragma: no cover
 
 
 class UsageCallback(BaseCallbackHandler):
-    """Sum token usage per model over every LLM call of one run."""
+    """Sum token usage per model over every LLM call of one run.
 
-    def __init__(self) -> None:
+    With ``stream`` (run_one passes the real stdout) the running total is
+    written after every call as a ``sentinel`` line, so a run the parent
+    kills on timeout still reports what it spent."""
+
+    def __init__(self, stream: Any = None, sentinel: str = "") -> None:
         super().__init__()
         self._lock = threading.Lock()
         self.models: dict[str, dict[str, Any]] = {}
+        self._stream = stream
+        self._sentinel = sentinel
 
     def on_llm_end(self, response: Any, **kwargs: Any) -> None:
         try:
@@ -138,11 +167,15 @@ class UsageCallback(BaseCallbackHandler):
                         continue
                     model, tokens = parsed
                     self._add(model or "unknown", tokens)
+            if self._stream is not None and self.models:
+                print(self._sentinel + json.dumps(self.summary(), ensure_ascii=False),
+                      file=self._stream, flush=True)
         except Exception as exc:  # accounting never fails a run
             logger.warning("usage accounting skipped a call: %s", exc)
 
     def _add(self, model: str, tokens: dict[str, int]) -> None:
         cost = call_cost(model, tokens)
+        _price, exact = price_for(model)
         with self._lock:
             row = self.models.setdefault(
                 model,
@@ -152,9 +185,9 @@ class UsageCallback(BaseCallbackHandler):
             row["calls"] += 1
             for key, value in tokens.items():
                 row[key] += value
-            if cost is None:
+            if cost is None or not exact:
                 row["priced"] = False
-            else:
+            if cost is not None:
                 row["cost_usd"] = round(row["cost_usd"] + cost, 6)
 
     def summary(self) -> dict[str, dict[str, Any]]:

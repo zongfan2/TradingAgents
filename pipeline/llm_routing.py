@@ -26,6 +26,20 @@ ROUTING_CHOICES = ("claude-first", "claude", "deepseek")
 DEFAULT_ANTHROPIC_MONTHLY_BUDGET_USD = 190.0
 
 
+#: Provider-agnostic knobs a profile must not inherit from the legacy
+#: single-provider env/.env (a relay ``backend_url`` would send Claude
+#: requests to DeepSeek; Claude rejects ``temperature``). An empty value
+#: clears the key: the child skips empty overrides and run_one's .env load
+#: never overwrites a key that is present.
+_CLEARED = {
+    "TRADINGAGENTS_LLM_BACKEND_URL": "",
+    "TRADINGAGENTS_TEMPERATURE": "",
+    "TRADINGAGENTS_ANTHROPIC_EFFORT": "",
+    "TRADINGAGENTS_OPENAI_REASONING_EFFORT": "",
+    "TRADINGAGENTS_GOOGLE_THINKING_LEVEL": "",
+}
+
+
 @dataclass(frozen=True)
 class Profile:
     name: str
@@ -39,6 +53,7 @@ CLAUDE = Profile(
     "claude",
     "anthropic",
     {
+        **_CLEARED,
         "TRADINGAGENTS_LLM_PROVIDER": "anthropic",
         "TRADINGAGENTS_DEEP_THINK_LLM": "claude-opus-5-5",
         "TRADINGAGENTS_QUICK_THINK_LLM": "claude-haiku-5-5",
@@ -53,6 +68,9 @@ DEEPSEEK = Profile(
     "deepseek",
     "deepseek",
     {
+        **_CLEARED,
+        "TRADINGAGENTS_ANTHROPIC_DEEP_EFFORT": "",
+        "TRADINGAGENTS_ANTHROPIC_QUICK_EFFORT": "",
         "TRADINGAGENTS_LLM_PROVIDER": "deepseek",
         "TRADINGAGENTS_DEEP_THINK_LLM": "deepseek-v4-pro",
         "TRADINGAGENTS_QUICK_THINK_LLM": "deepseek-flash",
