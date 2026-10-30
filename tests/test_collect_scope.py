@@ -8,12 +8,21 @@ from pipeline.config import core_analysis_sessions
 from pipeline.evaluator import EXIT_OK, batch_tickers
 from pipeline.funnel_events import FunnelEvents
 from pipeline.ticker_collector import collect_all
-from tests.test_evaluator import FakeRunner, judgment, ticker_text
-from tests.test_evaluator import _write_pool as write_eval_pool
-from tests.test_evaluator import batch_dirs  # noqa: F401  (pytest fixture)
-from tests.test_evaluator import write_brief as write_eval_brief
-from tests.test_ticker_collector import AS_OF, FakeBackend, make_ticker_brief, write_pool
-from tests.test_ticker_collector import dirs  # noqa: F401  (pytest fixture)
+from tests.test_evaluator import (
+    FakeRunner,
+    _write_pool as write_eval_pool,
+    batch_dirs,  # noqa: F401  (pytest fixture)
+    judgment,
+    ticker_text,
+    write_brief as write_eval_brief,
+)
+from tests.test_ticker_collector import (
+    AS_OF,
+    FakeBackend,
+    dirs,  # noqa: F401  (pytest fixture)
+    make_ticker_brief,
+    write_pool,
+)
 
 
 @pytest.mark.unit
