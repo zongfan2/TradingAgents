@@ -68,12 +68,17 @@ logger = logging.getLogger(__name__)
 #: (``"anthropic"`` or ``"deepseek"``); the switch to DeepSeek is one-way.
 _ROUTE: str | None = None
 _ROUTE_LOCK = threading.Lock()
+#: The route the current thread's last ``claude_command`` was built for: a
+#: call is built, run and recorded on one thread, so its usage is billed to
+#: the route it ran on even if the process switches while it is in flight.
+_CALL = threading.local()
 
 
 def _reset_route_for_tests() -> None:
     global _ROUTE
     with _ROUTE_LOCK:
         _ROUTE = None
+    _CALL.__dict__.clear()
 
 
 def _state_dir() -> Path:
@@ -144,7 +149,9 @@ def claude_command(model: str, effort: str, *extra: str) -> list[str]:
     """Hermetic web-only ``claude -p`` on a pinned model/effort, JSON envelope.
     On the DeepSeek route every model is pinned to a name DeepSeek serves as
     Flash (R7)."""
-    if cli_route() == "deepseek":
+    route = cli_route()
+    _CALL.route = route
+    if route == "deepseek":
         from pipeline.llm_routing import DEEPSEEK_CLI_MODEL
 
         model = DEEPSEEK_CLI_MODEL
@@ -247,22 +254,34 @@ def usage_log_path() -> Path:
     return Path(state_dir).expanduser() / USAGE_LOG_NAME
 
 
+def _count(value: object) -> int:
+    """A token count from an envelope field; junk reads as 0 (never raises)."""
+    try:
+        return max(int(value or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _billing(usage: dict, total_cost: object) -> tuple[str, float]:
     """``(billing, billed_usd)`` for one call (R7): DeepSeek is repriced at the
     Flash rate (the CLI's figure is Anthropic-priced); an Anthropic key in
     the env bills the API; otherwise the subscription pays."""
-    if _ROUTE == "deepseek":
+    route = getattr(_CALL, "route", None) or _ROUTE
+    if route == "deepseek":
         from pipeline.llm_usage import call_cost
 
-        cache_read = int(usage.get("cache_read_input_tokens") or 0)
+        cache_read = _count(usage.get("cache_read_input_tokens"))
         tokens = {
-            "input": int(usage.get("input_tokens") or 0)
+            "input": _count(usage.get("input_tokens"))
             + cache_read
-            + int(usage.get("cache_creation_input_tokens") or 0),
+            + _count(usage.get("cache_creation_input_tokens")),
             "cache_read": cache_read,
-            "output": int(usage.get("output_tokens") or 0),
+            "output": _count(usage.get("output_tokens")),
         }
-        return "deepseek", round(call_cost("deepseek-flash", tokens) or 0.0, 6)
+        try:
+            return "deepseek", round(call_cost("deepseek-flash", tokens) or 0.0, 6)
+        except Exception:  # accounting never fails a call
+            return "deepseek", 0.0
     if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
         try:
             return "anthropic-api", float(total_cost or 0.0)

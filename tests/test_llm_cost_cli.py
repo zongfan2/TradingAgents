@@ -156,3 +156,45 @@ def test_routing_failure_never_breaks_a_call(cli_env, monkeypatch):
     monkeypatch.setenv("TRADINGAGENTS_ANTHROPIC_MONTHLY_BUDGET_USD", "not-a-number")
     assert claude_cli.claude_command("claude-opus-5-5", "medium")[0] == "claude"
     assert claude_cli.cli_route() == "anthropic"
+
+
+@pytest.mark.unit
+def test_in_flight_anthropic_call_is_billed_to_anthropic_after_a_switch(cli_env, monkeypatch):
+    """Review a36f753: billing follows the route the call was built for."""
+    _state, log = cli_env
+    monkeypatch.setenv("TRADINGAGENTS_LLM_ROUTING", "claude-first")
+    claude_cli.claude_command("claude-sonnet-5-5", "medium")  # built on Anthropic
+    # Another thread's call hits the credit error and switches the process.
+    import threading
+
+    def other():
+        claude_cli.record_failed_call(
+            "ticker_collector", "claude-sonnet-5-5", "medium",
+            json.dumps(envelope(0.0, error=True, text="Credit balance is too low")),
+        )
+
+    thread = threading.Thread(target=other)
+    thread.start()
+    thread.join()
+    assert claude_cli.cli_route() == "deepseek"
+    claude_cli.record_usage("ticker_collector", "claude-sonnet-5-5", "medium", envelope(0.9))
+    last = json.loads(log.read_text().splitlines()[-1])
+    assert (last["billing"], last["billed_usd"]) == ("anthropic-api", 0.9)
+    claude_cli.claude_command("claude-sonnet-5-5", "medium")  # next call on DeepSeek
+    claude_cli.record_usage("ticker_collector", "claude-sonnet-5-5", "medium", envelope(0.9))
+    assert json.loads(log.read_text().splitlines()[-1])["billing"] == "deepseek"
+
+
+@pytest.mark.unit
+def test_junk_usage_on_the_deepseek_route_never_raises(cli_env, monkeypatch):
+    """Review a36f753: record_usage never raises, so a paid brief is kept."""
+    _state, log = cli_env
+    monkeypatch.setenv("TRADINGAGENTS_LLM_ROUTING", "deepseek")
+    claude_cli.claude_command("claude-sonnet-5-5", "medium")
+    bad = envelope(0.5)
+    bad["usage"] = {"input_tokens": "n/a", "output_tokens": {"nested": 1},
+                    "cache_read_input_tokens": None}
+    claude_cli.record_usage("ticker_collector", "claude-sonnet-5-5", "medium", bad)
+    line = json.loads(log.read_text().splitlines()[-1])
+    assert line["billing"] == "deepseek" and line["billed_usd"] == 0.0
+    assert claude_cli.collect_output("claude", json.dumps(bad), component="ticker_collector") == "ok"
