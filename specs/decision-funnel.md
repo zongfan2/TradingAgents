@@ -74,7 +74,7 @@ studies).
 | `pool` (pool_builder) | `core`, `opportunity-enter`, `opportunity-stay`, `watch`, `carried-forward`, `dropped-low-score`, `dropped-gate-fail`, `cap-truncated`, `watch-cap`, `removed-low-score-streak`, `removed-gate-fail-streak`, `now-core`; `details.gate_rule`: `insufficient-bars`, `liquidity`, `bollinger-pass`, `bollinger-weekly-broken`, `bollinger-daily-extended`, `bollinger-both`, `volume-demotion`, `fetch-error`, `gate-error`; `details.thresholds` (entry/exit) |
 | `collect` (ticker_collector) | `written`, `exists`, `failed` (+ reason; `info` for core — a core ticker is analysed without its brief — `excluded` for opportunity), `not-collected-watch`, `opportunity-dropped-stale-pool` |
 | `evaluate` (evaluator) | `pass`, `warn`, `fail` (`info` for core — the brief is withheld but the ticker runs; `excluded` for opportunity), `eval-error`, `skipped-below-threshold`, `skipped-absent` |
-| `trigger` (analysis_runner) | `core`, `core-pair`, `catalyst`, `no-score`, `eval-fail`, `below-threshold`, `budget-dropped`, `already-done`, `macro-fail-feeds-only`; manual runs emit nothing |
+| `trigger` (analysis_runner) | `core`, `core-pair`, `catalyst`, `no-score`, `eval-fail`, `below-threshold`, `budget-dropped`, `already-done`, `macro-fail-feeds-only`; `core-session-off` and `core-unchanged` (both `excluded`; core runs cut for cost, specs/llm-cost.md R6 — `core-unchanged` carries `details.last_decision_date`, `age`, `score`, `threshold`); manual runs emit nothing |
 | `decide` (analysis_runner) | `BUY`, `SELL`, `HOLD`, `ERROR`; `details`: `arm`, `run_id`, `pair_id`, `pm_rating` (raw five-tier rating, now also in the child's result payload), `plan_valid`, `violations[]`, `error`, `flags`, `execute_eligible` |
 | `execute` (execution_adapter) | non-candidates `hold`, `error`, `feeds-arm`, `no-plan`, `plan-invalid`, `action-mismatch`, `incomplete-plan`, `non-us-session` (from `non_candidate_reason`, the single source of the candidate filter); `superseded` (`info`); every order skip reason by its code (`stale-quote`, `total-risk`, `submit-error`, …) — except `dedupe` (`info`: an earlier run already placed the order); `submitted` (also for `recovered-intent`); `rejected` (`excluded`: the broker answered the submit with status rejected); `cancel` (`info`); every execute event carries `details.arm` |
 
@@ -148,7 +148,9 @@ stage is `unknown` exactly when its `code` is null.
   `macro-fail-feeds-only` from the row's own macro verdict) or, for an
   untriggered opportunity ticker, `no-score` / `eval-fail` /
   `below-threshold` from its same-day brief (otherwise `unknown`: budget
-  guard or run failure); decide — latest attempt per (ticker, arm), the
+  guard or run failure; a core ticker cut for cost — llm-cost R6 — has no
+  decision row, so without its recorded `core-session-off` /
+  `core-unchanged` event it reads `unknown`, never a guessed code); decide — latest attempt per (ticker, arm), the
   strongest arm decides, violations/PM rating/error text are not in the
   ledger; execute — cn rows are `non-us-session`; us only once the
   execute step ran (order rows or execute events exist): non-candidates by

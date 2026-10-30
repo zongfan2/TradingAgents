@@ -38,8 +38,13 @@ def row(ticker, day, decision="HOLD", *, n=1, session="us", arm="brief", trigger
             "session": session, "arm": arm, "trigger": trigger, "decision": decision}
 
 
-def brief(score):
-    return lambda ticker: ar.BriefInfo("pass", catalyst_score=score.get(ticker) if isinstance(score, dict) else score)
+def brief(score, verdict="pass"):
+    def inspect(ticker):
+        value = score.get(ticker) if isinstance(score, dict) else score
+        if isinstance(value, ar.BriefInfo):
+            return value
+        return ar.BriefInfo(verdict, catalyst_score=value)
+    return inspect
 
 
 def select(core, rows, positions, *, score=None, session="us", **settings):
@@ -72,13 +77,13 @@ def test_unchanged_hold_is_skipped_and_every_doubt_runs():
         row("KKK", "2026-08-07"),                      # same-day row ignored -> run
     ]
     core = ["AAA", "BBB", "CCC", "DDD", "EEE", "FFF", "GGG", "HHH", "III", "JJJ", "KKK"]
-    run_, skipped = select(core, rows, snapshot("DDD"), score={"EEE": 8.0, "AAA": 6.5})
+    run_, skipped = select(core, rows, snapshot("DDD"), score={"EEE": 8.0, "AAA": 6.5, "GGG": 5.0})
     assert [s[0] for s in skipped] == ["AAA", "GGG"]
     assert run_ == ["BBB", "CCC", "DDD", "EEE", "FFF", "HHH", "III", "JJJ", "KKK"]
     aaa = skipped[0]
     assert aaa[1] == "core-unchanged"
     assert aaa[3] == {"last_decision_date": "2026-08-06", "age": 1, "score": 6.5, "threshold": 7.0}
-    assert "HOLD on 2026-08-06 (1 trading day(s) ago)" in aaa[2]
+    assert "HOLD on 2026-08-06 (1 trading day(s) ago)" in aaa[2] and "eval pass" in aaa[2]
 
 
 @pytest.mark.unit
@@ -90,7 +95,7 @@ def test_age_counts_trading_days_across_the_weekend():
         ["AAA", "BBB"], session="us", slot_date=date(2026, 8, 10),
         settings=ar.RunnerSettings(core_skip_unchanged=True), decision_rows=rows,
         positions=snapshot(as_of=datetime(2026, 8, 7, 21, tzinfo=timezone.utc)),
-        inspect_ticker=brief(None),
+        inspect_ticker=brief(5.0),
     )
     assert out[0] == ["BBB"] and [s[0] for s in out[1]] == ["AAA"]
 
@@ -136,3 +141,50 @@ def test_cn_slot_runs_catalysts_only_and_records_the_skips(tmp_path):
     assert {(e["ticker"], e["outcome"], e["code"]) for e in events} >= {
         ("0700.HK", "excluded", "core-session-off"),
     }
+
+
+@pytest.mark.unit
+def test_doubt_about_todays_brief_runs_the_ticker():
+    """Review 713ef97: no brief, no score, or a failed/missing eval is doubt."""
+    rows = [row(t, "2026-08-06") for t in ("AAA", "BBB", "CCC", "DDD", "EEE")]
+    scores = {
+        "AAA": ar.BriefInfo("missing"),                       # no brief today
+        "BBB": ar.BriefInfo("pass", catalyst_score=None),     # no parseable score
+        "CCC": ar.BriefInfo("fail", catalyst_score=3.0),      # contaminated brief
+        "DDD": ar.BriefInfo("missing", catalyst_score=3.0),   # brief, no eval
+        "EEE": ar.BriefInfo("warn", catalyst_score=3.0),      # vouched, low -> skip
+    }
+    run_, skipped = select(list(scores), rows, snapshot(), score=scores)
+    assert run_ == ["AAA", "BBB", "CCC", "DDD"] and [s[0] for s in skipped] == ["EEE"]
+
+
+@pytest.mark.unit
+def test_a_ticker_decided_today_is_never_relabelled_skipped():
+    """Review 713ef97: a same-day rerun leaves it to the already-done rule."""
+    rows = [row("AAA", "2026-08-06"), row("AAA", "2026-08-07", "BUY")]
+    assert select(["AAA"], rows, snapshot(), score=3.0)[0] == ["AAA"]
+    manual_today = [row("AAA", "2026-08-06"), row("AAA", "2026-08-07", trigger="manual")]
+    assert select(["AAA"], manual_today, snapshot(), score=3.0)[0] == []
+
+
+@pytest.mark.unit
+def test_held_position_match_is_case_insensitive():
+    """Review 713ef97: a held ticker is never skipped, whatever its case."""
+    assert select(["AAA"], [row("AAA", "2026-08-06")], snapshot("aaa"), score=3.0)[0] == ["AAA"]
+
+
+@pytest.mark.unit
+def test_every_trigger_code_is_in_the_contract_spec():
+    """Contract prose and model must not drift (specs/README.md rule 5)."""
+    import re
+    from pathlib import Path
+
+    from pipeline.contracts.funnel import CODES
+
+    spec = (Path(__file__).resolve().parent.parent / "specs" / "decision-funnel.md").read_text()
+    for stage, codes in CODES.items():
+        if codes is None:
+            continue
+        row = next(line for line in spec.splitlines() if line.startswith(f"| `{stage}` ("))
+        listed = set(re.findall(r"`([a-zA-Z-]+)`", row))
+        assert codes <= listed, (stage, sorted(codes - listed))

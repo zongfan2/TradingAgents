@@ -415,8 +415,9 @@ def plan_jobs(
     ``untriggered`` (optional) collects ``(ticker, code, reason, details)``
     for every opportunity ticker that does not trigger (decision funnel).
 
-    - core: every member, every slot (a ticker eval ``fail`` withholds the
-      contaminated brief, never the coverage).
+    - core: every member it is given, every slot (a ticker eval ``fail``
+      withholds the contaminated brief, never the coverage) — the caller
+      first applies the cost cuts of :func:`select_core_runs`.
     - opportunity: brief present, eval non-``fail``, and the *brief's*
       ``catalyst_score ≥ analysis_trigger_threshold``.
     - macro eval ``fail``: every brief-arm run is replaced by a single
@@ -907,10 +908,12 @@ def select_core_runs(
 
     - ``core-session-off``: the session is not in ``core_analysis_sessions``.
     - ``core-unchanged`` (opt-in): every condition holds — a fresh positions
-      snapshot shows no position in it; its latest scheduled brief-arm
-      decision is a HOLD at most ``CORE_UNCHANGED_MAX_AGE`` trading days old;
-      today's brief has no catalyst at or above the trigger threshold. Any
-      doubt (no snapshot, stale snapshot, no prior decision) runs it.
+      snapshot shows no position in it; it has no scheduled row today yet;
+      its latest scheduled brief-arm decision is a HOLD at most
+      ``CORE_UNCHANGED_MAX_AGE`` trading days old; today's brief exists, its
+      eval is ``pass``/``warn`` and its catalyst score is below the trigger
+      threshold. Any doubt (no or stale snapshot, no prior decision, no
+      brief, no score, eval ``fail``/missing) runs it.
     """
     if session not in settings.core_analysis_sessions:
         reason = f"core analysis off for {session} (catalyst-only session)"
@@ -919,10 +922,19 @@ def select_core_runs(
         positions.as_of, slot_date, positions.next_session
     ):
         return list(core_tickers), []
-    held = {p.ticker for p in positions.positions if p.qty or p.open_orders}
+    held = {p.ticker.upper() for p in positions.positions if p.qty or p.open_orders}
+    # A ticker that already has a scheduled row today is left to the
+    # already-done rule: a same-day rerun must never relabel it as skipped.
+    decided_today: set[str] = set()
     latest: dict[str, Mapping] = {}
     for row in decision_rows:
         ticker = row.get("ticker")
+        if (
+            row.get("session") == session
+            and row.get("date") == slot_date.isoformat()
+            and row.get("trigger") != "manual"
+        ):
+            decided_today.add(str(ticker))
         if (
             ticker in held
             or row.get("session") != session
@@ -942,20 +954,33 @@ def select_core_runs(
     threshold = settings.analysis_trigger_threshold
     for ticker in core_tickers:
         row = latest.get(ticker)
-        if ticker in held or row is None or row.get("decision") != "HOLD":
+        if (
+            ticker.upper() in held
+            or ticker in decided_today
+            or row is None
+            or row.get("decision") != "HOLD"
+        ):
             run.append(ticker)
             continue
         last = date.fromisoformat(row["date"])
         age = _weekdays_between(last, slot_date) + 1  # trading days since, slot day included
-        score = inspect_ticker(ticker).catalyst_score
-        if age > CORE_UNCHANGED_MAX_AGE or (score is not None and score >= threshold):
+        info = inspect_ticker(ticker)
+        score = info.catalyst_score
+        # Only a present, eval-vouched brief can show that nothing changed:
+        # no brief, no score or a failed/missing eval is doubt, and runs.
+        if (
+            age > CORE_UNCHANGED_MAX_AGE
+            or info.verdict not in ("pass", "warn")
+            or score is None
+            or score >= threshold
+        ):
             run.append(ticker)
             continue
         skipped.append((
             ticker,
             "core-unchanged",
             f"HOLD on {row['date']} ({age} trading day(s) ago), no position, "
-            f"brief catalyst {'none' if score is None else f'{score:g}'} < trigger {threshold:g}",
+            f"brief catalyst {score:g} < trigger {threshold:g} (eval {info.verdict})",
             {"last_decision_date": row["date"], "age": age, "score": score, "threshold": threshold},
         ))
     return run, skipped

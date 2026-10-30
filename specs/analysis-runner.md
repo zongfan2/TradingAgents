@@ -17,7 +17,11 @@ everything upstream只是 preparing its inputs.
 
 Per session slot, from the day's pool file:
 
-- **core**: every member, every slot (holdings risk is never skipped).
+- **core**: every member, every slot (holdings risk is never skipped) —
+  except the cost cuts of specs/llm-cost.md R6: a session outside
+  `TRADINGAGENTS_CORE_ANALYSIS_SESSIONS` runs no core jobs, and with
+  `TRADINGAGENTS_CORE_SKIP_UNCHANGED=on` an unchanged recent HOLD with no
+  position is skipped (a held position is never skipped).
 - **opportunity**: members whose day's ticker brief has
   `catalyst_score ≥ analysis_trigger_threshold` (default 7.0). Brief absent or
   eval `fail` ⇒ no auto-trigger.

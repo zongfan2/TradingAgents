@@ -145,8 +145,11 @@ caches common prefixes automatically. Behavior is otherwise unchanged
   leg in it; its latest scheduled brief-arm decision (manual and ERROR rows
   ignored, latest attempt wins) is a HOLD at most 4 trading days old
   (weekdays since it, slot day included — so every core ticker gets a full
-  run at least weekly); today's brief has no catalyst ≥ the trigger
-  threshold. Any doubt runs the ticker. Funnel trigger code
+  run at least weekly); it has no scheduled row today yet (a same-day rerun
+  is left to the already-done rule); today's brief exists, its eval is
+  `pass`/`warn` and its catalyst score is below the trigger threshold (no
+  brief, no score or a failed/missing eval is doubt). Any doubt runs the
+  ticker. Funnel trigger code
   `core-unchanged` (excluded) with the age, score and threshold.
   `TRADINGAGENTS_CORE_SKIP_UNCHANGED=on|off` (default off). Both settings
   are part of the config digest.
