@@ -58,6 +58,9 @@ CODES: dict[str, frozenset[str] | None] = {
             "budget-dropped",
             "already-done",
             "macro-fail-feeds-only",
+            # specs/llm-cost.md R6: core runs cut to save cost
+            "core-session-off",
+            "core-unchanged",
         }
     ),
     "decide": frozenset({"BUY", "SELL", "HOLD", "ERROR"}),

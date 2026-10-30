@@ -122,6 +122,13 @@ PRESET_ENV = "TRADINGAGENTS_ANALYSIS_PRESET"
 #: (the analysis LLM comes from the inherited env, the ledger preset from
 #: TRADINGAGENTS_ANALYSIS_PRESET).
 LLM_ROUTING_ENV = "TRADINGAGENTS_LLM_ROUTING"
+#: specs/llm-cost.md R6 — sessions whose slots run core jobs (default all)
+#: and the skip of unchanged HOLD core tickers (default off).
+CORE_SESSIONS_ENV = "TRADINGAGENTS_CORE_ANALYSIS_SESSIONS"
+CORE_SKIP_UNCHANGED_ENV = "TRADINGAGENTS_CORE_SKIP_UNCHANGED"
+#: A core ticker skipped as unchanged still gets a full run once its last
+#: HOLD is older than this many trading days (weekly refresh).
+CORE_UNCHANGED_MAX_AGE = 4
 ANTHROPIC_BUDGET_ENV = "TRADINGAGENTS_ANTHROPIC_MONTHLY_BUDGET_USD"
 
 _AB_PAIRING_CHOICES = ("off", "paired")
@@ -141,6 +148,8 @@ class RunnerSettings:
     analysis_job_concurrency: int = 2
     llm_routing: str | None = None
     anthropic_monthly_budget_usd: float = DEFAULT_ANTHROPIC_MONTHLY_BUDGET_USD
+    core_analysis_sessions: tuple[str, ...] = SESSIONS
+    core_skip_unchanged: bool = False
 
     def __post_init__(self) -> None:
         if self.analysis_job_concurrency <= 0:
@@ -151,6 +160,11 @@ class RunnerSettings:
             )
         if not self.anthropic_monthly_budget_usd >= 0:
             raise ValueError("anthropic_monthly_budget_usd must be >= 0")
+        unknown = set(self.core_analysis_sessions) - set(SESSIONS)
+        if unknown:
+            raise ValueError(
+                f"core_analysis_sessions {sorted(unknown)} — expected a subset of {sorted(SESSIONS)}"
+            )
         if self.ab_pairing not in _AB_PAIRING_CHOICES:
             raise ValueError(
                 f"ab_pairing {self.ab_pairing!r} — expected one of {_AB_PAIRING_CHOICES}"
@@ -186,6 +200,12 @@ def load_settings(
         anthropic_monthly_budget_usd=float(
             raw(ANTHROPIC_BUDGET_ENV) or defaults.anthropic_monthly_budget_usd
         ),
+        core_analysis_sessions=(
+            tuple(s.strip().lower() for s in raw(CORE_SESSIONS_ENV).split(",") if s.strip())
+            if raw(CORE_SESSIONS_ENV)
+            else defaults.core_analysis_sessions
+        ),
+        core_skip_unchanged=raw(CORE_SKIP_UNCHANGED_ENV).lower() in {"1", "true", "yes", "on"},
     )
 
 
@@ -833,6 +853,8 @@ def write_config_digest(
         "ab_pairing": settings.ab_pairing,
         "ab_core_pairs_per_slot": settings.ab_core_pairs_per_slot,
         "max_runs_per_slot": settings.max_runs_per_slot,
+        "core_analysis_sessions": list(settings.core_analysis_sessions),
+        "core_skip_unchanged": settings.core_skip_unchanged,
         "execute_on_missing_eval": settings.execute_on_missing_eval,
         "run_timeout_seconds": settings.run_timeout_seconds,
         **(dict(analysis_config) if analysis_config is not None else effective_analysis_config()),
@@ -868,6 +890,82 @@ def _weekdays_between(start: date, end: date) -> int:
         for offset in range(1, max(0, (end - start).days))
         if (start + timedelta(days=offset)).weekday() < 5
     )
+
+
+def select_core_runs(
+    core_tickers: Sequence[str],
+    *,
+    session: str,
+    slot_date: date,
+    settings: RunnerSettings,
+    decision_rows: Sequence[Mapping],
+    positions: PositionsSnapshot | None,
+    inspect_ticker: Callable[[str], BriefInfo],
+) -> tuple[list[str], list[tuple[str, str, str, dict]]]:
+    """specs/llm-cost.md R6: the core tickers to analyse this slot, and the
+    skipped ones as ``(ticker, code, reason, details)`` funnel entries.
+
+    - ``core-session-off``: the session is not in ``core_analysis_sessions``.
+    - ``core-unchanged`` (opt-in): every condition holds — a fresh positions
+      snapshot shows no position in it; its latest scheduled brief-arm
+      decision is a HOLD at most ``CORE_UNCHANGED_MAX_AGE`` trading days old;
+      today's brief has no catalyst at or above the trigger threshold. Any
+      doubt (no snapshot, stale snapshot, no prior decision) runs it.
+    """
+    if session not in settings.core_analysis_sessions:
+        reason = f"core analysis off for {session} (catalyst-only session)"
+        return [], [(t, "core-session-off", reason, {}) for t in core_tickers]
+    if not settings.core_skip_unchanged or positions is None or position_snapshot_stale(
+        positions.as_of, slot_date, positions.next_session
+    ):
+        return list(core_tickers), []
+    held = {p.ticker for p in positions.positions if p.qty or p.open_orders}
+    latest: dict[str, Mapping] = {}
+    for row in decision_rows:
+        ticker = row.get("ticker")
+        if (
+            ticker in held
+            or row.get("session") != session
+            or row.get("arm") != "brief"
+            or row.get("trigger") == "manual"
+            or row.get("decision") == "ERROR"
+            or not isinstance(row.get("date"), str)
+            or row["date"] >= slot_date.isoformat()
+        ):
+            continue
+        key = (row["date"], _attempt_number(str(row.get("run_id") or "")))
+        current = latest.get(ticker)
+        if current is None or key >= (current["date"], _attempt_number(str(current.get("run_id") or ""))):
+            latest[ticker] = row
+    run: list[str] = []
+    skipped: list[tuple[str, str, str, dict]] = []
+    threshold = settings.analysis_trigger_threshold
+    for ticker in core_tickers:
+        row = latest.get(ticker)
+        if ticker in held or row is None or row.get("decision") != "HOLD":
+            run.append(ticker)
+            continue
+        last = date.fromisoformat(row["date"])
+        age = _weekdays_between(last, slot_date) + 1  # trading days since, slot day included
+        score = inspect_ticker(ticker).catalyst_score
+        if age > CORE_UNCHANGED_MAX_AGE or (score is not None and score >= threshold):
+            run.append(ticker)
+            continue
+        skipped.append((
+            ticker,
+            "core-unchanged",
+            f"HOLD on {row['date']} ({age} trading day(s) ago), no position, "
+            f"brief catalyst {'none' if score is None else f'{score:g}'} < trigger {threshold:g}",
+            {"last_decision_date": row["date"], "age": age, "score": score, "threshold": threshold},
+        ))
+    return run, skipped
+
+
+def _attempt_number(run_id: str) -> int:
+    try:
+        return int(run_id.rsplit("-", 1)[1])
+    except (IndexError, ValueError):
+        return 0
 
 
 def position_snapshot_stale(
@@ -1674,10 +1772,22 @@ def run_slot(
         jobs = [build_manual_job(manual, macro, inspect(manual))]
     else:
         pool_ref, core_tickers, opportunity_tickers = load_pool_inputs(config, session, slot_date)
+        core_run, core_skipped = select_core_runs(
+            normalize_tickers(core_tickers, "core"),
+            session=session,
+            slot_date=slot_date,
+            settings=settings,
+            decision_rows=read_decision_rows(config.ledger_dir),
+            positions=load_positions(config.ledger_dir),
+            inspect_ticker=inspect,
+        )
+        for ticker, _code, reason, _details in core_skipped:
+            logger.info("%s: core run skipped — %s", ticker, reason)
+        untriggered.extend(core_skipped)
         jobs = plan_jobs(
             session=session,
             slot_date=slot_date,
-            core_tickers=normalize_tickers(core_tickers, "core"),
+            core_tickers=core_run,
             opportunity_tickers=normalize_tickers(opportunity_tickers, "opportunity"),
             settings=settings,
             macro=macro,

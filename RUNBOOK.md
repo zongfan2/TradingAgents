@@ -413,6 +413,12 @@ slot's LLM cost and the month's Anthropic spend. If Anthropic answers
 "credit balance is too low", the runner writes
 `~/.tradingagents/llm_budget/<YYYY-MM>.exhausted` and reruns that run on
 DeepSeek — delete the marker to go back to Claude after topping up.
+Run-volume cuts (same spec, R6): `TRADINGAGENTS_CORE_ANALYSIS_SESSIONS=us`
+makes cn slots catalyst-only (core tickers carry funnel code
+`core-session-off`); `TRADINGAGENTS_CORE_SKIP_UNCHANGED=on` skips a core
+ticker whose last HOLD is ≤ 4 trading days old when nothing changed (no
+position, no catalyst ≥ trigger) — funnel code `core-unchanged`; every core
+ticker still gets a full run at least weekly.
 
 ## 8. Troubleshooting
 

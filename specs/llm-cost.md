@@ -1,7 +1,8 @@
 # Spec: LLM cost — usage ledger, Claude-first routing, run-volume cuts
 
 **Builder**: Claude Code · **Status**: Phase 1 implemented (R1–R4,
-2026-10-29; user decisions recorded below), Phases 2–3 open · Contracts: new `llm_usage.jsonl` line schema (this spec);
+2026-10-29), Phase 2 implemented (R6, 2026-10-31); Phase 3 (R5) open.
+User decisions recorded below · Contracts: new `llm_usage.jsonl` line schema (this spec);
 the decision ledger is unchanged (`preset` already names the run's profile).
 Changes upstream agent behavior (DeepSeek thinking, prompt order) — this
 spec is the authorization AGENTS.md requires.
@@ -138,13 +139,17 @@ caches common prefixes automatically. Behavior is otherwise unchanged
   `cn,us`; set `us`). A session not listed runs no core jobs; each skipped
   core ticker emits trigger `core-session-off` (excluded) in the funnel.
 - **A/B paused**: `TRADINGAGENTS_AB_PAIRING=off` (existing setting).
-- **Core skip-unchanged** (us core): skip a core ticker's run when *all*
-  hold — no open position or open order in it (positions.json); its latest
-  scheduled decision was HOLD; that decision is ≤ 4 trading days old (so
-  every core ticker gets a full run at least weekly); today's brief has no
-  catalyst ≥ the trigger threshold and its eval is not newer-and-different.
-  Funnel trigger code `core-unchanged` (excluded) with the age and reason.
-  `TRADINGAGENTS_CORE_SKIP_UNCHANGED=on|off` (default off until deployed).
+- **Core skip-unchanged** (`analysis_runner.select_core_runs`): skip a
+  core ticker's run when *all* hold — a positions snapshot exists, is not
+  stale (the contract's 1-trading-day rule) and shows no position or open
+  leg in it; its latest scheduled brief-arm decision (manual and ERROR rows
+  ignored, latest attempt wins) is a HOLD at most 4 trading days old
+  (weekdays since it, slot day included — so every core ticker gets a full
+  run at least weekly); today's brief has no catalyst ≥ the trigger
+  threshold. Any doubt runs the ticker. Funnel trigger code
+  `core-unchanged` (excluded) with the age, score and threshold.
+  `TRADINGAGENTS_CORE_SKIP_UNCHANGED=on|off` (default off). Both settings
+  are part of the config digest.
 
 ## Prior art (specs/README.md rule 6)
 
