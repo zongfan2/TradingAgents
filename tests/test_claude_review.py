@@ -275,8 +275,35 @@ def test_parse_judgment_accepts_plain_and_fenced_json():
 @pytest.mark.parametrize(
     "output",
     [
-        "looks good",
+        'I have read the diff. Writing up the verdict now.\n\n{"tests_run": [], "findings": [], "limitations": []}',
         'prefix {"tests_run": [], "findings": [], "limitations": []}',
+        'Done.\n```json\n{"tests_run": [], "findings": [], "limitations": []}\n```',
+    ],
+)
+def test_parse_judgment_accepts_one_object_after_a_prose_preamble(output):
+    """2026-10-31: reviewers often open with one sentence before the JSON;
+    the object is still validated in full."""
+    assert review.parse_judgment(output).findings == []
+
+
+@pytest.mark.unit
+def test_parse_judgment_after_a_preamble_still_validates_the_schema():
+    with pytest.raises(review.ReviewError, match="schema"):
+        review.parse_judgment(
+            'intro {"tests_run": [], "findings": [], "limitations": [], "verdict": "pass"}'
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "output",
+    [
+        "looks good",
+        'note {"a": 1} then {"tests_run": [], "findings": [], "limitations": []}',
+        'see `x`: {"tests_run": [], "findings": [], "limitations": []}',
+        'verdict: {"tests_run": [], "findings": [], "limitations": []} trailing words',
+        'intro\n{"tests_run": [], "findings": [], "limitations": []}\n{"tests_run": []}',
+        'intro\n```json\n{"tests_run": [], "findings": [], "limitations": []}\n```\nmore',
         '```\n{"tests_run": [], "findings": [], "limitations": []}\n```',
         '```JSON\n{"tests_run": [], "findings": [], "limitations": []}\n```',
         '```json\n{"tests_run": [], "findings": [], "limitations": []}\n```\nmore',
