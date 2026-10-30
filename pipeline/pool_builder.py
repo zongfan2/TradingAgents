@@ -59,7 +59,13 @@ from pathlib import Path
 import yaml
 from pydantic import Field, ValidationError, field_validator
 
-from pipeline.claude_cli import EnvelopeError, collect_command, collect_failed, collect_output
+from pipeline.claude_cli import (
+    EnvelopeError,
+    call_env,
+    collect_command,
+    collect_failed,
+    collect_output,
+)
 from pipeline.common import (
     SESSIONS,
     append_log_line,
@@ -438,6 +444,7 @@ def default_runner(backend: str, prompt: str) -> str:
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=call_env(command),
         )
     except FileNotFoundError as exc:
         raise NominationError(f"backend CLI '{command[0]}' not found on PATH") from exc

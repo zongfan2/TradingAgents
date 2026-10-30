@@ -198,3 +198,50 @@ def test_junk_usage_on_the_deepseek_route_never_raises(cli_env, monkeypatch):
     line = json.loads(log.read_text().splitlines()[-1])
     assert line["billing"] == "deepseek" and line["billed_usd"] == 0.0
     assert claude_cli.collect_output("claude", json.dumps(bad), component="ticker_collector") == "ok"
+
+
+@pytest.mark.unit
+def test_launch_env_is_the_snapshot_taken_with_the_route(cli_env, monkeypatch):
+    """Review 5f2c43c: a switch between build and launch cannot make a call
+    run on DeepSeek while billed to Anthropic."""
+    monkeypatch.setenv("TRADINGAGENTS_LLM_ROUTING", "claude-first")
+    command = claude_cli.claude_command("claude-opus-5-5", "medium")
+    snapshot = claude_cli.call_env(command)
+    assert snapshot is not None and snapshot.get("ANTHROPIC_API_KEY") == "sk-ant-test"
+    claude_cli._switch_to_deepseek_after_exhaustion("Credit balance is too low")
+    # The call built before the switch still launches with its Anthropic env.
+    assert claude_cli.call_env(command)["ANTHROPIC_API_KEY"] == "sk-ant-test"
+    assert "ANTHROPIC_BASE_URL" not in claude_cli.call_env(command)
+    after = claude_cli.claude_command("claude-opus-5-5", "medium")
+    assert claude_cli.call_env(after)["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
+    assert claude_cli.call_env(["codex", "exec"]) is None  # other backends inherit
+
+
+@pytest.mark.unit
+def test_collector_passes_the_snapshot_to_the_subprocess(cli_env, monkeypatch):
+    from pipeline import ticker_collector
+
+    seen = {}
+
+    def fake_run(command, **kwargs):
+        seen["env"] = kwargs.get("env")
+        raise FileNotFoundError("claude")
+
+    monkeypatch.setattr(ticker_collector.subprocess, "run", fake_run)
+    with pytest.raises(ticker_collector.CollectorError):  # FileNotFoundError -> CollectorError
+        ticker_collector.default_runner("claude", "prompt")
+    assert seen["env"] is not None and seen["env"]["ANTHROPIC_API_KEY"] == "sk-ant-test"
+
+
+@pytest.mark.unit
+def test_infinite_usage_never_raises(cli_env, monkeypatch):
+    """Review 5f2c43c: int(inf) is an OverflowError — still a 0 count."""
+    _state, log = cli_env
+    monkeypatch.setenv("TRADINGAGENTS_LLM_ROUTING", "deepseek")
+    claude_cli.claude_command("claude-sonnet-5-5", "medium")
+    bad = envelope(0.5)
+    bad["usage"] = {"input_tokens": float("inf"), "output_tokens": float("-inf")}
+    claude_cli.record_usage("ticker_collector", "claude-sonnet-5-5", "medium", bad)
+    assert json.loads(log.read_text().splitlines()[-1])["billed_usd"] == 0.0
+    stdout = json.dumps(envelope(0.5)).replace('"input_tokens": 100', '"input_tokens": Infinity')
+    assert claude_cli.collect_output("claude", stdout, component="ticker_collector") == "ok"

@@ -145,12 +145,26 @@ def _switch_to_deepseek_after_exhaustion(detail: str) -> None:
             _ROUTE = "deepseek"
 
 
+def call_env(command: list[str]) -> dict[str, str] | None:
+    """The env snapshot taken when this thread built ``command`` with
+    :func:`claude_command`; ``None`` (inherit) for any other backend."""
+    if command and command[0] == "claude":
+        return getattr(_CALL, "env", None)
+    return None
+
+
 def claude_command(model: str, effort: str, *extra: str) -> list[str]:
     """Hermetic web-only ``claude -p`` on a pinned model/effort, JSON envelope.
     On the DeepSeek route every model is pinned to a name DeepSeek serves as
     Flash (R7)."""
-    route = cli_route()
-    _CALL.route = route
+    cli_route()
+    with _ROUTE_LOCK:
+        # Route and env are captured together under the lock the DeepSeek
+        # switch holds while rewriting os.environ; the launch site passes
+        # this env (call_env) so the call runs where it is billed.
+        route = _ROUTE
+        _CALL.route = route
+        _CALL.env = dict(os.environ)
     if route == "deepseek":
         from pipeline.llm_routing import DEEPSEEK_CLI_MODEL
 
@@ -258,7 +272,7 @@ def _count(value: object) -> int:
     """A token count from an envelope field; junk reads as 0 (never raises)."""
     try:
         return max(int(value or 0), 0)
-    except (TypeError, ValueError):
+    except Exception:  # TypeError, ValueError, OverflowError (Infinity), ...
         return 0
 
 

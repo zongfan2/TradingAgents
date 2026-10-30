@@ -46,6 +46,7 @@ from pydantic import Field, ValidationError
 
 from pipeline.claude_cli import (
     EnvelopeError,
+    call_env,
     claude_command,
     parse_envelope,
     record_failed_call,
@@ -167,6 +168,7 @@ def codex_runner(prompt: str) -> str:
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=call_env(command),
         )
     except FileNotFoundError as exc:
         raise BackendError("codex CLI not found on PATH") from exc
@@ -198,6 +200,7 @@ def claude_runner(prompt: str) -> str:
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=call_env(command),
         )
     except FileNotFoundError as exc:
         raise BackendError("claude CLI not found on PATH") from exc
