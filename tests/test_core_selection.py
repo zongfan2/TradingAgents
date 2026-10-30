@@ -188,3 +188,29 @@ def test_every_trigger_code_is_in_the_contract_spec():
         row = next(line for line in spec.splitlines() if line.startswith(f"| `{stage}` ("))
         listed = set(re.findall(r"`([a-zA-Z-]+)`", row))
         assert codes <= listed, (stage, sorted(codes - listed))
+
+
+@pytest.mark.unit
+def test_snapshot_shows_a_cost_cut_core_ticker_from_its_event_or_as_unknown(tmp_path):
+    """decision-funnel R3 note: with its recorded event the skip shows as
+    core-session-off; without one the trigger stage is unknown (no code)."""
+    from pipeline import funnel
+    from pipeline.funnel_events import events_path
+
+    config = make_config(tmp_path)
+    write_pool(config, "cn", SLOT, core=("0700.HK",))
+    macro = write_brief(config.macro_brief_dir / "2026-08-07.cn.md")
+    write_eval(macro, "pass")
+    settings = ar.RunnerSettings(ab_pairing="off", core_analysis_sessions=("us",))
+    run(config, make_resolvers(macro), FakeChild(), session="cn", settings=settings)
+
+    def trigger(snap):
+        entry = next(t for t in snap["tickers"] if t["ticker"] == "0700.HK")
+        stage = entry["stages"]["trigger"]
+        return stage["outcome"], stage["code"], stage["provenance"]
+
+    assert trigger(funnel.build_snapshot(config, "cn", SLOT)) == (
+        "excluded", "core-session-off", "recorded",
+    )
+    events_path(config.state_dir, "cn", SLOT).unlink()  # a backfill without events
+    assert trigger(funnel.build_snapshot(config, "cn", SLOT)) == ("info", None, "unknown")
