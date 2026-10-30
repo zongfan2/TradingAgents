@@ -81,6 +81,12 @@ DEEPSEEK = Profile(
 PROFILES = {CLAUDE.name: CLAUDE, DEEPSEEK.name: DEEPSEEK}
 
 
+#: DeepSeek's Anthropic-compatible endpoint (llm-cost R7). Claude model names
+#: are mapped there: claude-sonnet*/claude-haiku* -> deepseek-flash.
+DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
+DEEPSEEK_CLI_MODEL = "claude-sonnet-5-5"
+
+
 @dataclass(frozen=True)
 class RoutingDecision:
     profile: Profile
@@ -117,3 +123,14 @@ def choose_profile(
         CLAUDE, f"anthropic month spend ${spend:.2f} < budget ${budget_usd:.2f}",
         month, spend, budget_usd,
     )
+
+
+def cli_uses_deepseek(
+    state_dir: str | Path, routing: str | None, budget_usd: float, now: datetime
+) -> tuple[bool, str]:
+    """Whether the Claude CLI steps run on DeepSeek Flash (llm-cost R7): the
+    R2 rule, except that unset routing keeps the legacy Anthropic CLI."""
+    if not routing:
+        return False, "routing unset (legacy)"
+    decision = choose_profile(state_dir, routing, budget_usd, now)
+    return decision.profile is DEEPSEEK, decision.reason
