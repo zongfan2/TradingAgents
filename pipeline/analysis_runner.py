@@ -63,7 +63,7 @@ from pipeline.common import (
     sha256_text,
     to_utc_iso,
 )
-from pipeline.config import PipelineConfig, load_config
+from pipeline.config import PipelineConfig, core_analysis_sessions, load_config
 from pipeline.contracts.base import ContractError
 from pipeline.contracts.briefs import split_frontmatter
 from pipeline.contracts.ledger import (
@@ -124,7 +124,6 @@ PRESET_ENV = "TRADINGAGENTS_ANALYSIS_PRESET"
 LLM_ROUTING_ENV = "TRADINGAGENTS_LLM_ROUTING"
 #: specs/llm-cost.md R6 — sessions whose slots run core jobs (default all)
 #: and the skip of unchanged HOLD core tickers (default off).
-CORE_SESSIONS_ENV = "TRADINGAGENTS_CORE_ANALYSIS_SESSIONS"
 CORE_SKIP_UNCHANGED_ENV = "TRADINGAGENTS_CORE_SKIP_UNCHANGED"
 #: A core ticker skipped as unchanged still gets a full run once its last
 #: HOLD is older than this many trading days (weekly refresh).
@@ -200,11 +199,7 @@ def load_settings(
         anthropic_monthly_budget_usd=float(
             raw(ANTHROPIC_BUDGET_ENV) or defaults.anthropic_monthly_budget_usd
         ),
-        core_analysis_sessions=(
-            tuple(s.strip().lower() for s in raw(CORE_SESSIONS_ENV).split(",") if s.strip())
-            if raw(CORE_SESSIONS_ENV)
-            else defaults.core_analysis_sessions
-        ),
+        core_analysis_sessions=core_analysis_sessions(env),
         core_skip_unchanged=raw(CORE_SKIP_UNCHANGED_ENV).lower() in {"1", "true", "yes", "on"},
     )
 

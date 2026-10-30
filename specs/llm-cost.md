@@ -1,7 +1,7 @@
 # Spec: LLM cost — usage ledger, Claude-first routing, run-volume cuts
 
 **Builder**: Claude Code · **Status**: Phase 1 implemented (R1–R4,
-2026-10-29), Phase 2 implemented (R6, 2026-10-31); Phase 3 (R5) open.
+2026-10-29), Phase 2 implemented (R6, 2026-10-31); R7/R8 implemented (2026-10-31); Phase 3 (R5) open.
 User decisions recorded below · Contracts: new `llm_usage.jsonl` line schema (this spec);
 the decision ledger is unchanged (`preset` already names the run's profile).
 Changes upstream agent behavior (DeepSeek thinking, prompt order) — this
@@ -153,6 +153,57 @@ caches common prefixes automatically. Behavior is otherwise unchanged
   `core-unchanged` (excluded) with the age, score and threshold.
   `TRADINGAGENTS_CORE_SKIP_UNCHANGED=on|off` (default off). Both settings
   are part of the config digest.
+
+### R7 — Claude CLI (collection + evaluation) inside the budget, DeepSeek Flash after
+
+User decisions 2026-10-31: the Claude CLI steps (macro/ticker collectors,
+pool nomination, evaluator) keep billing the Anthropic API key; once the
+month's credits are spent they run on DeepSeek Flash.
+
+- Measured 2026-10-30: the CLI spent $13.75 (4.5 M tokens incl. web search)
+  against $4.03 for analysis; the console's $17.79 for the day is the sum.
+  Before ANTHROPIC_API_KEY entered `.env` (2026-10-29) the CLI ran on the
+  subscription, so older `claude_usage.jsonl` rows were never API-billed.
+- Every `claude_usage.jsonl` line now records `billing`: `anthropic-api`
+  (an Anthropic key in the CLI's env), `subscription` (none) or `deepseek`,
+  and `billed_usd`: the CLI's `total_cost_usd` for `anthropic-api`, 0 for
+  `subscription`, and the DeepSeek Flash price of its tokens for `deepseek`
+  (the CLI's own figure is Anthropic-priced). Lines without `billing`
+  (history) count as `subscription`.
+- The monthly Anthropic spend that gates **both** analysis routing (R2) and
+  the CLI is analysis spend (`llm_usage.jsonl`) plus `anthropic-api` CLI
+  spend in the same UTC month.
+- Route per component process (`pipeline/claude_cli.py`): decided at the
+  first `claude -p` of the process with the R2 rule (`claude-first`: Claude
+  below the budget and without the month's exhaustion marker; `claude` /
+  `deepseek` pin; unset = legacy, never DeepSeek). DeepSeek mode points the
+  process's own env at DeepSeek's Anthropic-compatible endpoint
+  (`ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic`,
+  `ANTHROPIC_API_KEY` = the DeepSeek key — never on argv) and pins every
+  CLI model to `claude-sonnet-5-5`, which DeepSeek maps to `deepseek-flash`
+  (a `claude-opus*` name would map to V4-Pro). Its server-side web search is
+  supported (verified live 2026-10-31: a WebSearch call returned a dated
+  headline with its URL, and a `--json-schema` call — the evaluator's mode —
+  returned valid `structured_output`). Without a DeepSeek key the CLI stays on Anthropic
+  (warned).
+- A CLI error result reporting the credit balance as too low writes the
+  month's exhaustion marker and switches the process to DeepSeek; that one
+  call still fails (the components retry validation errors only), later
+  calls run on Flash. The switch is one-way within a process. Overspend past
+  the budget is bounded by one component's calls (~$7), inside the $10
+  margin.
+
+### R8 — Collect only what can be analysed
+
+A session outside `TRADINGAGENTS_CORE_ANALYSIS_SESSIONS` (R6) collects and
+evaluates no core-ticker briefs — those briefs had no consumer once cn
+became catalyst-only (≈10 briefs + evals per day). Opportunity tickers are
+collected and evaluated as before; the funnel records each skipped core
+ticker at the collect stage as `not-collected-core-off` (excluded). The
+setting is parsed once (`pipeline.config.core_analysis_sessions`) for the
+runner, collector and evaluator. A core-off session with no usable pool has
+nothing to collect: that is an empty, successful run, not the collector's
+"no tickers" error.
 
 ## Prior art (specs/README.md rule 6)
 

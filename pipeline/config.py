@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from pipeline.claude_cli import EFFORT_CHOICES
+from pipeline.common import SESSIONS
 
 #: Orchestrator R1 default per-component subprocess timeouts, in seconds.
 #: The fan-out steps (ticker collectors/evaluators) get one aggregate budget.
@@ -281,3 +282,25 @@ def load_config(env: Mapping[str, str] | None = None) -> PipelineConfig:
         claude_eval_model=backend("TRADINGAGENTS_CLAUDE_EVAL_MODEL", DEFAULT_CLAUDE_EVAL_MODEL),
         claude_eval_effort=backend("TRADINGAGENTS_CLAUDE_EVAL_EFFORT", DEFAULT_CLAUDE_EVAL_EFFORT),
     )
+
+
+#: specs/llm-cost.md R6/R8 — sessions whose slots analyse (and therefore
+#: collect and evaluate) their core tickers; default every session.
+CORE_ANALYSIS_SESSIONS_ENV = "TRADINGAGENTS_CORE_ANALYSIS_SESSIONS"
+
+
+def core_analysis_sessions(env: Mapping[str, str] | None = None) -> tuple[str, ...]:
+    """The sessions whose core tickers are analysed — shared by the analysis
+    runner, the ticker collector and the evaluator so they never disagree.
+    Raises ValueError on an unknown session (loud on junk)."""
+    env = os.environ if env is None else env
+    raw = (env.get(CORE_ANALYSIS_SESSIONS_ENV) or "").strip()
+    if not raw:
+        return SESSIONS
+    sessions = tuple(part.strip().lower() for part in raw.split(",") if part.strip())
+    unknown = set(sessions) - set(SESSIONS)
+    if unknown:
+        raise ValueError(
+            f"{CORE_ANALYSIS_SESSIONS_ENV}: {sorted(unknown)} — expected a subset of {sorted(SESSIONS)}"
+        )
+    return sessions

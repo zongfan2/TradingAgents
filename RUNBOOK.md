@@ -418,7 +418,12 @@ makes cn slots catalyst-only (core tickers carry funnel code
 `core-session-off`); `TRADINGAGENTS_CORE_SKIP_UNCHANGED=on` skips a core
 ticker whose last HOLD is ≤ 4 trading days old when nothing changed (no
 position, no catalyst ≥ trigger) — funnel code `core-unchanged`; every core
-ticker still gets a full run at least weekly.
+ticker still gets a full run at least weekly. A session outside
+`TRADINGAGENTS_CORE_ANALYSIS_SESSIONS` also collects and evaluates no core
+briefs (R8). The Claude CLI steps (collection, evaluation) bill the same
+Anthropic key and count toward the same monthly budget; once it is spent
+they run on DeepSeek Flash through DeepSeek's Anthropic-compatible endpoint
+(R7). `claude_usage.jsonl` lines carry `billing` and `billed_usd`.
 
 ## 8. Troubleshooting
 

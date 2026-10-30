@@ -12,8 +12,11 @@ log; logging is best-effort and never fails a run.
 from __future__ import annotations
 
 import json
+import logging
+import math
 import os
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -60,8 +63,113 @@ HERMETIC_FLAGS = (
 )
 
 
+logger = logging.getLogger(__name__)
+
+#: llm-cost R7 — this process's CLI route, decided at its first ``claude -p``
+#: (``"anthropic"`` or ``"deepseek"``); the switch to DeepSeek is one-way.
+_ROUTE: str | None = None
+_ROUTE_LOCK = threading.Lock()
+#: The route the current thread's last ``claude_command`` was built for: a
+#: call is built, run and recorded on one thread, so its usage is billed to
+#: the route it ran on even if the process switches while it is in flight.
+_CALL = threading.local()
+
+
+def _reset_route_for_tests() -> None:
+    global _ROUTE
+    with _ROUTE_LOCK:
+        _ROUTE = None
+    _CALL.__dict__.clear()
+
+
+def _state_dir() -> Path:
+    from pipeline.config import load_config  # config imports this module
+
+    return load_config().state_dir
+
+
+def _use_deepseek(reason: str) -> bool:
+    """Point THIS process's env at DeepSeek's Anthropic-compatible endpoint
+    (the key never goes on argv). False when no DeepSeek key is set."""
+    from pipeline.llm_routing import DEEPSEEK_ANTHROPIC_BASE_URL
+
+    key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    if not key:
+        logger.warning("claude CLI should switch to DeepSeek (%s) but DEEPSEEK_API_KEY is unset", reason)
+        return False
+    os.environ["ANTHROPIC_BASE_URL"] = DEEPSEEK_ANTHROPIC_BASE_URL
+    os.environ["ANTHROPIC_API_KEY"] = key
+    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
+    logger.warning("claude CLI runs on DeepSeek Flash: %s", reason)
+    return True
+
+
+def cli_route() -> str:
+    """This process's CLI route, decided once (R7): DeepSeek when the month's
+    Anthropic spend (analysis + API-billed CLI) reached the budget or the
+    credits are marked exhausted, under TRADINGAGENTS_LLM_ROUTING."""
+    global _ROUTE
+    with _ROUTE_LOCK:
+        if _ROUTE is None:
+            _ROUTE = "anthropic"
+            try:
+                from pipeline.llm_routing import (
+                    DEFAULT_ANTHROPIC_MONTHLY_BUDGET_USD,
+                    cli_uses_deepseek,
+                )
+
+                routing = os.environ.get("TRADINGAGENTS_LLM_ROUTING", "").strip().lower() or None
+                budget = float(
+                    os.environ.get("TRADINGAGENTS_ANTHROPIC_MONTHLY_BUDGET_USD", "").strip()
+                    or DEFAULT_ANTHROPIC_MONTHLY_BUDGET_USD
+                )
+                deepseek, reason = cli_uses_deepseek(
+                    _state_dir(), routing, budget, datetime.now(timezone.utc)
+                )
+                if deepseek and _use_deepseek(reason):
+                    _ROUTE = "deepseek"
+            except Exception as exc:  # routing never breaks a collection call
+                logger.warning("claude CLI routing check failed (staying on Anthropic): %s", exc)
+        return _ROUTE
+
+
+def _switch_to_deepseek_after_exhaustion(detail: str) -> None:
+    global _ROUTE
+    try:
+        from pipeline.llm_usage import mark_exhausted
+
+        mark_exhausted(_state_dir(), datetime.now(timezone.utc).strftime("%Y-%m"), detail)
+    except Exception as exc:
+        logger.warning("could not record the credit exhaustion: %s", exc)
+    with _ROUTE_LOCK:
+        if _ROUTE != "deepseek" and _use_deepseek("anthropic credits exhausted"):
+            _ROUTE = "deepseek"
+
+
+def call_env(command: list[str]) -> dict[str, str] | None:
+    """The env snapshot taken when this thread built ``command`` with
+    :func:`claude_command`; ``None`` (inherit) for any other backend."""
+    if command and command[0] == "claude":
+        return getattr(_CALL, "env", None)
+    return None
+
+
 def claude_command(model: str, effort: str, *extra: str) -> list[str]:
-    """Hermetic web-only ``claude -p`` on a pinned model/effort, JSON envelope."""
+    """Hermetic web-only ``claude -p`` on a pinned model/effort, JSON envelope.
+    On the DeepSeek route every model is pinned to a name DeepSeek serves as
+    Flash (R7)."""
+    cli_route()
+    with _ROUTE_LOCK:
+        # Route and env are captured together under the lock the DeepSeek
+        # switch holds while rewriting os.environ; the launch site passes
+        # this env (call_env) so the call runs where it is billed.
+        route = _ROUTE
+        _CALL.route = route
+        _CALL.env = dict(os.environ)
+    if route == "deepseek":
+        from pipeline.llm_routing import DEEPSEEK_CLI_MODEL
+
+        model = DEEPSEEK_CLI_MODEL
     return [
         "claude",
         "-p",
@@ -161,12 +269,57 @@ def usage_log_path() -> Path:
     return Path(state_dir).expanduser() / USAGE_LOG_NAME
 
 
+def _count(value: object) -> int:
+    """A token count from an envelope field; junk reads as 0 (never raises)."""
+    try:
+        return max(int(value or 0), 0)
+    except Exception:  # TypeError, ValueError, OverflowError (Infinity), ...
+        return 0
+
+
+def _billing(usage: dict, total_cost: object) -> tuple[str, float]:
+    """``(billing, billed_usd)`` for one call (R7): DeepSeek is repriced at the
+    Flash rate (the CLI's figure is Anthropic-priced); an Anthropic key in
+    the env bills the API; otherwise the subscription pays."""
+    route = getattr(_CALL, "route", None) or _ROUTE
+    if route == "deepseek":
+        from pipeline.llm_usage import call_cost
+
+        cache_read = _count(usage.get("cache_read_input_tokens"))
+        tokens = {
+            "input": _count(usage.get("input_tokens"))
+            + cache_read
+            + _count(usage.get("cache_creation_input_tokens")),
+            "cache_read": cache_read,
+            "output": _count(usage.get("output_tokens")),
+        }
+        try:
+            return "deepseek", round(call_cost("deepseek-flash", tokens) or 0.0, 6)
+        except Exception:  # accounting never fails a call
+            return "deepseek", 0.0
+    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
+        try:
+            cost = float(total_cost or 0.0)
+        except Exception:
+            return "anthropic-api", 0.0
+        # NaN would disable the budget gate, Infinity would trip it all month.
+        return "anthropic-api", cost if math.isfinite(cost) and cost > 0 else 0.0
+    return "subscription", 0.0
+
+
 def record_usage(
     component: str, model: str, effort: str, envelope: dict, *, outcome: str = "ok"
 ) -> None:
     """Append one usage line for a finished call (``outcome`` ``ok`` or
     ``error``); never raises."""
     usage = envelope.get("usage") if isinstance(envelope.get("usage"), dict) else {}
+    billing, billed = _billing(usage, envelope.get("total_cost_usd"))
+    if outcome == "error" and billing == "anthropic-api":
+        detail = str(envelope.get("result") or "")
+        from pipeline.llm_usage import is_credit_exhausted_error
+
+        if is_credit_exhausted_error(detail):
+            _switch_to_deepseek_after_exhaustion(" ".join(detail.split())[:300])
     line = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "component": component,
@@ -175,6 +328,8 @@ def record_usage(
         "outcome": outcome,
         **{name: usage.get(name) for name in _USAGE_FIELDS},
         "total_cost_usd": envelope.get("total_cost_usd"),
+        "billing": billing,
+        "billed_usd": billed,
         "num_turns": envelope.get("num_turns"),
         "duration_ms": envelope.get("duration_ms"),
     }

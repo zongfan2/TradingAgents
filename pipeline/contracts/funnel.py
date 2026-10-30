@@ -42,7 +42,14 @@ CODES: dict[str, frozenset[str] | None] = {
         }
     ),
     "collect": frozenset(
-        {"written", "exists", "failed", "not-collected-watch", "opportunity-dropped-stale-pool"}
+        {
+            "written",
+            "exists",
+            "failed",
+            "not-collected-watch",
+            "opportunity-dropped-stale-pool",
+            "not-collected-core-off",  # specs/llm-cost.md R8
+        }
     ),
     "evaluate": frozenset(
         {"pass", "warn", "fail", "eval-error", "skipped-below-threshold", "skipped-absent"}

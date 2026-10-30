@@ -51,7 +51,13 @@ from pathlib import Path
 
 import yaml
 
-from pipeline.claude_cli import EnvelopeError, collect_command, collect_failed, collect_output
+from pipeline.claude_cli import (
+    EnvelopeError,
+    call_env,
+    collect_command,
+    collect_failed,
+    collect_output,
+)
 from pipeline.common import (
     LOG_FIELD_SEPARATOR,
     SESSIONS,
@@ -63,7 +69,7 @@ from pipeline.common import (
     session_for_ticker,
     to_utc_iso,
 )
-from pipeline.config import load_config
+from pipeline.config import core_analysis_sessions, load_config
 from pipeline.contracts.base import ContractError
 from pipeline.contracts.briefs import (
     TickerBriefMeta,
@@ -252,6 +258,7 @@ def default_runner(
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=call_env(command),
         )
     except FileNotFoundError as exc:
         raise CollectorError(f"backend CLI '{command[0]}' not found on PATH") from exc
@@ -376,11 +383,16 @@ def resolve_jobs(
     session: str,
     as_of: date,
     pool_max_staleness_days: int,
+    *,
+    collect_core: bool = True,
 ) -> tuple[list[TickerJob], PoolReadResult]:
     """R1: the collection set is ``core ∪ opportunity`` per the pool
     contract's reading rule; an absent pool (no file, or gap beyond
     ``pool_max_staleness_days``) drops the opportunity layer and falls back to
-    ``core.<session>.yaml`` so holdings never lose coverage."""
+    ``core.<session>.yaml`` so holdings never lose coverage.
+
+    ``collect_core=False`` (specs/llm-cost.md R8: the session's core tickers
+    are not analysed) leaves every core ticker out, the fallback included."""
     try:
         result = read_pool(pool_dir, session, as_of, pool_max_staleness_days)
     except ContractError as exc:
@@ -412,8 +424,9 @@ def resolve_jobs(
                 as_of.isoformat(),
                 session,
             )
-        for ticker in read_core_yaml(pool_dir, session):
-            add(TickerJob(ticker))
+        if collect_core:
+            for ticker in read_core_yaml(pool_dir, session):
+                add(TickerJob(ticker))
         return jobs, result
 
     if result.staleness == "warn":
@@ -424,8 +437,9 @@ def resolve_jobs(
             result.gap_days or 0,
         )
     assert result.pool is not None  # fresh/warn always carry a parsed file
-    for entry in result.pool.core:
-        add(TickerJob(entry.ticker))
+    if collect_core:
+        for entry in result.pool.core:
+            add(TickerJob(entry.ticker))
     for opp in result.pool.opportunity:
         add(TickerJob(opp.ticker, seed_catalyst_type=opp.catalyst_type,
                       seed_rationale=opp.rationale))
@@ -668,14 +682,17 @@ def collect_all(
     max_workers = _resolve_concurrency(concurrency)
     log_path = brief_dir / COLLECTOR_LOG_NAME
 
-    jobs, pool_result = resolve_jobs(pool_dir, session, as_of, pool_max_staleness_days)
+    collect_core = session in core_analysis_sessions()
+    jobs, pool_result = resolve_jobs(
+        pool_dir, session, as_of, pool_max_staleness_days, collect_core=collect_core
+    )
     prefailed: list[TickerOutcome] = []
     if tickers is not None:
         jobs, prefailed = _subset_jobs(jobs, tickers)
         for outcome in prefailed:
             logger.warning("requested ticker %s: %s", outcome.ticker, outcome.reason)
             _log(log_path, as_of, session, outcome.ticker, "-", "-", "failed")
-    if not jobs and not prefailed:
+    if not jobs and not prefailed and collect_core:
         raise NoTickersError(
             f"no tickers to collect for session '{session}' on {as_of.isoformat()} — "
             f"pool absent/empty and core.{session}.yaml yields none"
@@ -715,13 +732,19 @@ def collect_all(
         summary,
         pool_result,
         subset=tickers is not None,
+        core_off=not collect_core,
     )
     return summary
 
 
 @best_effort
 def _emit_collect_funnel(
-    events: FunnelEvents, summary: CollectSummary, pool_result, *, subset: bool
+    events: FunnelEvents,
+    summary: CollectSummary,
+    pool_result,
+    *,
+    subset: bool,
+    core_off: bool = False,
 ) -> None:
     """Decision-funnel events (spec decision-funnel R1): one per collected
     ticker, plus the pool tickers collection never reaches on purpose.
@@ -750,6 +773,12 @@ def _emit_collect_funnel(
             )
     if subset or pool is None:
         return  # a manual subset says nothing about the layers it skipped
+    if core_off:
+        for entry in pool.core:
+            events.emit(
+                "collect", entry.ticker, "excluded", "not-collected-core-off",
+                "core not analysed in this session (catalyst-only) — no brief collected",
+            )
     if pool_result.staleness == "absent":
         for entry in pool.opportunity:
             events.emit(

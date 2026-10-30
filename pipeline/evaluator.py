@@ -46,13 +46,14 @@ from pydantic import Field, ValidationError
 
 from pipeline.claude_cli import (
     EnvelopeError,
+    call_env,
     claude_command,
     parse_envelope,
     record_failed_call,
     record_usage,
 )
 from pipeline.common import append_log_line, archive_existing, atomic_write, sha256_text, to_utc_iso
-from pipeline.config import load_config
+from pipeline.config import core_analysis_sessions, load_config
 from pipeline.contracts.base import ContractError, ContractModel, validation_error_messages
 from pipeline.contracts.briefs import (
     LegacyMacroBriefMeta,
@@ -167,6 +168,7 @@ def codex_runner(prompt: str) -> str:
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=call_env(command),
         )
     except FileNotFoundError as exc:
         raise BackendError("codex CLI not found on PATH") from exc
@@ -198,6 +200,7 @@ def claude_runner(prompt: str) -> str:
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=call_env(command),
         )
     except FileNotFoundError as exc:
         raise BackendError("claude CLI not found on PATH") from exc
@@ -683,6 +686,10 @@ def batch_tickers(
         opportunity = [
             entry.ticker for entry in result.pool.opportunity if entry.ticker not in set(core)
         ]
+    if session not in core_analysis_sessions():
+        # specs/llm-cost.md R8: core briefs of a catalyst-only session are
+        # neither collected nor evaluated.
+        core = []
 
     events = funnel or FunnelEvents(config.state_dir, session, day, "ticker_evaluators")
     jobs: list[Path] = []
