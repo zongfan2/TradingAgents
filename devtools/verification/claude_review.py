@@ -175,14 +175,44 @@ def changed_files(
     return output.splitlines()
 
 
+def _strip_prose_preamble(stripped: str) -> str | None:
+    """The judgment after a short prose preamble, or ``None``.
+
+    Reviewers sometimes open with one sentence ("Writing up the verdict
+    now.") before the JSON. Accepted only when the preamble holds no brace or
+    backtick (so it cannot hide a second object or fence) and exactly one
+    JSON object - bare or in a single ```json fence - runs to the end."""
+    candidates = [index for index in (stripped.find("{"), stripped.find("```json")) if index > 0]
+    if not candidates:
+        return None
+    start = min(candidates)
+    preamble, rest = stripped[:start], stripped[start:]
+    if any(char in preamble for char in "{}`"):
+        return None
+    if rest.startswith("```"):
+        fence = _JSON_FENCE_RE.fullmatch(rest)
+        return fence.group("body") if fence is not None else None
+    try:
+        _payload, end = json.JSONDecoder().raw_decode(rest)
+    except json.JSONDecodeError:
+        return None
+    return rest if not rest[end:].strip() else None
+
+
 def parse_judgment(output: str) -> ClaudeJudgment:
-    """Parse a plain or singly JSON-fenced strict Claude judgment."""
+    """Parse a strict Claude judgment: plain JSON, a single ```json fence,
+    or either after a brace-free prose preamble."""
     stripped = output.strip()
     if stripped.startswith("```"):
         fence = _JSON_FENCE_RE.fullmatch(stripped)
         if fence is None:
             raise ReviewError("Claude did not return valid judgment JSON", code="invalid-json")
         stripped = fence.group("body")
+    elif not stripped.startswith("{"):
+        body = _strip_prose_preamble(stripped)
+        if body is None:
+            raise ReviewError("Claude did not return valid judgment JSON", code="invalid-json")
+        stripped = body
     try:
         payload = json.loads(stripped)
     except (json.JSONDecodeError, TypeError) as exc:
