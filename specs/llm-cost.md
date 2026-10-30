@@ -1,7 +1,7 @@
 # Spec: LLM cost — usage ledger, Claude-first routing, run-volume cuts
 
 **Builder**: Claude Code · **Status**: Phase 1 implemented (R1–R4,
-2026-10-29), Phase 2 implemented (R6, 2026-10-31); R7/R8 in progress; Phase 3 (R5) open.
+2026-10-29), Phase 2 implemented (R6, 2026-10-31); R7/R8 implemented (2026-10-31); Phase 3 (R5) open.
 User decisions recorded below · Contracts: new `llm_usage.jsonl` line schema (this spec);
 the decision ledger is unchanged (`preset` already names the run's profile).
 Changes upstream agent behavior (DeepSeek thinking, prompt order) — this
@@ -199,7 +199,11 @@ A session outside `TRADINGAGENTS_CORE_ANALYSIS_SESSIONS` (R6) collects and
 evaluates no core-ticker briefs — those briefs had no consumer once cn
 became catalyst-only (≈10 briefs + evals per day). Opportunity tickers are
 collected and evaluated as before; the funnel records each skipped core
-ticker at the collect stage as `not-collected-core-off` (excluded).
+ticker at the collect stage as `not-collected-core-off` (excluded). The
+setting is parsed once (`pipeline.config.core_analysis_sessions`) for the
+runner, collector and evaluator. A core-off session with no usable pool has
+nothing to collect: that is an empty, successful run, not the collector's
+"no tickers" error.
 
 ## Prior art (specs/README.md rule 6)
 

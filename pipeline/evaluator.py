@@ -52,7 +52,7 @@ from pipeline.claude_cli import (
     record_usage,
 )
 from pipeline.common import append_log_line, archive_existing, atomic_write, sha256_text, to_utc_iso
-from pipeline.config import load_config
+from pipeline.config import core_analysis_sessions, load_config
 from pipeline.contracts.base import ContractError, ContractModel, validation_error_messages
 from pipeline.contracts.briefs import (
     LegacyMacroBriefMeta,
@@ -683,6 +683,10 @@ def batch_tickers(
         opportunity = [
             entry.ticker for entry in result.pool.opportunity if entry.ticker not in set(core)
         ]
+    if session not in core_analysis_sessions():
+        # specs/llm-cost.md R8: core briefs of a catalyst-only session are
+        # neither collected nor evaluated.
+        core = []
 
     events = funnel or FunnelEvents(config.state_dir, session, day, "ticker_evaluators")
     jobs: list[Path] = []
