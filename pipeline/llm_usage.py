@@ -314,12 +314,15 @@ def cli_month_spend(state_dir: str | Path, month: str) -> float:
     total = 0.0
     for raw in text.splitlines():
         row = _json_line(raw)
-        if (
-            isinstance(row, dict)
-            and row.get("billing") == "anthropic-api"
-            and str(row.get("ts") or "")[:7] == month
-        ):
-            total += _spend(row.get("billed_usd"))
+        try:
+            if (
+                isinstance(row, dict)
+                and row.get("billing") == "anthropic-api"
+                and str(row.get("ts") or "")[:7] == month
+            ):
+                total += _spend(row.get("billed_usd"))
+        except Exception:  # a malformed line never breaks the fold
+            continue
     return round(total, 6)
 
 
@@ -330,12 +333,26 @@ def month_spend(state_dir: str | Path, month: str, provider: str = "anthropic") 
     budget covers analysis, collection and evaluation."""
     total = cli_month_spend(state_dir, month) if provider == "anthropic" else 0.0
     for row in read_usage(state_dir):
-        if row.get("month") != month:
-            continue
-        for model, usage in (row.get("models") or {}).items():
-            if provider_for_model(model) == provider and isinstance(usage, dict):
-                total += _spend(usage.get("cost_usd"))
+        total += _row_spend(row, month, provider)
     return round(total, 6)
+
+
+def _row_spend(row: dict, month: str, provider: str) -> float:
+    """One ledger line's spend with ``provider``; a line of any malformed
+    shape counts as 0 — a corrupt line never breaks the monthly fold."""
+    try:
+        models = row.get("models")
+        if row.get("month") != month or not isinstance(models, dict):
+            return 0.0
+        return sum(
+            _spend(usage.get("cost_usd"))
+            for model, usage in models.items()
+            if isinstance(model, str)
+            and isinstance(usage, dict)
+            and provider_for_model(model) == provider
+        )
+    except Exception:
+        return 0.0
 
 
 # ---------------------------------------------------------------------------

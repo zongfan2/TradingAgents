@@ -266,4 +266,8 @@ def test_non_finite_cli_cost_never_poisons_the_budget(cli_env, bad):
     ledger.parent.mkdir(parents=True, exist_ok=True)
     with open(ledger, "a", encoding="utf-8") as handle:  # same junk in the analysis ledger
         handle.write(f'{{"month": "{month}", "models": {{"claude-opus-5-5": {{"cost_usd": 1{"0" * 400}}}}}}}\n')
+        for shape in ('[1]', '"x"', '{"claude-opus-5-5": [1]}', '{"1": {"cost_usd": 5}}'):
+            handle.write(f'{{"month": "{month}", "models": {shape}}}\n')
+    with open(log, "a", encoding="utf-8") as handle:
+        handle.write('["not", "a", "row"]\n{"ts": 7, "billing": "anthropic-api", "billed_usd": 3}\n')
     assert month_spend(state, month, "anthropic") == pytest.approx(2.0)
