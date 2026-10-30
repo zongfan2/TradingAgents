@@ -258,8 +258,12 @@ def test_non_finite_cli_cost_never_poisons_the_budget(cli_env, bad):
     assert (last["billing"], last["billed_usd"]) == ("anthropic-api", 0.0)
     month = last["ts"][:7]
     with open(log, "a", encoding="utf-8") as handle:  # a poisoned historical line
-        for junk in ("NaN", "Infinity"):
+        for junk in ("NaN", "Infinity", "1" + "0" * 400, "9" * 5000):
             ts = f"{month}-02T00:00:00+00:00"
             handle.write(f'{{"ts": "{ts}", "billing": "anthropic-api", "billed_usd": {junk}}}\n')
     cli_row(log, billed=2.0, ts=f"{month}-03T00:00:00+00:00")
+    ledger = state / "llm_usage.jsonl"
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    with open(ledger, "a", encoding="utf-8") as handle:  # same junk in the analysis ledger
+        handle.write(f'{{"month": "{month}", "models": {{"claude-opus-5-5": {{"cost_usd": 1{"0" * 400}}}}}}}\n')
     assert month_spend(state, month, "anthropic") == pytest.approx(2.0)

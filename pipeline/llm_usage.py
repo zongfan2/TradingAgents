@@ -270,13 +270,27 @@ def read_usage(state_dir: str | Path) -> list[dict]:
         return []
     rows = []
     for raw in text.splitlines():
-        try:
-            row = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
+        row = _json_line(raw)
         if isinstance(row, dict):
             rows.append(row)
     return rows
+
+
+def _spend(value: object) -> float:
+    """A cost read back from disk: anything non-numeric, non-finite, negative
+    or overflowing counts as 0 — one corrupt line never poisons a fold."""
+    try:
+        number = float(value or 0.0)
+    except Exception:  # TypeError, ValueError, OverflowError (huge ints), ...
+        return 0.0
+    return number if math.isfinite(number) and number > 0 else 0.0
+
+
+def _json_line(raw: str) -> object:
+    try:
+        return json.loads(raw)
+    except Exception:  # JSONDecodeError, and ValueError for >4300-digit ints
+        return None
 
 
 #: The Claude CLI usage log (``pipeline.claude_cli``) and its test override.
@@ -299,21 +313,13 @@ def cli_month_spend(state_dir: str | Path, month: str) -> float:
         return 0.0
     total = 0.0
     for raw in text.splitlines():
-        try:
-            row = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
+        row = _json_line(raw)
         if (
             isinstance(row, dict)
             and row.get("billing") == "anthropic-api"
             and str(row.get("ts") or "")[:7] == month
         ):
-            try:
-                value = float(row.get("billed_usd") or 0.0)
-            except (TypeError, ValueError):
-                continue
-            if math.isfinite(value) and value > 0:  # a NaN/inf line never poisons the gate
-                total += value
+            total += _spend(row.get("billed_usd"))
     return round(total, 6)
 
 
@@ -328,12 +334,7 @@ def month_spend(state_dir: str | Path, month: str, provider: str = "anthropic") 
             continue
         for model, usage in (row.get("models") or {}).items():
             if provider_for_model(model) == provider and isinstance(usage, dict):
-                try:
-                    value = float(usage.get("cost_usd") or 0.0)
-                except (TypeError, ValueError):
-                    continue
-                if math.isfinite(value) and value > 0:
-                    total += value
+                total += _spend(usage.get("cost_usd"))
     return round(total, 6)
 
 
