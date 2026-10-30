@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import sys
 import threading
@@ -298,9 +299,11 @@ def _billing(usage: dict, total_cost: object) -> tuple[str, float]:
             return "deepseek", 0.0
     if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
         try:
-            return "anthropic-api", float(total_cost or 0.0)
-        except (TypeError, ValueError):
+            cost = float(total_cost or 0.0)
+        except Exception:
             return "anthropic-api", 0.0
+        # NaN would disable the budget gate, Infinity would trip it all month.
+        return "anthropic-api", cost if math.isfinite(cost) and cost > 0 else 0.0
     return "subscription", 0.0
 
 

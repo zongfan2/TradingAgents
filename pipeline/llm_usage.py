@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -308,9 +309,11 @@ def cli_month_spend(state_dir: str | Path, month: str) -> float:
             and str(row.get("ts") or "")[:7] == month
         ):
             try:
-                total += float(row.get("billed_usd") or 0.0)
+                value = float(row.get("billed_usd") or 0.0)
             except (TypeError, ValueError):
                 continue
+            if math.isfinite(value) and value > 0:  # a NaN/inf line never poisons the gate
+                total += value
     return round(total, 6)
 
 
@@ -325,7 +328,12 @@ def month_spend(state_dir: str | Path, month: str, provider: str = "anthropic") 
             continue
         for model, usage in (row.get("models") or {}).items():
             if provider_for_model(model) == provider and isinstance(usage, dict):
-                total += float(usage.get("cost_usd") or 0.0)
+                try:
+                    value = float(usage.get("cost_usd") or 0.0)
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(value) and value > 0:
+                    total += value
     return round(total, 6)
 
 

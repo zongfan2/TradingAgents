@@ -245,3 +245,21 @@ def test_infinite_usage_never_raises(cli_env, monkeypatch):
     assert json.loads(log.read_text().splitlines()[-1])["billed_usd"] == 0.0
     stdout = json.dumps(envelope(0.5)).replace('"input_tokens": 100', '"input_tokens": Infinity')
     assert claude_cli.collect_output("claude", stdout, component="ticker_collector") == "ok"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), "junk", -3.0])
+def test_non_finite_cli_cost_never_poisons_the_budget(cli_env, bad):
+    """Review b933564: a NaN/Infinity total_cost_usd is billed as 0 and a bad
+    line already on disk is skipped by the monthly fold."""
+    state, log = cli_env
+    claude_cli.record_usage("evaluator", "claude-opus-5-5", "medium", envelope(bad))
+    last = json.loads(log.read_text().splitlines()[-1])
+    assert (last["billing"], last["billed_usd"]) == ("anthropic-api", 0.0)
+    month = last["ts"][:7]
+    with open(log, "a", encoding="utf-8") as handle:  # a poisoned historical line
+        for junk in ("NaN", "Infinity"):
+            ts = f"{month}-02T00:00:00+00:00"
+            handle.write(f'{{"ts": "{ts}", "billing": "anthropic-api", "billed_usd": {junk}}}\n')
+    cli_row(log, billed=2.0, ts=f"{month}-03T00:00:00+00:00")
+    assert month_spend(state, month, "anthropic") == pytest.approx(2.0)
