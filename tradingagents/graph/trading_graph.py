@@ -119,6 +119,18 @@ class TradingAgentsGraph:
 
         self.deep_thinking_llm = deep_client.get_llm()
         self.quick_thinking_llm = quick_client.get_llm()
+        # The Research Manager may judge on its own (cheaper) model with the
+        # deep role's knobs; the Portfolio Manager keeps deep_think_llm.
+        research_manager_model = self.config.get("research_manager_llm")
+        if research_manager_model and research_manager_model != self.config["deep_think_llm"]:
+            self.research_manager_llm = create_llm_client(
+                provider=self.config["llm_provider"],
+                model=research_manager_model,
+                base_url=self.config.get("backend_url"),
+                **deep_kwargs,
+            ).get_llm()
+        else:
+            self.research_manager_llm = self.deep_thinking_llm
 
         self.memory_log = TradingMemoryLog(self.config)
 
@@ -135,6 +147,7 @@ class TradingAgentsGraph:
             self.deep_thinking_llm,
             self.tool_nodes,
             self.conditional_logic,
+            research_manager_llm=self.research_manager_llm,
         )
 
         self.propagator = Propagator(

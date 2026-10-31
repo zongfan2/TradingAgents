@@ -7,8 +7,7 @@ no code fences around the whole document.
 
 {{SEED}}
 
-Work section by section. For each of the five sections below, run at least two
-distinct web searches with different angles before writing. Emphasize the
+Work section by section. {{SEARCH_BUDGET}} Emphasize the
 trailing 48 hours; add weekly context only where it changes the interpretation.
 Prefer primary sources (company filings, press releases, exchange and regulator
 announcements, official statistics) and major wires (Reuters, Bloomberg, FT,

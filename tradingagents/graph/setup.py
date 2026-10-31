@@ -51,10 +51,13 @@ class GraphSetup:
         deep_thinking_llm: Any,
         tool_nodes: dict[str, ToolNode],
         conditional_logic: ConditionalLogic,
+        research_manager_llm: Any = None,
     ):
-        """Initialize with required components."""
+        """Initialize with required components (``research_manager_llm``
+        defaults to ``deep_thinking_llm``)."""
         self.quick_thinking_llm = quick_thinking_llm
         self.deep_thinking_llm = deep_thinking_llm
+        self.research_manager_llm = research_manager_llm or deep_thinking_llm
         self.tool_nodes = tool_nodes
         self.conditional_logic = conditional_logic
 
@@ -82,7 +85,7 @@ class GraphSetup:
         # Create researcher and manager nodes
         bull_researcher_node = create_bull_researcher(self.quick_thinking_llm)
         bear_researcher_node = create_bear_researcher(self.quick_thinking_llm)
-        research_manager_node = create_research_manager(self.deep_thinking_llm)
+        research_manager_node = create_research_manager(self.research_manager_llm)
         trader_node = create_trader(self.quick_thinking_llm)
 
         # Create risk analysis nodes

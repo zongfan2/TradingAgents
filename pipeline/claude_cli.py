@@ -269,6 +269,9 @@ def usage_log_path() -> Path:
     return Path(state_dir).expanduser() / USAGE_LOG_NAME
 
 
+_SERVER_TOOL_FIELDS = ("web_search_requests", "web_fetch_requests")
+
+
 def _count(value: object) -> int:
     """A token count from an envelope field; junk reads as 0 (never raises)."""
     try:
@@ -314,6 +317,8 @@ def record_usage(
     ``error``); never raises."""
     usage = envelope.get("usage") if isinstance(envelope.get("usage"), dict) else {}
     billing, billed = _billing(usage, envelope.get("total_cost_usd"))
+    server_tools = usage.get("server_tool_use")
+    server_tools = server_tools if isinstance(server_tools, dict) else {}
     if outcome == "error" and billing == "anthropic-api":
         detail = str(envelope.get("result") or "")
         from pipeline.llm_usage import is_credit_exhausted_error
@@ -330,6 +335,8 @@ def record_usage(
         "total_cost_usd": envelope.get("total_cost_usd"),
         "billing": billing,
         "billed_usd": billed,
+        # Server tools bill per request ($10/1K searches), apart from tokens.
+        **{name: _count(server_tools.get(name)) for name in _SERVER_TOOL_FIELDS},
         "num_turns": envelope.get("num_turns"),
         "duration_ms": envelope.get("duration_ms"),
     }
