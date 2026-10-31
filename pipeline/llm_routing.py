@@ -48,7 +48,8 @@ class Profile:
 
 
 #: User decision 2026-10-29: Haiku 5.5 (low) for the quick roles, Opus 5.5
-#: (medium) for the two judging roles.
+#: (medium) for the judging roles; 2026-10-31 (R9): the Research Manager
+#: judges on Sonnet 5.5, the Portfolio Manager stays on Opus.
 CLAUDE = Profile(
     "claude",
     "anthropic",
@@ -57,6 +58,7 @@ CLAUDE = Profile(
         "TRADINGAGENTS_LLM_PROVIDER": "anthropic",
         "TRADINGAGENTS_DEEP_THINK_LLM": "claude-opus-5-5",
         "TRADINGAGENTS_QUICK_THINK_LLM": "claude-haiku-5-5",
+        "TRADINGAGENTS_RESEARCH_MANAGER_LLM": "claude-sonnet-5-5",
         "TRADINGAGENTS_ANTHROPIC_DEEP_EFFORT": "medium",
         "TRADINGAGENTS_ANTHROPIC_QUICK_EFFORT": "low",
     },
@@ -71,6 +73,7 @@ DEEPSEEK = Profile(
         **_CLEARED,
         "TRADINGAGENTS_ANTHROPIC_DEEP_EFFORT": "",
         "TRADINGAGENTS_ANTHROPIC_QUICK_EFFORT": "",
+        "TRADINGAGENTS_RESEARCH_MANAGER_LLM": "",
         "TRADINGAGENTS_LLM_PROVIDER": "deepseek",
         "TRADINGAGENTS_DEEP_THINK_LLM": "deepseek-v4-pro",
         "TRADINGAGENTS_QUICK_THINK_LLM": "deepseek-flash",

@@ -1,7 +1,8 @@
 # Spec: LLM cost — usage ledger, Claude-first routing, run-volume cuts
 
 **Builder**: Claude Code · **Status**: Phase 1 implemented (R1–R4,
-2026-10-29), Phase 2 implemented (R6, 2026-10-31); R7/R8 implemented (2026-10-31); Phase 3 (R5) open.
+2026-10-29), Phase 2 implemented (R6, 2026-10-31); R7/R8 implemented (2026-10-31); R9/R10
+implemented (2026-10-31, R10 off until the Haiku-collection comparison); R5 deferred.
 User decisions recorded below · Contracts: new `llm_usage.jsonl` line schema (this spec);
 the decision ledger is unchanged (`preset` already names the run's profile).
 Changes upstream agent behavior (DeepSeek thinking, prompt order) — this
@@ -124,7 +125,13 @@ The `deepseek` profile sends `extra_body={"thinking": {"type":
 keeps thinking. `TRADINGAGENTS_DEEPSEEK_QUICK_THINKING=enabled` restores it.
 Tool calls without thinking need no `reasoning_content` round-trip.
 
-### R5 — Cache-friendly debate prompts
+### R5 — Cache-friendly debate prompts (deferred 2026-10-31)
+
+**Deferred — measured, not worth it.** On 10-30 the Opus judge calls
+(≈11.3K in / 1.7K out, ≈$0.08 each) read a prompt that no other call
+shares, so caching saves nothing there; the Haiku roles would save
+≈$2–3/month. Kept below as the design if volume grows.
+
 
 Bull, bear, the three risk debaters, trader and both managers render the
 shared material first — instrument context and the four reports, byte-
@@ -205,6 +212,38 @@ runner, collector and evaluator. A core-off session with no usable pool has
 nothing to collect: that is an empty, successful run, not the collector's
 "no tickers" error.
 
+### R9 — Research Manager on Sonnet 5.5
+
+`research_manager_llm` (env `TRADINGAGENTS_RESEARCH_MANAGER_LLM`, default
+unset = `deep_think_llm`) gives the Research Manager its own model, built
+with the **deep** role's knobs (effort, thinking); the Portfolio Manager —
+the call that issues the trade decision — always keeps `deep_think_llm`.
+The `claude` profile sets `claude-sonnet-5-5` (≈$0.04 instead of ≈$0.08
+per call, user decision 2026-10-31); the `deepseek` profile clears it, so
+its Research Manager stays on `deepseek-v4-pro`. The key is part of the
+analysis config digest. Takes effect at merge: it changes analysis only,
+never brief collection or evaluation.
+
+### R10 — Per-brief web-search cap for ticker collection
+
+Web search bills $10 per 1K requests apart from tokens; on 10-30 the
+ticker collectors ran ≈390 searches (≈$3.9 of $7.63). The ticker prompt's
+research protocol is a `{{SEARCH_BUDGET}}` sentence:
+
+- `TRADINGAGENTS_COLLECT_MAX_SEARCHES` unset, empty or `0` — the original
+  protocol, byte for byte ("at least two distinct web searches" per
+  section);
+- `N ≥ 5` — "at most N web searches in total, at least one per section".
+  Values that are not integers, or 1–4 (fewer than one per section), fail
+  the collector before any job.
+
+The cap is a prompt instruction (the CLI has no search-count flag), so
+every `claude_usage.jsonl` line records `web_search_requests` and
+`web_fetch_requests` from the envelope's `usage.server_tool_use` (junk
+reads 0) to measure compliance. Macro and pool prompts are unchanged.
+Rollout: off at merge; set to 8 after the Haiku-collection comparison
+(≈2026-11-04), since it changes how briefs are collected.
+
 ## Prior art (specs/README.md rule 6)
 
 - **LiteLLM** — https://github.com/BerriAI/litellm @ `8d441ebc151c`, license
@@ -231,7 +270,8 @@ nothing to collect: that is an empty, successful run, not the collector's
    effort `low`; `deepseek-flash` with thinking disabled reports 0
    reasoning tokens (33 vs 65 output tokens on the same one-line prompt).
 2. Phase 2: R6.
-3. Phase 3: R5, measured with R1.
+3. Phase 3: R5 deferred (measured, not worth it); R9 live at merge; R10
+   merged off, enabled after the Haiku-collection comparison.
 
 Each phase: deterministic gate + Claude review (trading decisions' model
 and inputs change; new ledger; scheduling of runs).
@@ -249,3 +289,9 @@ and inputs change; new ledger; scheduling of runs).
    codes, and held positions are never skipped.
 5. R4/R5 change no decision-relevant content (same reports, same
    instructions), verified by prompt-content tests.
+6. R9: with the model set, the Research Manager runs on it with the deep
+   knobs and the Portfolio Manager on `deep_think_llm`; unset (or equal to
+   the deep model) both share one client.
+7. R10: with no cap the rendered ticker prompt keeps the original protocol
+   text; a cap is stated in the prompt; junk fails before any job; every
+   CLI usage line carries the two server-tool counts.

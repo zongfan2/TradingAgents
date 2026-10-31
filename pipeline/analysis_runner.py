@@ -773,6 +773,7 @@ _GRAPH_CONFIG_KEYS = (
     "llm_provider",
     "deep_think_llm",
     "quick_think_llm",
+    "research_manager_llm",
     "backend_url",
     "temperature",
     "llm_max_retries",

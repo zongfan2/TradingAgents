@@ -69,7 +69,7 @@ from pipeline.common import (
     session_for_ticker,
     to_utc_iso,
 )
-from pipeline.config import core_analysis_sessions, load_config
+from pipeline.config import collect_max_searches, core_analysis_sessions, load_config
 from pipeline.contracts.base import ContractError
 from pipeline.contracts.briefs import (
     TickerBriefMeta,
@@ -303,6 +303,23 @@ def render_seed_block(job: TickerJob) -> str:
     return "\n".join(lines)
 
 
+#: The original research protocol, kept byte-for-byte when no cap is set.
+UNCAPPED_SEARCH_BUDGET = (
+    "For each of the five sections below, run at least two\n"
+    "distinct web searches with different angles before writing."
+)
+
+
+def render_search_budget(cap: int | None) -> str:
+    """The ``{{SEARCH_BUDGET}}`` sentence (specs/llm-cost.md R10)."""
+    if cap is None:
+        return UNCAPPED_SEARCH_BUDGET
+    return (
+        f"Run at most {cap} web searches in total for this brief, at least one\n"
+        "per section; spend the rest where fresh news matters most."
+    )
+
+
 def render_ticker_prompt(
     as_of: date,
     ticker: str,
@@ -310,6 +327,7 @@ def render_ticker_prompt(
     generator: str,
     seed_block: str,
     template_path: str | Path | None = None,
+    max_searches: int | None = None,
 ) -> str:
     """Render the per-ticker deep-search prompt; any placeholder left
     unresolved raises (never send a partial render to the backend)."""
@@ -323,6 +341,7 @@ def render_ticker_prompt(
             "SESSION": session,
             "GENERATOR": generator,
             "SEED": seed_block,
+            "SEARCH_BUDGET": render_search_budget(max_searches),
         },
     )
 
@@ -556,6 +575,7 @@ def collect_one(
     log_path: Path,
     job_window: float | None = None,
     aggregate_deadline: float | None = None,
+    max_searches: int | None = None,
 ) -> TickerOutcome:
     """Collect one ticker's brief; never raises (R3: per-ticker isolation —
     any failure becomes a ``failed`` outcome in the summary)."""
@@ -575,7 +595,8 @@ def collect_one(
             )
 
         prompt = render_ticker_prompt(as_of, job.ticker, session, generator,
-                                      render_seed_block(job))
+                                      render_seed_block(job),
+                                      max_searches=max_searches)
         text, meta, attempts = _generate_validated(runner, backend, prompt, target, generator)
 
         if target.exists():  # only reachable with --force
@@ -682,6 +703,10 @@ def collect_all(
     max_workers = _resolve_concurrency(concurrency)
     log_path = brief_dir / COLLECTOR_LOG_NAME
 
+    try:
+        max_searches = collect_max_searches()
+    except ValueError as exc:
+        raise CollectorError(str(exc)) from None
     collect_core = session in core_analysis_sessions()
     jobs, pool_result = resolve_jobs(
         pool_dir, session, as_of, pool_max_staleness_days, collect_core=collect_core
@@ -722,6 +747,7 @@ def collect_all(
                     log_path=log_path,
                     job_window=job_window,
                     aggregate_deadline=aggregate_deadline,
+                    max_searches=max_searches,
                 )
                 for job in jobs
             ]

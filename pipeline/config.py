@@ -304,3 +304,32 @@ def core_analysis_sessions(env: Mapping[str, str] | None = None) -> tuple[str, .
             f"{CORE_ANALYSIS_SESSIONS_ENV}: {sorted(unknown)} — expected a subset of {sorted(SESSIONS)}"
         )
     return sessions
+
+
+COLLECT_MAX_SEARCHES_ENV = "TRADINGAGENTS_COLLECT_MAX_SEARCHES"
+
+
+def collect_max_searches(env: Mapping[str, str] | None = None) -> int | None:
+    """The per-brief web-search cap for ticker collection (specs/llm-cost.md
+    R10); unset, empty or ``0`` = no cap (the original protocol). Raises
+    ValueError on junk or a cap below one search per section."""
+    env = os.environ if env is None else env
+    raw = (env.get(COLLECT_MAX_SEARCHES_ENV) or "").strip()
+    if not raw:
+        return None
+    try:
+        cap = int(raw)
+    except ValueError:
+        raise ValueError(f"{COLLECT_MAX_SEARCHES_ENV}: {raw!r} is not an integer") from None
+    if cap == 0:
+        return None
+    if cap < TICKER_BRIEF_SECTIONS:
+        raise ValueError(
+            f"{COLLECT_MAX_SEARCHES_ENV}: {cap} — need 0 (off) or at least "
+            f"{TICKER_BRIEF_SECTIONS} (one search per section)"
+        )
+    return cap
+
+
+#: Sections of the ticker deep-search brief (prompts/ticker_deep_search.md).
+TICKER_BRIEF_SECTIONS = 5
