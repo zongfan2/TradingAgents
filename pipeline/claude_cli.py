@@ -256,7 +256,7 @@ def envelope_line(stdout: str) -> str:
     events = _events(stdout)
     result = next((e for e in reversed(events) if e.get("type") == "result"), None)
     if result is not None:
-        return json.dumps(result)
+        return json.dumps(result, ensure_ascii=False)  # as the CLI printed it
     return "" if events else stdout
 
 

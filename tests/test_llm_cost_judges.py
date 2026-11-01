@@ -367,3 +367,10 @@ def test_only_real_queries_are_logged():
                      _tool_use("WebSearch", query=123), _tool_use("WebSearch", query="  "),
                      _tool_use("WebSearch", query="ok"), _result())
     assert cc.parse_envelope(stdout)["_tool_calls"]["web_search_queries"] == ["ok"]
+
+
+@pytest.mark.unit
+def test_failure_envelope_keeps_non_ascii_text():
+    import pipeline.claude_cli as cc
+
+    assert "额度不足 “x”" in cc.envelope_line(_stream(_result(is_error=True, result="额度不足 “x”")))
