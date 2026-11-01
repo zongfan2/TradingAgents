@@ -254,8 +254,13 @@ def codex_executable() -> tuple[str, Path | None] | None:
         return None
     triple, package = target
     root = real.parent.parent  # .../@openai/codex (bin/codex.js)
-    candidates = [root / "node_modules" / package / "vendor" / triple / "bin" / "codex",
-                  root / "vendor" / triple / "bin" / "codex"]
+    # Node module resolution (codex.js: require.resolve(<pkg>/package.json)):
+    # <dir>/node_modules/<pkg> for the package dir and every ancestor — the
+    # nested global layout and a hoisted sibling alike — then the bundled
+    # vendor/ fallback.
+    candidates = [d / "node_modules" / package / "vendor" / triple / "bin" / "codex"
+                  for d in (root, *root.parents)]
+    candidates.append(root / "vendor" / triple / "bin" / "codex")
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return str(candidate), root

@@ -651,3 +651,19 @@ def test_failed_marker_writes_never_loop_between_rungs(tmp_path, monkeypatch):
     providers = [dict(s.env)["TRADINGAGENTS_LLM_PROVIDER"] for s in child.specs]
     # Each job: anthropic → openai → deepseek, never back to a spent rung.
     assert providers == ["anthropic", "openai", "deepseek"] * 2
+
+
+@pytest.mark.unit
+def test_codex_executable_finds_a_hoisted_platform_package(tmp_path, monkeypatch):
+    monkeypatch.setattr(claude_cli, "_codex_target",
+                        lambda: ("x86_64-unknown-linux-musl", "@openai/codex-linux-x64"))
+    modules = tmp_path / "proj" / "node_modules"
+    launcher = modules / "@openai" / "codex" / "bin" / "codex.js"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("#!/usr/bin/env node\n")
+    native = modules / "@openai" / "codex-linux-x64" / "vendor" / "x86_64-unknown-linux-musl" / "bin" / "codex"
+    native.parent.mkdir(parents=True)
+    native.write_bytes(b"\x7fELF")
+    native.chmod(0o755)
+    monkeypatch.setattr(claude_cli.shutil, "which", lambda cli: str(launcher))
+    assert claude_cli.codex_executable() == (str(native), modules / "@openai" / "codex")

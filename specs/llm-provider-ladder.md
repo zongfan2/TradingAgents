@@ -96,6 +96,9 @@ is budgeted at that provider's ceiling — never at $0. The only
 `claude_command` callers are the collector path (`collect` role) and the
 evaluator (`eval` role), pinned by a test.
 
+API errors arrive on stdout as `error` / `turn.failed` events under
+`--json` (measured with a 404 model error: five "Reconnecting…" `error`
+events, then `turn.failed`); a quota 429 takes the same path.
 Quota detection also matches codex's own rewrite of `insufficient_quota`
 ("Quota exceeded. Check your plan and billing details.", `quota_exceeded`,
 strings of codex-cli 0.164.0).
@@ -121,8 +124,11 @@ The call runs codex's **native binary** directly: the npm `codex` is a
 node launcher that spawns it, and a per-call `subprocess.run` timeout
 would kill only the launcher, leaving the native process spending outside
 the ledger. The binary is found the way the launcher finds it
-(`<package>/node_modules/@openai/codex-*/vendor/<target>/bin/codex`, or
-`vendor/…`, or `codex` on PATH already being the binary), with the
+(the host's target triple and platform package as codex.js maps them;
+`node_modules/<package>/vendor/<triple>/bin/codex` under the launcher's
+package dir or any ancestor, as Node resolution walks — nested or
+hoisted — then the bundled `vendor/<triple>/…`; or `codex` on PATH already
+being a native, non-script binary), with the
 launcher's `CODEX_MANAGED_BY_NPM` / `CODEX_MANAGED_PACKAGE_ROOT` env. No
 binary found (e.g. `codex` not on the scheduled jobs' PATH, which is
 baked at install time) → the CLI skips the rung to DeepSeek.
