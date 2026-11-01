@@ -418,15 +418,41 @@ def _row_spend(row: dict, month: str, provider: str, since_at: datetime | None =
             # An unreadable timestamp counts (over-count is budget-safe).
             if written is not None and written < since_at:
                 return 0.0
-        return sum(
-            _spend(usage.get("cost_usd"))
-            for model, usage in models.items()
-            if isinstance(model, str)
-            and isinstance(usage, dict)
-            and provider_for_model(model) == provider
-        )
+        row_provider = _PROFILE_PROVIDER.get(row.get("profile"))
+        total = 0.0
+        for model, usage in models.items():
+            if not isinstance(model, str) or not isinstance(usage, dict):
+                continue
+            owner = provider_for_model(model)
+            cost = _spend(usage.get("cost_usd"))
+            if owner == "other" and row_provider is not None:
+                # A model name the provider did not report ("unknown") on a
+                # routed run belongs to the run's provider; unpriced, it is
+                # budgeted at that provider's ceiling — never at $0.
+                owner = row_provider
+                if not cost and owner in _CEILING_MODEL:
+                    cost = _spend(call_cost(_CEILING_MODEL[owner], _row_tokens(usage)))
+            if owner == provider:
+                total += cost
+        return total
     except Exception:
         return 0.0
+
+
+#: Routed-run profile → provider (pipeline.llm_routing profile names).
+_PROFILE_PROVIDER = {"claude": "anthropic", "openai": "openai", "deepseek": "deepseek"}
+#: A name ``price_for`` budgets at each provider's ceiling rate.
+_CEILING_MODEL = {"anthropic": "claude-unpriced", "openai": "gpt-unpriced"}
+
+
+def _row_tokens(usage: dict) -> dict[str, int]:
+    tokens = {}
+    for key in ("input", "output", "cache_read", "cache_write"):
+        try:
+            tokens[key] = max(int(usage.get(key) or 0), 0)
+        except Exception:
+            tokens[key] = 0
+    return tokens
 
 
 # ---------------------------------------------------------------------------

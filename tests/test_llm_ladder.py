@@ -578,3 +578,28 @@ def test_any_unfinished_codex_turn_adds_the_token_estimate(ladder_cli, tail):
                                   "\n".join(json.dumps(e) for e in events))
     line = json.loads(log.read_text().splitlines()[-1])
     assert line["billed_usd"] == pytest.approx(0.01 + claude_cli.CODEX_CUT_CALL_ESTIMATE_USD)
+
+
+@pytest.mark.unit
+def test_openai_child_usage_is_captured_and_an_unnamed_model_still_counts(tmp_path):
+    from langchain_core.messages import AIMessage
+
+    from pipeline.llm_usage import UsageCallback
+    from tests.test_llm_cost import _result
+
+    # The shape langchain-openai returns (verified live 2026-11-01).
+    message = AIMessage(content="x", response_metadata={"model_name": "gpt-5.6-luna-2026-09-30"},
+                        usage_metadata={"input_tokens": 1000, "output_tokens": 100, "total_tokens": 1100,
+                                        "input_token_details": {"cache_read": 400}})
+    callback = UsageCallback()
+    callback.on_llm_end(_result(message))
+    row = callback.summary()["gpt-5.6-luna-2026-09-30"]
+    assert row["priced"] is True
+    assert row["cost_usd"] == pytest.approx((600 * 0.20 + 400 * 0.02 + 100 * 1.20) / 1e6, abs=1e-6)
+    # No model name reported → "unknown", unpriced: an openai run still bills it, at the ceiling.
+    unnamed = {"unknown": {"calls": 1, "input": 1000, "output": 100, "cache_read": 0, "cache_write": 0,
+                           "reasoning": 0, "cost_usd": 0.0, "priced": False}}
+    append_usage(tmp_path, run_id="r", date="2026-08-07", session="us", ticker="A", arm="brief",
+                 profile="openai", clock=lambda: NOW, models=unnamed)
+    assert month_spend(tmp_path, MONTH, "openai") == pytest.approx((1000 * 4 + 100 * 20) / 1e6)
+    assert month_spend(tmp_path, MONTH, "anthropic") == 0

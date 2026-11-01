@@ -90,7 +90,9 @@ exec` runs one turn, so one `turn.completed` carries that turn's usage;
 `output_tokens` already includes `reasoning_output_tokens` (102 incl. 14);
 `input_tokens` includes `cached_input_tokens` and `cache_write_input_tokens`.
 Every `web_search` item except an `open_page` action is billed as a search
-(over-counting a non-search action is budget-safe). The only
+(over-counting a non-search action is budget-safe). A routed run's usage under a model name the provider did
+not report (`unknown`) belongs to the run's profile provider and, unpriced,
+is budgeted at that provider's ceiling — never at $0. The only
 `claude_command` callers are the collector path (`collect` role) and the
 evaluator (`eval` role), pinned by a test.
 
