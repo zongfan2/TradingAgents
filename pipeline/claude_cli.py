@@ -304,6 +304,25 @@ _ROLLOUT_CACHE_SIZE = 1024
 _ROLLOUT_LOCK = threading.Lock()
 
 
+def _remove_call_home(call_home: Path) -> None:
+    """Delete one call home (prompt and page text); a failure is logged —
+    retention must never fail silently — and an already-gone path is fine.
+    Never raises."""
+    failures: list[str] = []
+
+    def failed(_func: object, path: str, exc: BaseException) -> None:
+        if not isinstance(exc, FileNotFoundError):
+            failures.append(f"{path}: {exc}")
+
+    try:
+        shutil.rmtree(call_home, onexc=failed)
+    except Exception as exc:
+        failures.append(str(exc))
+    if failures:
+        logger.warning("could not delete codex call home %s (%d paths left): %s",
+                       call_home.name, len(failures), failures[0])
+
+
 def _prune_call_homes(home: Path) -> None:
     cutoff = time.time() - _CALL_HOME_MAX_AGE_SECONDS
     try:
@@ -314,7 +333,7 @@ def _prune_call_homes(home: Path) -> None:
     for call_home in entries:
         try:  # per entry: a home its own call just deleted is no error
             if call_home.stat().st_mtime < cutoff:
-                shutil.rmtree(call_home, ignore_errors=True)
+                _remove_call_home(call_home)
         except FileNotFoundError:
             continue
         except OSError as exc:
@@ -368,7 +387,7 @@ def _rollout_requests(thread_id: object, call_home: Path | None) -> list[dict[st
             logger.warning("could not read codex rollout %s: %s", thread_id, exc)
             requests = None
         if call_home is not None:
-            shutil.rmtree(call_home, ignore_errors=True)
+            _remove_call_home(call_home)
         if thread_id is not None:
             _ROLLOUT_CACHE[thread_id] = requests
             while len(_ROLLOUT_CACHE) > _ROLLOUT_CACHE_SIZE:  # evict oldest only: a
@@ -428,7 +447,7 @@ def _codex_command(
                 atomic_write(path, schema)
             argv += ["--output-schema", str(path)]
         else:
-            shutil.rmtree(call_home, ignore_errors=True)
+            _remove_call_home(call_home)
             raise ValueError(f"claude flag {flag!r} has no codex equivalent")
     argv.append("-")  # prompt on stdin
     env = {name: os.environ[name] for name in _CODEX_ENV_KEEP if name in os.environ}

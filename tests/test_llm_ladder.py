@@ -883,3 +883,24 @@ def test_rollout_cache_evicts_oldest_only(ladder_cli, monkeypatch):
     for i in range(5):
         claude_cli._rollout_requests(f"thread-{i:04d}", None)
     assert list(claude_cli._ROLLOUT_CACHE) == ["thread-0002", "thread-0003", "thread-0004"]
+
+
+@pytest.mark.unit
+def test_a_failed_call_home_deletion_is_logged(ladder_cli, monkeypatch, caplog):
+    import shutil
+
+    real_rmtree = shutil.rmtree
+    claude_cli.claude_command("claude-haiku-5-5", "low")
+    home = claude_cli._CALL.codex_home
+
+    def locked(path, onexc=None, **kwargs):
+        onexc(None, str(home / "state_5.sqlite"), PermissionError("in use"))
+
+    monkeypatch.setattr(claude_cli.shutil, "rmtree", locked)
+    claude_cli._remove_call_home(home)
+    assert "could not delete codex call home" in caplog.text
+    caplog.clear()
+    monkeypatch.setattr(claude_cli.shutil, "rmtree", real_rmtree)
+    claude_cli._remove_call_home(home)
+    claude_cli._remove_call_home(home)  # already gone: silent
+    assert not home.exists() and "could not delete" not in caplog.text
