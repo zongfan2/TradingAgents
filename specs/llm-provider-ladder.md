@@ -57,7 +57,7 @@ On the openai rung every pipeline `claude -p` call is built as a
 hermetic `codex exec`:
 `codex exec --ignore-user-config --sandbox read-only
 --skip-git-repo-check --json -c tools.web_search=true -m <model>
--c model_reasoning_effort=<effort> --disable <feature>… --cd <codex_home>/work
+-c model_reasoning_effort=<effort> --disable <feature>… --cd <call_home>/work
 [--output-schema <file>] -`, prompt on stdin. Isolation (the calls read
 untrusted web pages, as the claude path's HERMETIC_FLAGS assume):
 
@@ -69,7 +69,7 @@ untrusted web pages, as the claude path's HERMETIC_FLAGS assume):
 - the read-only sandbox refuses writes (`apply_patch`);
 - the env is an allow-list (PATH, locale, TZ, TMPDIR, CA and proxy vars)
   plus `CODEX_API_KEY` (verified to authenticate without a login),
-  `CODEX_HOME=HOME=<state_dir>/codex_home`; no other key reaches codex;
+  `CODEX_HOME=HOME=<call_home>` (below); no other key reaches codex;
 - every call gets its own throw-away `CODEX_HOME`
   (`codex_home/calls/<uuid>`, cwd its empty `work/`, never the repo):
   without `--ephemeral` codex writes the session rollout **and** its
@@ -211,6 +211,8 @@ installed version (0.164.0 on 2026-11-01).
    skipped.
 2. A quota error on the OpenAI rung moves the process to DeepSeek and
    writes the marker; the failed call is not retried on the same rung.
-3. codex calls run hermetically (no user config, no session files, key
-   never on argv) and log usage with `billing: openai-api`.
+3. codex calls run hermetically (no user config, only web search, key
+   never on argv, each in its own call home whose session files — rollout,
+   state databases — are deleted once the call is billed) and log usage
+   with `billing: openai-api`, each request priced on its own tier.
 4. `claude-first` behaviour is unchanged.

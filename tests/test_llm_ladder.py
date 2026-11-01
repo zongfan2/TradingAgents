@@ -762,7 +762,7 @@ def test_rollout_prices_each_request_on_its_own_tier_and_is_deleted(ladder_cli):
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("case", ["missing", "mismatch", "bad-id"])
+@pytest.mark.parametrize("case", ["missing", "mismatch", "bad-id", "unreadable", "two-files"])
 def test_rollout_problems_fall_back_to_the_whole_sum(ladder_cli, case):
     _state, log, _month = ladder_cli
     thread_id = TID
@@ -772,6 +772,11 @@ def test_rollout_problems_fall_back_to_the_whole_sum(ladder_cli, case):
         write_rollout(GROWING[:-1])
     elif case == "bad-id":
         thread_id = "../../etc/x*"
+    elif case == "unreadable":  # a directory where the rollout should be
+        (call_home / "sessions" / "2026" / f"rollout-x-{TID}.jsonl").mkdir(parents=True)
+    elif case == "two-files":  # ambiguous: never guessed
+        write_rollout(GROWING)
+        (call_home / "sessions" / f"rollout-y-{TID}.jsonl").write_text("{}\n")
     stdout = codex_stream(searches=(), usage=turn_usage(GROWING), thread_id=thread_id)
     claude_cli.collect_output("claude", stdout, component="ticker_collector")
     total = turn_usage(GROWING)
@@ -779,6 +784,8 @@ def test_rollout_problems_fall_back_to_the_whole_sum(ladder_cli, case):
     long_rate = (max(i - c - w, 0) * 0.20 + c * 0.02 + w * 0.20 + o * 0.75) / 1e6  # summed > 272K → long tier
     assert json.loads(log.read_text().splitlines()[-1])["billed_usd"] == pytest.approx(long_rate, abs=1e-6)
     assert not call_home.exists()
+    if case in ("unreadable", "two-files"):
+        assert claude_cli._ROLLOUT_CACHE[thread_id] is None  # cached as "no usable rollout"
 
 
 @pytest.mark.unit
