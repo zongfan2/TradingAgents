@@ -347,3 +347,12 @@ def test_codex_failure_messages_keep_their_stdout(monkeypatch, case):
     with pytest.raises(error) as raised:
         run()
     assert "partial" in str(raised.value) and "no output" not in str(raised.value)
+
+
+@pytest.mark.unit
+def test_a_webfetch_with_junk_args_is_still_counted():
+    import pipeline.claude_cli as cc
+
+    junk = {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "WebFetch", "input": "junk"}]}}
+    calls = cc.parse_envelope(_stream(junk, _tool_use("WebFetch"), _result()))["_tool_calls"]
+    assert (calls["web_fetch_requests"], calls["web_fetch_urls"]) == (2, [""])

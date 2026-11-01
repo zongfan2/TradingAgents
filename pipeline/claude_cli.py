@@ -232,13 +232,13 @@ def _tool_calls(events: list[dict]) -> dict[str, object]:
             if not isinstance(block, dict) or block.get("type") != "tool_use":
                 continue
             target = wanted.get(block.get("name"))
-            args = block.get("input")
-            if target is None or not isinstance(args, dict):
+            if target is None:
                 continue
             field, arg = target
-            if field == "web_fetch_urls":
+            if field == "web_fetch_urls":  # every call counts, whatever its args
                 calls["web_fetch_requests"] += 1
-            if len(calls[field]) < _MAX_TOOL_CALLS:
+            args = block.get("input")
+            if isinstance(args, dict) and len(calls[field]) < _MAX_TOOL_CALLS:
                 calls[field].append(str(args.get(arg, ""))[:_MAX_TOOL_ARG_CHARS])
     return calls
 
