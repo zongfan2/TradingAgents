@@ -189,6 +189,10 @@ def claude_command(model: str, effort: str, *extra: str) -> list[str]:
     ]
 
 
+#: stream-json event types other than ``result``: a stream cut after one of
+#: them printed no envelope (nothing to log).
+_STREAM_EVENT_TYPES = ("system", "assistant", "user", "stream_event")
+
 #: Bounds on the tool calls kept per usage line (llm-cost R11).
 _MAX_TOOL_CALLS = 60
 _MAX_TOOL_ARG_CHARS = 300
@@ -331,9 +335,10 @@ def record_failed_call(component: str, model: str, effort: str, stdout: str) -> 
     call that printed no envelope (timeout, crash) has no usage to report."""
     try:
         envelope, calls = _result_event(stdout)
-        if envelope is None:  # a lone JSON object (no result event) still logs
+        if envelope is None:  # a lone non-event JSON object still logs
             single = json.loads(stdout)
-            envelope = single if isinstance(single, dict) else None
+            is_event = isinstance(single, dict) and single.get("type") in _STREAM_EVENT_TYPES
+            envelope = single if isinstance(single, dict) and not is_event else None
     except Exception:  # never raises (usage logging is best-effort)
         return
     if envelope is not None:

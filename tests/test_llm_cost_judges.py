@@ -313,3 +313,16 @@ def test_failed_call_messages_quote_the_result_envelope(monkeypatch, tmp_path, c
     assert '"subtype": "init"' not in message and '"type": "tool_use"' not in message
     if expected is not None:
         assert expected in message
+
+
+@pytest.mark.unit
+def test_a_stream_cut_after_one_event_logs_nothing(monkeypatch, tmp_path):
+    import pipeline.claude_cli as cc
+
+    log = tmp_path / "usage.jsonl"
+    monkeypatch.setenv(cc.USAGE_LOG_ENV, str(log))
+    for event in (_INIT, _tool_use("WebSearch", query="q"), {"type": "user", "message": {}}):
+        cc.record_failed_call("ticker_collector", "m", "low", _stream(event))
+    assert not log.exists()
+    cc.record_failed_call("ticker_collector", "m", "low", json.dumps({"usage": {}, "total_cost_usd": 0.01}))
+    assert json.loads(log.read_text())["outcome"] == "error"  # a lone non-event object still logs
