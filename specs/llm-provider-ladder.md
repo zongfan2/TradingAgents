@@ -70,9 +70,15 @@ untrusted web pages, as the claude path's HERMETIC_FLAGS assume):
 - the env is an allow-list (PATH, locale, TZ, TMPDIR, CA and proxy vars)
   plus `CODEX_API_KEY` (verified to authenticate without a login),
   `CODEX_HOME=HOME=<state_dir>/codex_home`; no other key reaches codex;
-- the cwd is an empty `codex_home/work`, never the repo;
-- the session rollout (prompts, fetched pages) stays under `codex_home`
-  only until the call is billed (L4).
+- every call gets its own throw-away `CODEX_HOME`
+  (`codex_home/calls/<uuid>`, cwd its empty `work/`, never the repo):
+  without `--ephemeral` codex writes the session rollout **and** its
+  state/thread-history SQLite databases with the prompt and fetched pages
+  there (measured: `--ephemeral` left no prompt text, the non-ephemeral
+  run did), so the whole dir is deleted once the call is billed (L4) —
+  concurrent calls never share one, so deletion never races a running
+  codex; dirs a crash or launch failure left are pruned after 24 h.
+  Only the content-addressed output schemas stay in `codex_home/schemas`.
 
 All four probed live on 2026-11-01: no shell ("no shell tool
 available"), `file://` opens and `id` fail, JS `require`/`fs`/`process`
@@ -150,9 +156,10 @@ input, at the tier's rate). The tier is a per-request rule. codex's
 (`codex_home/sessions/**/rollout-*-<thread_id>.jsonl`, `token_count`
 events' `last_token_usage`) records each request: codex therefore runs
 without `--ephemeral`, and after each call the rollout of its
-`thread.started` id is read, every request priced on its own tier, and the
-file deleted (failed turns too; leftovers from a crash are pruned after
-24 h; rows are cached per thread so a re-parse prices the same). The
+`thread.started` id is read from the call's home, every request priced on
+its own tier, and the call home deleted (failed turns too; rows are cached
+per thread so a re-parse prices the same). A failed or cut turn bills its
+finished requests exactly plus the estimate for the one in flight. The
 rollout is used only when its requests add up exactly to the turn's
 usage; otherwise — and for ledger rows of summed calls — the sum is judged
 as one request (never under-bills, may over-count). Measured 2026-11-01:

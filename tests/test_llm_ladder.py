@@ -307,7 +307,8 @@ def test_openai_route_builds_a_hermetic_codex_call(ladder_cli):
     assert not any("sk-proj-secret" in part for part in command)  # key never on argv
     env = claude_cli.call_env(command)
     assert env["CODEX_API_KEY"] == "sk-proj-secret"
-    assert env["CODEX_HOME"] == env["HOME"] == str(state / "codex_home")
+    call_home = Path(env["CODEX_HOME"])  # one throw-away home per call
+    assert env["HOME"] == str(call_home) and call_home.parent == state / "codex_home" / "calls"
     assert (env["CODEX_MANAGED_BY_NPM"], env["CODEX_MANAGED_PACKAGE_ROOT"]) == ("1", "/opt/codex")
     # No other secret reaches codex: only the allow-listed parent env.
     assert set(env) <= {*claude_cli._CODEX_ENV_KEEP, "CODEX_API_KEY", "CODEX_HOME", "HOME",
@@ -318,7 +319,7 @@ def test_openai_route_builds_a_hermetic_codex_call(ladder_cli):
     assert {"shell_tool", "unified_exec", "browser_use", "computer_use",
             "multi_agent", "plugins", "apps", "hooks"} <= disabled
     assert "code_mode_host" not in disabled  # web search runs through code mode
-    assert command[command.index("--cd") + 1] == str(state / "codex_home" / "work")
+    assert command[command.index("--cd") + 1] == str(call_home / "work")
     schema = json.dumps({"type": "object"})
     evaluate = claude_cli.claude_command("claude-opus-5-5", "xhigh", "--json-schema", schema, role="eval")
     assert evaluate[evaluate.index("-m") + 1] == "gpt-6.1-terra"
@@ -711,8 +712,11 @@ def test_unnamed_ledger_rows_use_the_whole_sum_for_the_tier(tmp_path):
 TID = "01a19596-42cb-71b0-98e0-40e1766b2a0f"
 
 
-def write_rollout(state, requests, *, thread_id=TID, extra=()):
-    path = state / "codex_home" / "sessions" / "2026" / "11" / "01" / f"rollout-2026-11-01T13-30-15-{thread_id}.jsonl"
+def write_rollout(requests, *, thread_id=TID, extra=()):
+    """Into the current call's CODEX_HOME (call claude_command first)."""
+    home = claude_cli._CALL.codex_home
+    (home / "state_5.sqlite").write_text("prompt text the call left behind")
+    path = home / "sessions" / "2026" / "11" / "01" / f"rollout-2026-11-01T13-30-15-{thread_id}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = [json.dumps({"type": "session_meta", "payload": {"id": thread_id}}), *extra]
     total = {"input_tokens": 0}
@@ -742,15 +746,16 @@ def short_cost(requests):  # gpt-6-luna, every request under 272K
 
 @pytest.mark.unit
 def test_rollout_prices_each_request_on_its_own_tier_and_is_deleted(ladder_cli):
-    state, log, _month = ladder_cli
-    rollout = write_rollout(state, GROWING)
+    _state, log, _month = ladder_cli
     claude_cli.claude_command("claude-haiku-5-5", "low")
+    call_home = claude_cli._CALL.codex_home
+    rollout = write_rollout(GROWING)
     stdout = codex_stream(searches=("q",) * 7, usage=turn_usage(GROWING), thread_id=TID)
     claude_cli.collect_output("claude", stdout, component="ticker_collector")
     line = json.loads(log.read_text().splitlines()[-1])
     assert sum(r[0] for r in GROWING) > 272_000  # the summed turn alone would read as long
     assert line["billed_usd"] == pytest.approx(short_cost(GROWING) + 7 * 0.01, abs=1e-6)
-    assert not rollout.exists()  # prompts and pages never linger
+    assert not rollout.exists() and not call_home.exists()  # rollout, state DBs: nothing lingers
     # Re-parsing the same stdout prices it the same (cached), though the file is gone.
     again = claude_cli.parse_envelope(stdout)
     assert again["total_cost_usd"] == pytest.approx(line["billed_usd"], abs=1e-6)
@@ -759,42 +764,65 @@ def test_rollout_prices_each_request_on_its_own_tier_and_is_deleted(ladder_cli):
 @pytest.mark.unit
 @pytest.mark.parametrize("case", ["missing", "mismatch", "bad-id"])
 def test_rollout_problems_fall_back_to_the_whole_sum(ladder_cli, case):
-    state, log, _month = ladder_cli
+    _state, log, _month = ladder_cli
     thread_id = TID
+    claude_cli.claude_command("claude-haiku-5-5", "low")
+    call_home = claude_cli._CALL.codex_home
     if case == "mismatch":  # a request missing from the record: never trusted
-        write_rollout(state, GROWING[:-1])
+        write_rollout(GROWING[:-1])
     elif case == "bad-id":
         thread_id = "../../etc/x*"
-    claude_cli.claude_command("claude-haiku-5-5", "low")
     stdout = codex_stream(searches=(), usage=turn_usage(GROWING), thread_id=thread_id)
     claude_cli.collect_output("claude", stdout, component="ticker_collector")
     total = turn_usage(GROWING)
     i, c, w, o = total["input_tokens"], total["cached_input_tokens"], total["cache_write_input_tokens"], total["output_tokens"]
     long_rate = (max(i - c - w, 0) * 0.20 + c * 0.02 + w * 0.20 + o * 0.75) / 1e6  # summed > 272K → long tier
     assert json.loads(log.read_text().splitlines()[-1])["billed_usd"] == pytest.approx(long_rate, abs=1e-6)
+    assert not call_home.exists()
 
 
 @pytest.mark.unit
-def test_a_failed_turn_deletes_its_rollout_and_keeps_the_estimate(ladder_cli):
-    state, log, _month = ladder_cli
-    rollout = write_rollout(state, GROWING[:3])
+def test_a_failed_turn_bills_its_finished_requests_plus_the_estimate(ladder_cli):
+    _state, log, _month = ladder_cli
     claude_cli.claude_command("claude-haiku-5-5", "low")
+    call_home = claude_cli._CALL.codex_home
+    write_rollout(GROWING[:3])
     claude_cli.record_failed_call("ticker_collector", "claude-haiku-5-5", "low",
                                   codex_stream(fail="stream disconnected", searches=("q",), thread_id=TID))
-    assert not rollout.exists()
+    assert not call_home.exists()
     line = json.loads(log.read_text().splitlines()[-1])
-    assert line["billed_usd"] == pytest.approx(0.01 + claude_cli.CODEX_CUT_CALL_ESTIMATE_USD)
+    assert line["billed_usd"] == pytest.approx(
+        short_cost(GROWING[:3]) + 0.01 + claude_cli.CODEX_CUT_CALL_ESTIMATE_USD, abs=1e-6)
 
 
 @pytest.mark.unit
-def test_stale_rollouts_are_pruned(ladder_cli):
+def test_stale_call_homes_are_pruned(ladder_cli):
     import os
     import time
 
-    state, _log, _month = ladder_cli
-    old = write_rollout(state, GROWING[:1], thread_id="old-thread-0001")
-    fresh = write_rollout(state, GROWING[:1], thread_id="new-thread-0002")
-    stale = time.time() - claude_cli._ROLLOUT_MAX_AGE_SECONDS - 60
+    claude_cli.claude_command("claude-haiku-5-5", "low")
+    old = claude_cli._CALL.codex_home      # e.g. a launch that never got parsed
+    claude_cli.claude_command("claude-haiku-5-5", "low")
+    fresh = claude_cli._CALL.codex_home
+    stale = time.time() - claude_cli._CALL_HOME_MAX_AGE_SECONDS - 60
     os.utime(old, (stale, stale))
-    claude_cli.claude_command("claude-haiku-5-5", "low")  # builds the codex call → prunes
+    claude_cli.claude_command("claude-haiku-5-5", "low")  # building a call prunes
     assert not old.exists() and fresh.exists()
+
+
+@pytest.mark.unit
+def test_concurrent_calls_get_separate_homes(ladder_cli):
+    import threading
+
+    homes = []
+
+    def build():
+        claude_cli.claude_command("claude-haiku-5-5", "low")
+        homes.append(claude_cli._CALL.codex_home)
+
+    threads = [threading.Thread(target=build) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(set(homes)) == 4
