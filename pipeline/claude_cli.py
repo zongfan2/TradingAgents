@@ -4,9 +4,11 @@ Every pipeline ``claude -p`` call pins its model and effort explicitly — a
 bare ``claude -p`` silently rides the user's global Claude Code default
 (``~/.claude/settings.json``), which changes the pipeline whenever the user
 changes their interactive model. Calls run hermetically (see
-:data:`HERMETIC_FLAGS`) and with ``--output-format json`` so the result
-envelope's ``usage`` / ``total_cost_usd`` can be appended to a jsonl usage
-log; logging is best-effort and never fails a run.
+:data:`HERMETIC_FLAGS`) and with ``--output-format stream-json`` so the final
+``result`` event (the same envelope ``--output-format json`` prints) carries
+``usage`` / ``total_cost_usd`` and the event stream carries each web search
+query; both are appended to a jsonl usage log, best-effort, never failing a
+run.
 """
 
 from __future__ import annotations
@@ -178,18 +180,94 @@ def claude_command(model: str, effort: str, *extra: str) -> list[str]:
         model,
         "--effort",
         effort,
+        # stream-json: one JSON event per line, ending with the result
+        # envelope; -p requires --verbose for it.
         "--output-format",
-        "json",
+        "stream-json",
+        "--verbose",
         *extra,
     ]
 
 
+#: Bounds on the tool calls kept per usage line (llm-cost R11).
+_MAX_TOOL_CALLS = 60
+_MAX_TOOL_ARG_CHARS = 300
+
+
+def _events(stdout: str) -> list[dict]:
+    """The JSON object lines of a ``stream-json`` stdout (a one-line ``json``
+    envelope is a one-event stream); other lines are skipped. Events are
+    split on ``\n`` only: ``str.splitlines`` also breaks on U+2028/U+0085,
+    which JSON.stringify leaves raw inside strings."""
+    events = []
+    for line in (stdout or "").split("\n"):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def _tool_calls(events: list[dict]) -> dict[str, object]:
+    """``{"web_search_queries": [...], "web_fetch_urls": [...]}`` from the
+    assistant ``tool_use`` blocks, in call order, bounded, plus the
+    unbounded ``web_fetch_requests`` count."""
+    calls: dict[str, object] = {"web_search_queries": [], "web_fetch_urls": [], "web_fetch_requests": 0}
+    wanted = {"WebSearch": ("web_search_queries", "query"), "WebFetch": ("web_fetch_urls", "url")}
+    for event in events:
+        if event.get("type") != "assistant":
+            continue
+        message = event.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        for block in content if isinstance(content, list) else ():
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            target = wanted.get(block.get("name"))
+            if target is None:
+                continue
+            field, arg = target
+            if field == "web_fetch_urls":  # every call counts, whatever its args
+                calls["web_fetch_requests"] += 1
+            args = block.get("input")
+            value = args.get(arg) if isinstance(args, dict) else None
+            # Only real queries/URLs: placeholders would read as duplicates.
+            if isinstance(value, str) and value.strip() and len(calls[field]) < _MAX_TOOL_CALLS:
+                calls[field].append(value[:_MAX_TOOL_ARG_CHARS])
+    return calls
+
+
+def _result_event(stdout: str) -> tuple[dict | None, dict[str, object]]:
+    """The last ``result`` event (``None`` if absent) and the tool calls."""
+    events = _events(stdout)
+    result = next((e for e in reversed(events) if e.get("type") == "result"), None)
+    return result, _tool_calls(events)
+
+
+def envelope_line(stdout: str) -> str:
+    """The result envelope as one JSON line (what ``--output-format json``
+    printed) for failure messages; ``""`` for a stream cut before its result
+    (a crash after ``init``: the old format printed nothing then), and
+    ``stdout`` itself when it holds no JSON event (another backend's text)."""
+    events = _events(stdout)
+    result = next((e for e in reversed(events) if e.get("type") == "result"), None)
+    if result is not None:
+        return json.dumps(result, ensure_ascii=False)  # as the CLI printed it
+    return "" if events else stdout
+
+
 def parse_envelope(stdout: str) -> dict:
-    """Validate a successful ``claude -p --output-format json`` envelope."""
-    try:
-        envelope = json.loads(stdout)
-    except json.JSONDecodeError as exc:
-        raise EnvelopeError("claude -p returned invalid JSON envelope") from exc
+    """Validate the successful result envelope of a ``claude -p`` call
+    (``stream-json`` events, or a single ``json`` envelope). The web tool
+    calls seen in the stream ride along under ``_tool_calls``."""
+    envelope, calls = _result_event(stdout)
+    if envelope is None:
+        raise EnvelopeError("claude -p returned invalid JSON envelope")
+    envelope = {**envelope, "_tool_calls": calls}
     if not isinstance(envelope, dict) or envelope.get("type") != "result":
         raise EnvelopeError("claude -p returned malformed result envelope")
     is_error = envelope.get("is_error")
@@ -236,6 +314,12 @@ def collect_output(backend: str, stdout: str, *, component: str) -> str:
     return text
 
 
+def failure_stdout(backend: str, stdout: str) -> str:
+    """The stdout a failed collector call's message quotes: claude's result
+    envelope (:func:`envelope_line`), any other backend's stdout as is."""
+    return envelope_line(stdout) if backend == "claude" else stdout
+
+
 def collect_failed(backend: str, stdout: str, *, component: str) -> None:
     """Log the usage of a collector call that exited non-zero (claude only)."""
     if backend == "claude":
@@ -254,11 +338,16 @@ def record_failed_call(component: str, model: str, effort: str, stdout: str) -> 
     quota: log the usage of any JSON envelope on its stdout as ``error``. A
     call that printed no envelope (timeout, crash) has no usage to report."""
     try:
-        envelope = json.loads(stdout)
-    except (json.JSONDecodeError, TypeError):
+        envelope, calls = _result_event(stdout)
+        if envelope is None:  # a lone JSON object without a "type" still logs
+            single = json.loads(stdout)
+            # Any typed object is a stream event (the result one is handled
+            # above): a stream cut after it printed no envelope.
+            envelope = single if isinstance(single, dict) and "type" not in single else None
+    except Exception:  # never raises (usage logging is best-effort)
         return
-    if isinstance(envelope, dict):
-        record_usage(component, model, effort, envelope, outcome="error")
+    if envelope is not None:
+        record_usage(component, model, effort, {**envelope, "_tool_calls": calls}, outcome="error")
 
 
 def usage_log_path() -> Path:
@@ -269,7 +358,31 @@ def usage_log_path() -> Path:
     return Path(state_dir).expanduser() / USAGE_LOG_NAME
 
 
-_SERVER_TOOL_FIELDS = ("web_search_requests", "web_fetch_requests")
+def _web_search_requests(envelope: dict) -> int:
+    """Billed web searches: the CLI's WebSearch runs as its own request, so
+    the count is in ``modelUsage[*].webSearchRequests`` (``usage``'s
+    ``server_tool_use`` reads 0 for it — measured 2026-11-01)."""
+    model_usage = envelope.get("modelUsage")
+    if not isinstance(model_usage, dict):
+        return 0
+    return sum(
+        _count(entry.get("webSearchRequests"))
+        for entry in model_usage.values()
+        if isinstance(entry, dict)
+    )
+
+
+def _tool_call_fields(envelope: dict) -> dict[str, object]:
+    """The usage-line web tool fields from ``_tool_calls`` (junk → empty)."""
+    calls = envelope.get("_tool_calls")
+    calls = calls if isinstance(calls, dict) else {}
+    fields: dict[str, object] = {
+        field: [str(item) for item in calls[field]][:_MAX_TOOL_CALLS]
+        if isinstance(calls.get(field), list) else []
+        for field in ("web_search_queries", "web_fetch_urls")
+    }
+    fields["web_fetch_requests"] = _count(calls.get("web_fetch_requests"))
+    return fields
 
 
 def _count(value: object) -> int:
@@ -317,8 +430,11 @@ def record_usage(
     ``error``); never raises."""
     usage = envelope.get("usage") if isinstance(envelope.get("usage"), dict) else {}
     billing, billed = _billing(usage, envelope.get("total_cost_usd"))
-    server_tools = usage.get("server_tool_use")
-    server_tools = server_tools if isinstance(server_tools, dict) else {}
+    try:
+        searches = _web_search_requests(envelope)
+        calls = _tool_call_fields(envelope)
+    except Exception:  # never raises
+        searches, calls = 0, {"web_search_queries": [], "web_fetch_urls": [], "web_fetch_requests": 0}
     if outcome == "error" and billing == "anthropic-api":
         detail = str(envelope.get("result") or "")
         from pipeline.llm_usage import is_credit_exhausted_error
@@ -335,8 +451,9 @@ def record_usage(
         "total_cost_usd": envelope.get("total_cost_usd"),
         "billing": billing,
         "billed_usd": billed,
-        # Server tools bill per request ($10/1K searches), apart from tokens.
-        **{name: _count(server_tools.get(name)) for name in _SERVER_TOOL_FIELDS},
+        # Web searches bill per request ($10/1K), apart from tokens (R10/R11).
+        "web_search_requests": searches,
+        **calls,
         "num_turns": envelope.get("num_turns"),
         "duration_ms": envelope.get("duration_ms"),
     }

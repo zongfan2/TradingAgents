@@ -2,7 +2,8 @@
 
 **Builder**: Claude Code · **Status**: Phase 1 implemented (R1–R4,
 2026-10-29), Phase 2 implemented (R6, 2026-10-31); R7/R8 implemented (2026-10-31); R9/R10
-implemented (2026-10-31, R10 off until the Haiku-collection comparison); R5 deferred.
+implemented (2026-10-31, R10 off until the Haiku-collection comparison); R11 implemented
+(2026-11-01); R5 deferred.
 User decisions recorded below · Contracts: new `llm_usage.jsonl` line schema (this spec);
 the decision ledger is unchanged (`preset` already names the run's profile).
 Changes upstream agent behavior (DeepSeek thinking, prompt order) — this
@@ -238,11 +239,39 @@ research protocol is a `{{SEARCH_BUDGET}}` sentence:
   the collector before any job.
 
 The cap is a prompt instruction (the CLI has no search-count flag), so
-every `claude_usage.jsonl` line records `web_search_requests` and
-`web_fetch_requests` from the envelope's `usage.server_tool_use` (junk
-reads 0) to measure compliance. Macro and pool prompts are unchanged.
+compliance is measured from the usage log (R11). Macro and pool prompts are unchanged.
 Rollout: off at merge; set to 8 after the Haiku-collection comparison
 (≈2026-11-04), since it changes how briefs are collected.
+
+### R11 — Web tool calls in the CLI usage log
+
+Every `claude -p` call runs with `--output-format stream-json --verbose`:
+one JSON event per line, ending with the same `result` envelope `json`
+printed. `parse_envelope` takes the last `result` event (a one-line `json`
+envelope still parses) and failure messages quote that envelope, never
+the stream's first (`init`) event: a stream cut before its result quotes
+nothing (stderr or "no output", as the old format printed nothing then). Each `claude_usage.jsonl` line adds:
+
+- `web_search_requests` — billed searches, summed over
+  `modelUsage[*].webSearchRequests`. The CLI's WebSearch is its own
+  request, so `usage.server_tool_use` reads 0 for it (measured 2026-11-01;
+  R10's first cut read that field and logged 0);
+- `web_search_queries` / `web_fetch_urls` — the `WebSearch` queries and
+  `WebFetch` URLs of the assistant `tool_use` blocks, in call order, at
+  most 60 each, each cut to 300 characters, non-empty string arguments
+  only (a placeholder would read as a duplicate); `web_fetch_requests`
+  counts every `WebFetch` call (not capped, whatever its arguments).
+
+A failed call with no `result` event logs nothing (a lone JSON object
+with no `type` — the old envelope shape — still logs).
+
+Events are split on `\n` only: the CLI's JSON.stringify leaves U+2028,
+U+2029 and U+0085 raw inside strings, where `str.splitlines` would cut an
+event (a successful call would then read as an invalid envelope).
+
+Junk reads as 0 / empty, and logging never raises. Purpose: measure
+duplicate queries within a brief and across days (the baseline for the
+brief-dossier design) and the R10 cap's compliance.
 
 ## Prior art (specs/README.md rule 6)
 
@@ -294,4 +323,6 @@ and inputs change; new ledger; scheduling of runs).
    the deep model) both share one client.
 7. R10: with no cap the rendered ticker prompt keeps the original protocol
    text; a cap is stated in the prompt; junk fails before any job; every
-   CLI usage line carries the two server-tool counts.
+   CLI usage line carries the billed search count.
+8. R11: stream and single-envelope stdout both parse; queries and fetch
+   URLs are logged in order and bounded, on ok and error calls alike.

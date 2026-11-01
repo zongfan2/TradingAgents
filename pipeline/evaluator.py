@@ -48,6 +48,7 @@ from pipeline.claude_cli import (
     EnvelopeError,
     call_env,
     claude_command,
+    envelope_line,
     parse_envelope,
     record_failed_call,
     record_usage,
@@ -208,7 +209,7 @@ def claude_runner(prompt: str) -> str:
         raise BackendError(f"claude -p timed out after {int(timeout)}s") from exc
     if proc.returncode != 0:
         record_failed_call("evaluator", model, effort, proc.stdout)
-        detail = (proc.stderr or proc.stdout or "").strip()[:500]
+        detail = (proc.stderr or envelope_line(proc.stdout or "")).strip()[:500]
         raise BackendError(f"claude -p failed (exit {proc.returncode}): {detail}")
     try:
         envelope = parse_envelope(proc.stdout)

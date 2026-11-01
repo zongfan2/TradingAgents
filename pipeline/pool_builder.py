@@ -65,6 +65,7 @@ from pipeline.claude_cli import (
     collect_command,
     collect_failed,
     collect_output,
+    failure_stdout,
 )
 from pipeline.common import (
     SESSIONS,
@@ -454,7 +455,7 @@ def default_runner(backend: str, prompt: str) -> str:
         ) from exc
     if proc.returncode != 0:
         collect_failed(backend, proc.stdout, component="pool_builder")
-        reason = _first_line(proc.stderr or proc.stdout) or "no output"
+        reason = _first_line(proc.stderr or failure_stdout(backend, proc.stdout)) or "no output"
         raise NominationError(f"backend '{backend}' exited {proc.returncode}: {reason}")
     try:
         return collect_output(backend, proc.stdout, component="pool_builder")
