@@ -252,7 +252,7 @@ def ladder_cli(tmp_path, monkeypatch):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-ds-test")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-proj-secret")
     monkeypatch.setenv("TRADINGAGENTS_LLM_ROUTING", "ladder")
-    monkeypatch.setattr(claude_cli.shutil, "which", lambda cli: f"/bin/{cli}")
+    monkeypatch.setattr(claude_cli, "codex_executable", lambda: ("/opt/codex/bin/codex", Path("/opt/codex")))
     now = datetime.now(timezone.utc)
     month = now.strftime("%Y-%m")
     mark_exhausted(state, month, "credit balance too low")
@@ -285,7 +285,8 @@ def test_openai_route_builds_a_hermetic_codex_call(ladder_cli):
     state, _log, _month = ladder_cli
     command = claude_cli.claude_command("claude-haiku-5-5", "low")
     assert claude_cli.cli_route() == "openai"
-    assert command[:2] == ["codex", "exec"] and command[-1] == "-"
+    # The native binary, never the node launcher (a timeout must kill it).
+    assert command[:2] == ["/opt/codex/bin/codex", "exec"] and command[-1] == "-"
     for flag in ("--ignore-user-config", "--ephemeral", "--json", "--skip-git-repo-check"):
         assert flag in command
     assert command[command.index("--sandbox") + 1] == "read-only"
@@ -295,8 +296,10 @@ def test_openai_route_builds_a_hermetic_codex_call(ladder_cli):
     env = claude_cli.call_env(command)
     assert env["CODEX_API_KEY"] == "sk-proj-secret"
     assert env["CODEX_HOME"] == env["HOME"] == str(state / "codex_home")
+    assert (env["CODEX_MANAGED_BY_NPM"], env["CODEX_MANAGED_PACKAGE_ROOT"]) == ("1", "/opt/codex")
     # No other secret reaches codex: only the allow-listed parent env.
-    assert set(env) <= {*claude_cli._CODEX_ENV_KEEP, "CODEX_API_KEY", "CODEX_HOME", "HOME"}
+    assert set(env) <= {*claude_cli._CODEX_ENV_KEEP, "CODEX_API_KEY", "CODEX_HOME", "HOME",
+                        "CODEX_MANAGED_BY_NPM", "CODEX_MANAGED_PACKAGE_ROOT"}
     assert not {"ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY"} & set(env)
     # Web search only: shell, browser, computer use, code mode ... disabled.
     disabled = {command[i + 1] for i, part in enumerate(command) if part == "--disable"}
@@ -364,9 +367,32 @@ def test_codex_quota_error_marks_openai_and_moves_to_deepseek(ladder_cli):
 
 
 @pytest.mark.unit
-def test_missing_codex_or_node_skips_the_openai_rung(ladder_cli, monkeypatch):
-    monkeypatch.setattr(claude_cli.shutil, "which", lambda cli: None if cli == "node" else f"/bin/{cli}")
+def test_missing_codex_binary_skips_the_openai_rung(ladder_cli, monkeypatch):
+    monkeypatch.setattr(claude_cli, "codex_executable", lambda: None)
     assert claude_cli.cli_route() == "deepseek"
+
+
+@pytest.mark.unit
+def test_codex_executable_resolves_the_native_binary_behind_the_npm_launcher(tmp_path, monkeypatch):
+    root = tmp_path / "lib" / "node_modules" / "@openai" / "codex"
+    (root / "bin").mkdir(parents=True)
+    launcher = root / "bin" / "codex.js"
+    launcher.write_text("#!/usr/bin/env node\n")
+    native = root / "node_modules" / "@openai" / "codex-linux-x64" / "vendor" / "x86_64-unknown-linux-musl" / "bin" / "codex"
+    native.parent.mkdir(parents=True)
+    native.write_bytes(b"\x7fELF....")
+    native.chmod(0o755)
+    shim = tmp_path / "bin" / "codex"
+    shim.parent.mkdir()
+    shim.symlink_to(launcher)
+    monkeypatch.setattr(claude_cli.shutil, "which", lambda cli: str(shim))
+    assert claude_cli.codex_executable() == (str(native), root)
+    native.chmod(0o644)  # not executable: no usable binary
+    assert claude_cli.codex_executable() is None
+    monkeypatch.setattr(claude_cli.shutil, "which", lambda cli: str(native))
+    assert claude_cli.codex_executable() == (str(native), None)  # PATH already points at the binary
+    monkeypatch.setattr(claude_cli.shutil, "which", lambda cli: None)
+    assert claude_cli.codex_executable() is None
 
 
 @pytest.mark.unit

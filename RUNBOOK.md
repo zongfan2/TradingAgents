@@ -443,10 +443,11 @@ before zero (`TRADINGAGENTS_OPENAI_BALANCE_MARGIN_USD`), and OpenAI's own
 `insufficient_quota` error writes `llm_budget/openai/<YYYY-MM>.exhausted`
 (delete it after a top-up, then confirm again). Collection and evaluation
 on this rung run `codex exec` hermetically on the API key
-(`~/.tradingagents/codex_home`, never `~/.codex`); the scheduled jobs'
-PATH must contain the `codex` and `node` directories (re-run the schedule
-install from a shell with nvm loaded) — without them the CLI steps skip to
-DeepSeek.
+(`~/.tradingagents/codex_home`, never `~/.codex`), launching codex's
+native binary directly (found behind the npm `codex` launcher, so a
+timeout kills it). The scheduled jobs' PATH must contain the `codex`
+directory (re-run the schedule install from a shell with nvm loaded) —
+without it the CLI steps skip to DeepSeek.
 
 ## 8. Troubleshooting
 

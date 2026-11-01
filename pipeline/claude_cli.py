@@ -132,9 +132,8 @@ def cli_route() -> str:
                 if rung == "deepseek" and _use_deepseek(reason):
                     _ROUTE = "deepseek"
                 elif rung == "openai":
-                    missing = [cli for cli in ("codex", "node") if shutil.which(cli) is None]
-                    if missing:  # a missing CLI would fail every call: next rung
-                        if _use_deepseek(f"{reason}; but {', '.join(missing)} not on PATH"):
+                    if codex_executable() is None:  # every call would fail: next rung
+                        if _use_deepseek(f"{reason}; but no native codex binary found"):
                             _ROUTE = "deepseek"
                     else:
                         _ROUTE = "openai"  # codex on the API key (ladder L3)
@@ -163,7 +162,7 @@ def _switch_to_deepseek_after_exhaustion(detail: str, provider: str = "anthropic
 def call_env(command: list[str]) -> dict[str, str] | None:
     """The env snapshot taken when this thread built ``command`` with
     :func:`claude_command`; ``None`` (inherit) for any other backend."""
-    if command and command[0] in ("claude", "codex") and getattr(_CALL, "built", None) is command:
+    if command and getattr(_CALL, "built", None) is command:
         return getattr(_CALL, "env", None)
     if command and command[0] == "claude":
         return getattr(_CALL, "env", None)
@@ -214,6 +213,31 @@ _CODEX_ENV_KEEP = (
 )
 
 
+def codex_executable() -> tuple[str, Path | None] | None:
+    """``(native binary, npm package root)`` for the installed codex, or
+    ``None``. The npm ``codex`` is a node launcher that spawns the native
+    binary; a subprocess timeout would kill only the launcher and leave the
+    native process spending (ladder L3), so calls run the binary directly
+    (same lookup as the launcher: ``vendor/<target>/bin/codex``)."""
+    found = shutil.which("codex")
+    if found is None:
+        return None
+    real = Path(found).resolve()
+    try:
+        with open(real, "rb") as handle:
+            if handle.read(4) == b"\x7fELF":  # already the native binary
+                return str(real), None
+    except OSError:
+        return None
+    root = real.parent.parent  # .../@openai/codex (bin/codex.js)
+    candidates = sorted(root.glob("node_modules/@openai/codex-*/vendor/*/bin/codex"))
+    candidates += sorted(root.glob("vendor/*/bin/codex"))
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate), root
+    return None
+
+
 def _codex_home() -> Path:
     """A pipeline-only CODEX_HOME: codex keeps auth/state there, never in
     the user's ``~/.codex``."""
@@ -253,10 +277,14 @@ def _codex_command(role: str, effort: str, extra: tuple[str, ...]) -> tuple[list
     """``(argv, model, env)`` for one hermetic ``codex exec`` call. The API
     key goes in the env only (``CODEX_API_KEY``), never on argv."""
     model = (os.environ.get(OPENAI_CLI_MODEL_ENV[role]) or "").strip() or OPENAI_CLI_MODELS[role]
+    resolved = codex_executable()
+    if resolved is None:
+        raise RuntimeError("no native codex binary found")
+    binary, package_root = resolved
     home = _codex_home()
     work = home / "work"  # an empty cwd, never the repo
     work.mkdir(exist_ok=True)
-    argv = ["codex", "exec", *CODEX_FLAGS, "--cd", str(work), "-m", model,
+    argv = [binary, "exec", *CODEX_FLAGS, "--cd", str(work), "-m", model,
             "-c", f"model_reasoning_effort={_CODEX_EFFORT.get(effort, 'medium')}"]
     rest = list(extra)
     while rest:
@@ -274,6 +302,9 @@ def _codex_command(role: str, effort: str, extra: tuple[str, ...]) -> tuple[list
     env["CODEX_API_KEY"] = os.environ.get("OPENAI_API_KEY", "")
     env["CODEX_HOME"] = str(home)
     env["HOME"] = str(home)
+    if package_root is not None:  # what the npm launcher sets for its child
+        env["CODEX_MANAGED_BY_NPM"] = "1"
+        env["CODEX_MANAGED_PACKAGE_ROOT"] = str(package_root)
     return argv, model, env
 
 

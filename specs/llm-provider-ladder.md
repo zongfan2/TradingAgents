@@ -113,9 +113,17 @@ served the call, and the R11 search fields (`web_search` items:
 
 The brief's `generator` stays the configured backend's identity
 (`claude-deep-search`), as on the DeepSeek route (R7); the provider and
-model that served each call are in the usage log. If `codex` or `node` is
-not on PATH the CLI skips the rung to DeepSeek (the scheduled jobs' PATH
-is baked at install time).
+model that served each call are in the usage log.
+
+The call runs codex's **native binary** directly: the npm `codex` is a
+node launcher that spawns it, and a per-call `subprocess.run` timeout
+would kill only the launcher, leaving the native process spending outside
+the ledger. The binary is found the way the launcher finds it
+(`<package>/node_modules/@openai/codex-*/vendor/<target>/bin/codex`, or
+`vendor/…`, or `codex` on PATH already being the binary), with the
+launcher's `CODEX_MANAGED_BY_NPM` / `CODEX_MANAGED_PACKAGE_ROOT` env. No
+binary found (e.g. `codex` not on the scheduled jobs' PATH, which is
+baked at install time) → the CLI skips the rung to DeepSeek.
 
 ### L4 — Ledger and prices
 
