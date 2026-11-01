@@ -612,6 +612,10 @@ def record_failed_call(component: str, model: str, effort: str, stdout: str) -> 
     call that printed no envelope (timeout, crash) has no usage to report."""
     try:
         envelope, calls = _result_event(stdout)
+        if envelope is None and getattr(_CALL, "route", None) == "openai":
+            # A codex call that printed no event yet (killed while starting)
+            # may still have spent: bill the estimate (ladder L3).
+            envelope, calls = _codex_envelope(_events(stdout))
         if envelope is None:  # a lone JSON object without a "type" still logs
             single = json.loads(stdout)
             # Any typed object is a stream event (the result one is handled

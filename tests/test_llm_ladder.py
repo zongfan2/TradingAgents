@@ -525,7 +525,9 @@ def test_a_cut_codex_stream_is_billed_conservatively(ladder_cli):
 
 @pytest.mark.unit
 @pytest.mark.parametrize("site", ["ticker", "macro", "pool", "evaluator"])
-def test_a_timed_out_call_records_its_spend(ladder_cli, monkeypatch, site):
+@pytest.mark.parametrize("printed", [(json.dumps({"type": "thread.started"}) + "\n").encode(), b"", None],
+                         ids=["one-event", "empty", "none"])
+def test_a_timed_out_call_records_its_spend(ladder_cli, monkeypatch, site, printed):
     import subprocess
 
     import pipeline.evaluator as ev
@@ -540,7 +542,7 @@ def test_a_timed_out_call_records_its_spend(ladder_cli, monkeypatch, site):
         "pool": (pb, lambda: pb.default_runner("claude", "P"), pb.NominationError),
         "evaluator": (ev, lambda: ev.claude_runner("P"), ev.BackendError),
     }[site]
-    partial = (json.dumps({"type": "thread.started"}) + "\n").encode()  # bytes, as TimeoutExpired carries
+    partial = printed  # bytes (or nothing), as TimeoutExpired carries
 
     def fake_run(cmd, **kwargs):
         raise subprocess.TimeoutExpired(cmd, 60, output=partial)
