@@ -445,9 +445,12 @@ before zero (`TRADINGAGENTS_OPENAI_BALANCE_MARGIN_USD`), and OpenAI's own
 on this rung run `codex exec` hermetically on the API key
 (`~/.tradingagents/codex_home`, never `~/.codex`), launching codex's
 native binary directly (found behind the npm `codex` launcher, so a
-timeout kills it). The scheduled jobs' PATH must contain the `codex`
-directory (re-run the schedule install from a shell with nvm loaded) —
-without it the CLI steps skip to DeepSeek.
+timeout kills it). The scheduled jobs' PATH must find `codex` — without
+it the CLI steps skip to DeepSeek. On the Windows server this is a
+symlink in a directory the tasks' PATH already has (re-registering the
+tasks needs an elevated Windows shell):
+`ln -s ~/.nvm/versions/node/<version>/bin/codex ~/.local/bin/codex`
+(re-point it after an nvm Node upgrade).
 
 ## 8. Troubleshooting
 
