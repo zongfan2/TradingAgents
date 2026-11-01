@@ -93,8 +93,9 @@ DEEPSEEK = Profile(
     },
 )
 
-#: User decision 2026-11-01 (ladder Q2): gpt-5.6-luna for the quick roles,
-#: gpt-5.6-sol for both judges (no Research Manager override).
+#: User decision 2026-11-01 (ladder Q2, revised to GPT-6 the same day):
+#: gpt-6-luna for the quick roles, gpt-6.1-sol for both judges (no Research
+#: Manager override).
 OPENAI = Profile(
     "openai",
     "openai",
@@ -105,8 +106,8 @@ OPENAI = Profile(
         "TRADINGAGENTS_RESEARCH_MANAGER_LLM": "",
         "TRADINGAGENTS_DEEPSEEK_QUICK_THINKING": "",
         "TRADINGAGENTS_LLM_PROVIDER": "openai",
-        "TRADINGAGENTS_DEEP_THINK_LLM": "gpt-5.6-sol",
-        "TRADINGAGENTS_QUICK_THINK_LLM": "gpt-5.6-luna",
+        "TRADINGAGENTS_DEEP_THINK_LLM": "gpt-6.1-sol",
+        "TRADINGAGENTS_QUICK_THINK_LLM": "gpt-6-luna",
         "TRADINGAGENTS_OPENAI_DEEP_REASONING_EFFORT": "medium",
         "TRADINGAGENTS_OPENAI_QUICK_REASONING_EFFORT": "low",
     },

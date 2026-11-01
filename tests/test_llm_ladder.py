@@ -32,7 +32,7 @@ KEY_ENV = {"OPENAI_API_KEY": "sk-proj-test"}
 def openai_run(state, cost, at):
     append_usage(state, run_id="r", date=at.date().isoformat(), session="us", ticker="A", arm="brief",
                  profile="openai", clock=lambda: at,
-                 models={"gpt-5.6-sol": {"calls": 1, "cost_usd": cost, "priced": True}})
+                 models={"gpt-6.1-sol": {"calls": 1, "cost_usd": cost, "priced": True}})
 
 
 def cli_line(log, billing, billed, ts):
@@ -51,13 +51,24 @@ def over_claude_budget(state):
 
 @pytest.mark.unit
 def test_gpt_prices_and_provider():
-    assert provider_for_model("gpt-5.6-luna") == "openai"
-    assert call_cost("gpt-5.6-luna", {"input": 1_000_000, "cache_read": 500_000, "output": 1_000_000}) == (
-        pytest.approx(500_000 * 0.20 / 1e6 + 500_000 * 0.02 / 1e6 + 1.20)
+    assert provider_for_model("gpt-6-luna") == "openai"
+    assert call_cost("gpt-6-luna", {"input": 200_000, "cache_read": 100_000, "output": 1_000_000}) == (
+        pytest.approx(100_000 * 0.10 / 1e6 + 100_000 * 0.01 / 1e6 + 0.50)
     )
-    assert price_for("gpt-5.6-luna-2026-09-30") == (price_for("gpt-5.6-luna")[0], True)  # snapshot id
+    # Over 272K prompt tokens: the long-context tier, cache writes included.
+    long = {"input": 300_000, "cache_read": 100_000, "cache_write": 100_000, "output": 1_000}
+    assert call_cost("gpt-6.1-sol", long) == pytest.approx(
+        (100_000 * 4.00 + 100_000 * 0.20 + 100_000 * 4.00 + 1_000 * 15.00) / 1e6)
+    assert call_cost("gpt-6.1-terra", {"input": 200_000, "output": 200_000}) == pytest.approx(0.2 + 1.0)
+    assert price_for("gpt-6-luna-2026-09-14") == (price_for("gpt-6-luna")[0], True)  # snapshot id
     ceiling, exact = price_for("gpt-9-unknown")
-    assert (ceiling.output, exact) == (20.00, False)  # never budgeted below sol
+    assert (ceiling.output, exact) == (50.00, False)  # the highest listed rate (gpt-6-astra)
+    assert price_for("gpt-6-astra") == (ceiling, True)
+    # Summed requests are judged on the whole sum: never under-billed.
+    assert call_cost("gpt-6.1-sol", {"input": 300_000, "output": 1_000}) == pytest.approx(
+        (300_000 * 4 + 1_000 * 15) / 1e6)
+    assert call_cost("gpt-6.1-sol", {"input": 272_000, "output": 1_000}) == pytest.approx(
+        (272_000 * 2 + 1_000 * 10) / 1e6)
 
 
 # ---------------------------------------------------------------------------
@@ -143,8 +154,8 @@ def test_ladder_order(tmp_path):
 def test_openai_profile_and_per_role_effort():
     from tradingagents.graph.trading_graph import TradingAgentsGraph
 
-    assert OPENAI.env["TRADINGAGENTS_QUICK_THINK_LLM"] == "gpt-5.6-luna"
-    assert OPENAI.env["TRADINGAGENTS_DEEP_THINK_LLM"] == "gpt-5.6-sol"
+    assert OPENAI.env["TRADINGAGENTS_QUICK_THINK_LLM"] == "gpt-6-luna"
+    assert OPENAI.env["TRADINGAGENTS_DEEP_THINK_LLM"] == "gpt-6.1-sol"
     assert OPENAI.env["TRADINGAGENTS_RESEARCH_MANAGER_LLM"] == ""  # RM on sol, like the PM
     graph = ar.effective_analysis_config(OPENAI.env)["graph"]
     assert (graph["llm_provider"], graph["openai_deep_reasoning_effort"],
@@ -290,7 +301,7 @@ def test_openai_route_builds_a_hermetic_codex_call(ladder_cli):
     for flag in ("--ignore-user-config", "--ephemeral", "--json", "--skip-git-repo-check"):
         assert flag in command
     assert command[command.index("--sandbox") + 1] == "read-only"
-    assert command[command.index("-m") + 1] == "gpt-5.6-luna"
+    assert command[command.index("-m") + 1] == "gpt-6-luna"
     assert "model_reasoning_effort=low" in command and "tools.web_search=true" in command
     assert not any("sk-proj-secret" in part for part in command)  # key never on argv
     env = claude_cli.call_env(command)
@@ -309,7 +320,7 @@ def test_openai_route_builds_a_hermetic_codex_call(ladder_cli):
     assert command[command.index("--cd") + 1] == str(state / "codex_home" / "work")
     schema = json.dumps({"type": "object"})
     evaluate = claude_cli.claude_command("claude-opus-5-5", "xhigh", "--json-schema", schema, role="eval")
-    assert evaluate[evaluate.index("-m") + 1] == "gpt-5.6-sol"
+    assert evaluate[evaluate.index("-m") + 1] == "gpt-6.1-terra"
     assert "model_reasoning_effort=high" in evaluate
     path = evaluate[evaluate.index("--output-schema") + 1]
     assert json.loads(Path(path).read_text()) == {"type": "object"}
@@ -327,8 +338,8 @@ def test_codex_stream_becomes_a_priced_envelope(ladder_cli):
     text = claude_cli.collect_output("claude", codex_stream(), component="ticker_collector")
     assert text == "brief"
     line = json.loads(log.read_text().splitlines()[-1])
-    expected = (1_000 * 0.20 + 10_000 * 0.02 + 14_000 * 0.20 + 500 * 1.20) / 1e6 + 2 * 0.01
-    assert (line["billing"], line["model"]) == ("openai-api", "gpt-5.6-luna")
+    expected = (1_000 * 0.10 + 10_000 * 0.01 + 14_000 * 0.10 + 500 * 0.50) / 1e6 + 2 * 0.01
+    assert (line["billing"], line["model"]) == ("openai-api", "gpt-6-luna")
     assert line["billed_usd"] == pytest.approx(expected)
     assert (line["web_search_requests"], line["web_search_queries"]) == (2, ["q1", "q2"])
     assert (line["web_fetch_requests"], line["web_fetch_urls"]) == (1, ["https://e.com/a"])
@@ -504,7 +515,7 @@ def test_an_unpriced_codex_model_is_budgeted_at_the_openai_ceiling(ladder_cli, m
     assert command[command.index("-m") + 1] == "o9-research"
     claude_cli.collect_output("claude", codex_stream(searches=()), component="ticker_collector")
     line = json.loads(log.read_text().splitlines()[-1])
-    assert line["billed_usd"] == pytest.approx((1_000 * 4 + 10_000 * 0.4 + 14_000 * 4 + 500 * 20) / 1e6)
+    assert line["billed_usd"] == pytest.approx((1_000 * 10 + 10_000 * 1 + 14_000 * 10 + 500 * 50) / 1e6)
 
 
 @pytest.mark.unit
@@ -595,20 +606,20 @@ def test_openai_child_usage_is_captured_and_an_unnamed_model_still_counts(tmp_pa
     from tests.test_llm_cost import _result
 
     # The shape langchain-openai returns (verified live 2026-11-01).
-    message = AIMessage(content="x", response_metadata={"model_name": "gpt-5.6-luna-2026-09-30"},
+    message = AIMessage(content="x", response_metadata={"model_name": "gpt-6-luna-2026-09-14"},
                         usage_metadata={"input_tokens": 1000, "output_tokens": 100, "total_tokens": 1100,
                                         "input_token_details": {"cache_read": 400}})
     callback = UsageCallback()
     callback.on_llm_end(_result(message))
-    row = callback.summary()["gpt-5.6-luna-2026-09-30"]
+    row = callback.summary()["gpt-6-luna-2026-09-14"]
     assert row["priced"] is True
-    assert row["cost_usd"] == pytest.approx((600 * 0.20 + 400 * 0.02 + 100 * 1.20) / 1e6, abs=1e-6)
+    assert row["cost_usd"] == pytest.approx((600 * 0.10 + 400 * 0.01 + 100 * 0.50) / 1e6, abs=1e-7)
     # No model name reported → "unknown", unpriced: an openai run still bills it, at the ceiling.
     unnamed = {"unknown": {"calls": 1, "input": 1000, "output": 100, "cache_read": 0, "cache_write": 0,
                            "reasoning": 0, "cost_usd": 0.0, "priced": False}}
     append_usage(tmp_path, run_id="r", date="2026-08-07", session="us", ticker="A", arm="brief",
                  profile="openai", clock=lambda: NOW, models=unnamed)
-    assert month_spend(tmp_path, MONTH, "openai") == pytest.approx((1000 * 4 + 100 * 20) / 1e6)
+    assert month_spend(tmp_path, MONTH, "openai") == pytest.approx((1000 * 10 + 100 * 50) / 1e6)
     assert month_spend(tmp_path, MONTH, "anthropic") == 0
 
 
@@ -667,3 +678,30 @@ def test_codex_executable_finds_a_hoisted_platform_package(tmp_path, monkeypatch
     native.chmod(0o755)
     monkeypatch.setattr(claude_cli.shutil, "which", lambda cli: str(launcher))
     assert claude_cli.codex_executable() == (str(native), modules / "@openai" / "codex")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("input_tokens", "searches", "tier"), [
+    (272_000, 0, "short"),
+    (300_000, 9, "long"),    # summed over the turn's requests: over-count, never under-bill
+    (20_000 + 280_000, 1, "long"),
+])
+def test_codex_turn_long_tier_wiring(ladder_cli, input_tokens, searches, tier):
+    _state, log, _month = ladder_cli
+    claude_cli.claude_command("claude-haiku-5-5", "low")
+    usage = {"input_tokens": input_tokens, "cached_input_tokens": 0, "cache_write_input_tokens": 0, "output_tokens": 1_000}
+    claude_cli.collect_output("claude", codex_stream(searches=tuple(f"q{i}" for i in range(searches)), usage=usage),
+                              component="ticker_collector")
+    rate_in, rate_out = (0.10, 0.50) if tier == "short" else (0.20, 0.75)  # gpt-6-luna
+    expected = (input_tokens * rate_in + 1_000 * rate_out) / 1e6 + searches * 0.01
+    assert json.loads(log.read_text().splitlines()[-1])["billed_usd"] == pytest.approx(expected)
+
+
+@pytest.mark.unit
+def test_unnamed_ledger_rows_use_the_whole_sum_for_the_tier(tmp_path):
+    big = {"unknown": {"calls": 20, "input": 400_000, "output": 1_000, "cache_read": 0, "cache_write": 0,
+                       "reasoning": 0, "cost_usd": 0.0, "priced": False}}
+    append_usage(tmp_path, run_id="r", date="2026-08-07", session="us", ticker="A", arm="brief",
+                 profile="openai", clock=lambda: NOW, models=big)
+    # Unrelated calls summed: long tier on the sum (over-count), at the astra ceiling.
+    assert month_spend(tmp_path, MONTH, "openai") == pytest.approx((400_000 * 20 + 1_000 * 75) / 1e6)

@@ -41,8 +41,8 @@ moves to DeepSeek on either provider's exhaustion (one-way).
 
 ### L2 — Analysis on OpenAI
 
-`openai` profile: provider `openai`, quick `gpt-5.6-luna` (reasoning
-effort low), deep `gpt-5.6-sol` (medium) for both judges (no Research
+`openai` profile: provider `openai`, quick `gpt-6-luna` (reasoning
+effort low), deep `gpt-6.1-sol` (medium) for both judges (no Research
 Manager override). New per-role knobs `openai_deep_reasoning_effort` /
 `openai_quick_reasoning_effort` (env `TRADINGAGENTS_OPENAI_{DEEP,QUICK}_REASONING_EFFORT`)
 override `openai_reasoning_effort` and are in the config digest when set
@@ -75,7 +75,7 @@ untrusted web pages, as the claude path's HERMETIC_FLAGS assume):
 All four probed live on 2026-11-01: no shell ("no shell tool
 available"), `file://` opens and `id` fail, JS `require`/`fs`/`process`
 are absent, writes are refused, and search still works. Models per
-role: collect `gpt-5.6-luna`, eval `gpt-5.6-sol`
+role: collect `gpt-6-luna`, eval `gpt-6.1-terra`
 (`TRADINGAGENTS_OPENAI_{COLLECT,EVAL}_MODEL`), so collector and evaluator
 stay on different models (evaluator R2). Effort maps low/medium/high,
 xhigh/max → high. The evaluator's `--json-schema` becomes an
@@ -136,9 +136,22 @@ baked at install time) → the CLI skips the rung to DeepSeek.
 ### L4 — Ledger and prices
 
 A codex model override without a listed price is budgeted at the OpenAI
-ceiling, never at $0. `gpt-5.6-sol` $4.00 in / $0.40 cached / $20.00 out, `gpt-5.6-luna` $0.20 /
-$0.02 / $1.20 per 1M tokens (developers.openai.com/api/docs/pricing,
-standard tier, 2026-11-01); no cache-write surcharge. Unknown `gpt-*`
+ceiling, never at $0. Per 1M tokens, in / cached / out, prompts ≤ 272K
+(developers.openai.com/api/docs/pricing, standard tier, 2026-11-01):
+`gpt-6-luna` $0.10 / $0.01 / $0.50, `gpt-6.1-terra` $1.00 / $0.05 / $5.00,
+`gpt-6.1-sol` $2.00 / $0.10 / $10.00 (previous generation, kept for old
+lines: `gpt-5.6-sol` $4 / $0.40 / $20, `gpt-5.6-luna` $0.20 / $0.02 /
+$1.20). Prompts over 272K bill at each model's long-context tier (×2
+input/cached, ×1.5 output); no cache-write surcharge (writes bill as
+input, at the tier's rate). The tier is a per-request rule, but codex
+reports a turn's usage summed over its requests (and a ledger row sums
+calls), with no per-request sizes: summed usage is judged on the whole sum
+— the only rule that never under-bills; a long turn of short requests is
+over-counted (budget-safe; it may move the ladder to DeepSeek a little
+early). `gpt-6-astra` ($10 / $1 / $50) and
+`gpt-6-sol` ($2 / $0.20 / $10) are listed though unused, so an override
+prices exactly and the unlisted-model ceiling is the highest real rate
+(`gpt-6-astra`). Unknown `gpt-*`
 models bill at the OpenAI ceiling (`priced: false`); OpenAI snapshot ids
 (`-YYYY-MM-DD`) resolve to their alias. `month_spend(..., "openai")`
 includes CLI lines billed `openai-api`; `since` restricts a fold to spend
@@ -153,11 +166,16 @@ budget-safe).
   `/dashboard/billing/*` → 403; it reads only models, files, batches, `/me`).
   No Admin key can be created, so the user confirms the balance monthly
   (L1).
-- **Q2** Models (official prices per 1M tokens, 2026-11-01, standard tier):
-  quick roles and collection `gpt-5.6-luna` ($0.20 in / $0.02 cached /
-  $1.20 out); Research Manager, Portfolio Manager and evaluation
-  `gpt-5.6-sol` ($4.00 / $0.40 / $20.00). Web search $10 / 1K calls plus
-  search content tokens at the model's input rate.
+- **Q2** Models (revised the same day to the GPT-6 line — the first pick,
+  `gpt-5.6-luna`/`gpt-5.6-sol`, came from a truncated model listing):
+  quick roles and collection `gpt-6-luna`; Research Manager and Portfolio
+  Manager `gpt-6.1-sol`; evaluation `gpt-6.1-terra` (user choice:
+  cheaper than sol, still a different model from the collector). All
+  three verified live on 2026-11-01: analysis structured output (luna,
+  sol), codex search (luna), codex strict eval schema (terra). Not used:
+  `gpt-6-astra` ($10 / $50, top tier) and `gpt-6-sol` (superseded by
+  6.1). Web search $10 / 1K calls plus search content tokens at the
+  model's input rate.
 - **Q3** codex uses the **API key only**; no interactive login (the server
   has none today: `codex login status` → not logged in, and both
   `collect_backend` and `eval_backend` are `claude`, so codex is unused at
