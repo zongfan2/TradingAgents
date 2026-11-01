@@ -258,8 +258,12 @@ nothing (stderr or "no output", as the old format printed nothing then). Each `c
   R10's first cut read that field and logged 0);
 - `web_search_queries` / `web_fetch_urls` — the `WebSearch` queries and
   `WebFetch` URLs of the assistant `tool_use` blocks, in call order, at
-  most 60 each, each cut to 300 characters; `web_fetch_requests` counts
-  every `WebFetch` call (not capped).
+  most 60 each, each cut to 300 characters, non-empty string arguments
+  only (a placeholder would read as a duplicate); `web_fetch_requests`
+  counts every `WebFetch` call (not capped, whatever its arguments).
+
+A failed call with no `result` event logs nothing (a lone JSON object
+with no `type` — the old envelope shape — still logs).
 
 Events are split on `\n` only: the CLI's JSON.stringify leaves U+2028,
 U+2029 and U+0085 raw inside strings, where `str.splitlines` would cut an

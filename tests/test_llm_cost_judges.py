@@ -321,7 +321,8 @@ def test_a_stream_cut_after_one_event_logs_nothing(monkeypatch, tmp_path):
 
     log = tmp_path / "usage.jsonl"
     monkeypatch.setenv(cc.USAGE_LOG_ENV, str(log))
-    for event in (_INIT, _tool_use("WebSearch", query="q"), {"type": "user", "message": {}}):
+    for event in (_INIT, _tool_use("WebSearch", query="q"), {"type": "user", "message": {}},
+                  {"type": "rate_limit_event", "rate_limit_info": {}}):
         cc.record_failed_call("ticker_collector", "m", "low", _stream(event))
     assert not log.exists()
     cc.record_failed_call("ticker_collector", "m", "low", json.dumps({"usage": {}, "total_cost_usd": 0.01}))
@@ -355,4 +356,14 @@ def test_a_webfetch_with_junk_args_is_still_counted():
 
     junk = {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "WebFetch", "input": "junk"}]}}
     calls = cc.parse_envelope(_stream(junk, _tool_use("WebFetch"), _result()))["_tool_calls"]
-    assert (calls["web_fetch_requests"], calls["web_fetch_urls"]) == (2, [""])
+    assert (calls["web_fetch_requests"], calls["web_fetch_urls"]) == (2, [])
+
+
+@pytest.mark.unit
+def test_only_real_queries_are_logged():
+    import pipeline.claude_cli as cc
+
+    stdout = _stream(_tool_use("WebSearch"), _tool_use("WebSearch", query=None),
+                     _tool_use("WebSearch", query=123), _tool_use("WebSearch", query="  "),
+                     _tool_use("WebSearch", query="ok"), _result())
+    assert cc.parse_envelope(stdout)["_tool_calls"]["web_search_queries"] == ["ok"]
