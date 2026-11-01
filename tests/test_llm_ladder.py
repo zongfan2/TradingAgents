@@ -391,6 +391,10 @@ def test_codex_executable_resolves_the_native_binary_behind_the_npm_launcher(tmp
     assert claude_cli.codex_executable() is None
     monkeypatch.setattr(claude_cli.shutil, "which", lambda cli: str(native))
     assert claude_cli.codex_executable() == (str(native), None)  # PATH already points at the binary
+    macho = tmp_path / "codex-macho"
+    macho.write_bytes(b"\xcf\xfa\xed\xfe....")  # a Homebrew-style native binary on macOS
+    monkeypatch.setattr(claude_cli.shutil, "which", lambda cli: str(macho))
+    assert claude_cli.codex_executable() == (str(macho), None)
     monkeypatch.setattr(claude_cli.shutil, "which", lambda cli: None)
     assert claude_cli.codex_executable() is None
 

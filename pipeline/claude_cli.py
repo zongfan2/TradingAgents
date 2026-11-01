@@ -225,7 +225,7 @@ def codex_executable() -> tuple[str, Path | None] | None:
     real = Path(found).resolve()
     try:
         with open(real, "rb") as handle:
-            if handle.read(4) == b"\x7fELF":  # already the native binary
+            if handle.read(2) != b"#!":  # not a script: already the native binary (ELF, Mach-O, …)
                 return str(real), None
     except OSError:
         return None
