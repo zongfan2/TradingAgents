@@ -624,3 +624,30 @@ def test_codex_target_follows_the_launcher(monkeypatch, plat, machine, triple):
     monkeypatch.setattr(claude_cli.platform, "machine", lambda: machine)
     target = claude_cli._codex_target()
     assert (target[0] if target else None) == triple
+
+
+@pytest.mark.unit
+def test_failed_marker_writes_never_loop_between_rungs(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-proj-test")
+    config, resolvers = _slot(tmp_path)
+    confirm_balance(config.state_dir, MONTH, 71, NOW - timedelta(hours=1))
+    monkeypatch.setattr(ar, "mark_exhausted", lambda *a, **k: None)  # e.g. a read-only state dir
+
+    class BrokeEverywhere(UsageChild):
+        def __call__(self, spec, timeout):
+            env = dict(spec.env)
+            provider = env.get("TRADINGAGENTS_LLM_PROVIDER")
+            if provider in ("anthropic", "openai"):
+                self.specs.append(spec)
+                error = ("Your credit balance is too low" if provider == "anthropic"
+                         else "Error code: 429 - insufficient_quota")
+                return ar.ChildResult(1, None, error, usage=usage_row(env["TRADINGAGENTS_DEEP_THINK_LLM"], cost=0.0))
+            result = super().__call__(spec, timeout)
+            return ar.ChildResult(result.returncode, result.payload, result.error, usage=usage_row("deepseek-v4-pro"))
+
+    child = BrokeEverywhere()
+    settings = ar.RunnerSettings(ab_pairing="off", llm_routing="ladder", analysis_job_concurrency=1)
+    run(config, resolvers, child, settings=settings)
+    providers = [dict(s.env)["TRADINGAGENTS_LLM_PROVIDER"] for s in child.specs]
+    # Each job: anthropic → openai → deepseek, never back to a spent rung.
+    assert providers == ["anthropic", "openai", "deepseek"] * 2

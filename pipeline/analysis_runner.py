@@ -81,10 +81,12 @@ from pipeline.funnel_events import FunnelEvents, best_effort
 from pipeline.llm_routing import (
     DEEPSEEK,
     DEFAULT_ANTHROPIC_MONTHLY_BUDGET_USD,
+    OPENAI,
     ROUTING_CHOICES,
     Profile,
     RoutingDecision,
     choose_profile,
+    openai_usable,
 )
 from pipeline.llm_usage import (
     append_usage,
@@ -1184,6 +1186,9 @@ class _LlmRouter:
     def month_spend(self) -> float:
         return month_spend(self.config.state_dir, self.clock().strftime("%Y-%m"), "anthropic")
 
+    def openai_usable(self) -> bool:
+        return openai_usable(self.config.state_dir, self.clock().strftime("%Y-%m"))[0]
+
     def openai_remaining(self) -> float | None:
         """Confirmed OpenAI balance minus spend since (ladder L1); ``None``
         when this month is unconfirmed."""
@@ -1583,6 +1588,7 @@ def _run_job_impl(
             result = child_runner(spec, settings.run_timeout_seconds)
         except Exception as exc:  # R3: the slot never aborts on one ticker
             result = ChildResult(-1, None, f"child runner raised: {exc}")
+        exhausted_providers: set[str] = set()
         while (
             profile is not None
             and profile.provider in ("anthropic", "openai")
@@ -1601,9 +1607,18 @@ def _run_job_impl(
                 models=result.usage or {}, error=result.error, clock=clock,
             )
             exhausted = profile
+            exhausted_providers.add(exhausted.provider)
             profile = router.choose().profile if settings.llm_routing == "ladder" else DEEPSEEK
-            if profile.provider == exhausted.provider:  # never retry the same rung
-                profile = DEEPSEEK
+            # Never a rung this run already ran out on — even when the marker
+            # write failed and choose() would offer it again: step down.
+            if profile.provider in exhausted_providers:
+                profile = (
+                    OPENAI
+                    if settings.llm_routing == "ladder"
+                    and "openai" not in exhausted_providers
+                    and router.openai_usable()
+                    else DEEPSEEK
+                )
             logger.warning("%s: %s credits exhausted — retrying on %s",
                            job.ticker, exhausted.provider, profile.name)
             run_digest = router.digest(profile)
