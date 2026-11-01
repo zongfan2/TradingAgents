@@ -580,7 +580,7 @@ def test_default_runner_claude_command(monkeypatch):
         "--permission-mode", "dontAsk",
         "--no-session-persistence",
         "--model", "claude-sonnet-5-5", "--effort", "medium",
-        "--output-format", "json",
+        "--output-format", "stream-json", "--verbose",
     ]
     assert seen["input"] == "PROMPT"  # prompt goes over stdin
     assert seen["timeout"] == ticker_collector.BACKEND_TIMEOUT_SECONDS  # ceiling default

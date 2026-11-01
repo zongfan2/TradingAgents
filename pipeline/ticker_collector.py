@@ -57,6 +57,7 @@ from pipeline.claude_cli import (
     collect_command,
     collect_failed,
     collect_output,
+    envelope_line,
 )
 from pipeline.common import (
     LOG_FIELD_SEPARATOR,
@@ -268,7 +269,7 @@ def default_runner(
         ) from exc
     if proc.returncode != 0:
         collect_failed(backend, proc.stdout, component="ticker_collector")
-        reason = _first_line(proc.stderr or proc.stdout) or "no output"
+        reason = _first_line(proc.stderr or envelope_line(proc.stdout)) or "no output"
         raise CollectorError(f"backend '{backend}' exited {proc.returncode}: {reason}")
     try:
         return collect_output(backend, proc.stdout, component="ticker_collector")

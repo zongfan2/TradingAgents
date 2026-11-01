@@ -1,4 +1,5 @@
-"""Fake ``claude -p --output-format json`` result envelopes for offline tests."""
+"""Fake ``claude -p`` result envelopes for offline tests (a one-line ``json``
+envelope is also a valid one-event ``stream-json`` stdout)."""
 
 from __future__ import annotations
 

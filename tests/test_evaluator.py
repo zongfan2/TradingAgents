@@ -509,7 +509,7 @@ def test_claude_runner_command_construction_and_stdin(monkeypatch):
     assert json.loads(claude_runner("EVAL PROMPT")) == envelope["structured_output"]
     # D19 claude backend: fresh `claude -p` with web search tools allowed.
     assert "--output-format" in seen["cmd"]
-    assert "json" in seen["cmd"]
+    assert seen["cmd"][seen["cmd"].index("--output-format") + 1] == "stream-json"
     assert "--json-schema" in seen["cmd"]
     schema = json.loads(seen["cmd"][seen["cmd"].index("--json-schema") + 1])
     assert "scores" in schema["required"]
