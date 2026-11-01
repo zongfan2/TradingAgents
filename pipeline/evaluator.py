@@ -192,7 +192,7 @@ def claude_runner(prompt: str) -> str:
     schema = json.dumps(_ModelJudgment.model_json_schema(), separators=(",", ":"))
     config = load_config()
     model, effort = config.claude_eval_model, config.claude_eval_effort
-    command = claude_command(model, effort, "--json-schema", schema)
+    command = claude_command(model, effort, "--json-schema", schema, role="eval")
     timeout = backend_timeout_seconds()
     try:
         proc = subprocess.run(

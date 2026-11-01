@@ -36,6 +36,8 @@ _ENV_OVERRIDES = {
     # anthropic_effort.
     "TRADINGAGENTS_ANTHROPIC_DEEP_EFFORT":   "anthropic_deep_effort",
     "TRADINGAGENTS_ANTHROPIC_QUICK_EFFORT":  "anthropic_quick_effort",
+    "TRADINGAGENTS_OPENAI_DEEP_REASONING_EFFORT":  "openai_deep_reasoning_effort",
+    "TRADINGAGENTS_OPENAI_QUICK_REASONING_EFFORT": "openai_quick_reasoning_effort",
     # DeepSeek V4 thinks by default (effort high); "disabled" turns it off
     # for the quick role only (specs/llm-cost.md R4).
     "TRADINGAGENTS_DEEPSEEK_QUICK_THINKING": "deepseek_quick_thinking",
@@ -129,6 +131,8 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "anthropic_effort": None,           # "high", "medium", "low"
     "anthropic_deep_effort": None,      # per-role override of anthropic_effort
     "anthropic_quick_effort": None,
+    "openai_deep_reasoning_effort": None,   # per-role override of openai_reasoning_effort
+    "openai_quick_reasoning_effort": None,
     "deepseek_quick_thinking": None,    # None = provider default (on); "disabled"
     # Sampling temperature, forwarded to every provider when set. None leaves
     # each provider at its own default. Lower values reduce run-to-run

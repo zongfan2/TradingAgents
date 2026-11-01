@@ -58,7 +58,7 @@ def test_call_cost_tiers_and_cache():
     long = call_cost("claude-haiku-5-5", {"input": 100_001, "output": 1000})
     assert short == pytest.approx((100_000 * 0.10 + 1000 * 0.50) / 1e6)
     assert long == pytest.approx((100_001 * 0.50 + 1000 * 2.50) / 1e6)
-    assert call_cost("gpt-unknown", {"input": 5}) is None
+    assert call_cost("mistral-unknown", {"input": 5}) is None  # GPT models get the OpenAI ceiling (ladder L4)
 
 
 def _result(*messages):

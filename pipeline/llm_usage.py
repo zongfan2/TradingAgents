@@ -62,6 +62,10 @@ PRICES: dict[str, Price] = {
         0.10, 0.50, 0.01, 0.125,
         long_prompt_tokens=100_000, long_input=0.50, long_output=2.50, long_cache_read=0.05,
     ),
+    # OpenAI list prices (developers.openai.com/api/docs/pricing, standard
+    # tier, 2026-11-01); no cache-write surcharge, so writes bill as input.
+    "gpt-5.6-sol": Price(4.00, 20.00, 0.40, 4.00),
+    "gpt-5.6-luna": Price(0.20, 1.20, 0.02, 0.20),
     "deepseek-v4-pro": Price(1.74, 3.48, 0.0145, 1.74),
     "deepseek-flash": Price(0.14, 0.28, 0.0028, 0.14),
     "deepseek-v4-flash": Price(0.14, 0.28, 0.0028, 0.14),
@@ -73,16 +77,29 @@ def provider_for_model(model: str) -> str:
         return "anthropic"
     if model.startswith("deepseek-"):
         return "deepseek"
+    if model.startswith("gpt-"):
+        return "openai"
     return "other"
 
 
-_DATE_SUFFIX = re.compile(r"-\d{8}$")
+#: Snapshot suffixes: Anthropic ``-YYYYMMDD``, OpenAI ``-YYYY-MM-DD``.
+_DATE_SUFFIX = re.compile(r"-(\d{8}|\d{4}-\d{2}-\d{2})$")
 #: An unlisted Claude model is billed at the most expensive listed Claude
 #: rate (flagged ``priced: false``) so the Anthropic budget never undercounts.
 _CLAUDE_CEILING = max(
     (price for model, price in PRICES.items() if model.startswith("claude-")),
     key=lambda price: price.output,
 )
+
+
+#: Same rule for an unlisted GPT model and the OpenAI budget (ladder L4).
+_OPENAI_CEILING = max(
+    (price for model, price in PRICES.items() if model.startswith("gpt-")),
+    key=lambda price: price.output,
+)
+
+#: Web search tool calls bill per call on both Anthropic and OpenAI.
+WEB_SEARCH_USD_PER_CALL = 0.01
 
 
 def price_for(model: str) -> tuple[Price | None, bool]:
@@ -95,6 +112,9 @@ def price_for(model: str) -> tuple[Price | None, bool]:
     if model.startswith("claude-"):
         logger.warning("no price for %s — budgeting it at the Claude ceiling rate", model)
         return _CLAUDE_CEILING, False
+    if model.startswith("gpt-"):
+        logger.warning("no price for %s — budgeting it at the OpenAI ceiling rate", model)
+        return _OPENAI_CEILING, False
     return None, False
 
 
@@ -303,47 +323,85 @@ def cli_usage_path(state_dir: str | Path) -> Path:
     return Path(raw).expanduser() if raw else Path(state_dir) / CLI_USAGE_NAME
 
 
-def cli_month_spend(state_dir: str | Path, month: str) -> float:
-    """API-billed Claude CLI spend in month ``YYYY-MM`` (UTC) — llm-cost R7.
-    Only lines marked ``billing: anthropic-api`` count: older lines ran on
-    the subscription and were never billed to the API."""
+#: The CLI usage-line ``billing`` tag each provider's API spend carries.
+CLI_BILLING = {"anthropic": "anthropic-api", "openai": "openai-api"}
+
+
+def cli_month_spend(
+    state_dir: str | Path, month: str, provider: str = "anthropic", since: str | None = None
+) -> float:
+    """API-billed CLI spend with ``provider`` in month ``YYYY-MM`` (UTC) —
+    llm-cost R7 / ladder L3 — optionally only lines at or after the UTC ISO
+    instant ``since``. Only lines with the provider's ``billing`` tag count
+    (older Anthropic lines ran on the subscription, never billed)."""
+    billing = CLI_BILLING.get(provider)
+    if billing is None:
+        return 0.0
     try:
         text = cli_usage_path(state_dir).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return 0.0
+    since_at = _since(since)
     total = 0.0
     for raw in text.splitlines():
         row = _json_line(raw)
         try:
-            if (
-                isinstance(row, dict)
-                and row.get("billing") == "anthropic-api"
-                and str(row.get("ts") or "")[:7] == month
-            ):
-                total += _spend(row.get("billed_usd"))
+            if not isinstance(row, dict) or row.get("billing") != billing:
+                continue
+            ts = _utc_instant(row.get("ts"))
+            if ts is None or ts.strftime("%Y-%m") != month or (since_at and ts < since_at):
+                continue
+            total += _spend(row.get("billed_usd"))
         except Exception:  # a malformed line never breaks the fold
             continue
     return round(total, 6)
 
 
-def month_spend(state_dir: str | Path, month: str, provider: str = "anthropic") -> float:
+def _since(since: str | None) -> datetime | None:
+    """The ``since`` cut-off; an unparsable one is ignored, so the fold
+    over-counts (budget-safe) rather than dropping spend."""
+    return _utc_instant(since) if since else None
+
+
+def _utc_instant(value: object) -> datetime | None:
+    """A ledger timestamp as an aware UTC datetime; junk → ``None``."""
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def month_spend(
+    state_dir: str | Path, month: str, provider: str = "anthropic", since: str | None = None
+) -> float:
     """USD spent with ``provider`` in calendar month ``YYYY-MM`` (UTC),
-    summed per model so a mixed run still counts its Anthropic part. For
-    ``anthropic`` this includes the API-billed Claude CLI spend (R7): one
-    budget covers analysis, collection and evaluation."""
-    total = cli_month_spend(state_dir, month) if provider == "anthropic" else 0.0
+    summed per model so a mixed run still counts its own part, plus the
+    provider's API-billed CLI spend (R7, ladder L3): one budget covers
+    analysis, collection and evaluation. ``since`` (UTC ISO) keeps only
+    spend recorded at or after that instant (ladder: after the balance
+    confirmation)."""
+    total = cli_month_spend(state_dir, month, provider, since)
+    since_at = _since(since)
     for row in read_usage(state_dir):
-        total += _row_spend(row, month, provider)
+        total += _row_spend(row, month, provider, since_at)
     return round(total, 6)
 
 
-def _row_spend(row: dict, month: str, provider: str) -> float:
+def _row_spend(row: dict, month: str, provider: str, since_at: datetime | None = None) -> float:
     """One ledger line's spend with ``provider``; a line of any malformed
     shape counts as 0 — a corrupt line never breaks the monthly fold."""
     try:
         models = row.get("models")
         if row.get("month") != month or not isinstance(models, dict):
             return 0.0
+        if since_at is not None:
+            written = _utc_instant(row.get("written_at"))
+            # An unreadable timestamp counts (over-count is budget-safe).
+            if written is not None and written < since_at:
+                return 0.0
         return sum(
             _spend(usage.get("cost_usd"))
             for model, usage in models.items()
@@ -360,17 +418,73 @@ def _row_spend(row: dict, month: str, provider: str) -> float:
 # ---------------------------------------------------------------------------
 
 
-def exhausted_marker(state_dir: str | Path, month: str) -> Path:
-    return Path(state_dir) / BUDGET_DIRNAME / f"{month}.exhausted"
+def exhausted_marker(state_dir: str | Path, month: str, provider: str = "anthropic") -> Path:
+    """Anthropic keeps its original path; other providers get a subdir."""
+    if provider == "anthropic":
+        return Path(state_dir) / BUDGET_DIRNAME / f"{month}.exhausted"
+    return Path(state_dir) / BUDGET_DIRNAME / provider / f"{month}.exhausted"
 
 
-def is_credit_exhausted_error(error: str | None) -> bool:
+#: OpenAI's out-of-credit error (HTTP 429, code ``insufficient_quota``).
+OPENAI_QUOTA_MARKERS = ("insufficient_quota", "exceeded your current quota")
+
+
+def is_credit_exhausted_error(error: str | None, provider: str = "anthropic") -> bool:
     text = (error or "").lower()
-    return any(marker in text for marker in CREDIT_EXHAUSTED_MARKERS)
+    markers = OPENAI_QUOTA_MARKERS if provider == "openai" else CREDIT_EXHAUSTED_MARKERS
+    return any(marker in text for marker in markers)
 
 
-def mark_exhausted(state_dir: str | Path, month: str, reason: str) -> None:
+def mark_exhausted(state_dir: str | Path, month: str, reason: str, provider: str = "anthropic") -> None:
     try:
-        atomic_write(exhausted_marker(state_dir, month), reason.strip()[:500] + "\n")
+        atomic_write(exhausted_marker(state_dir, month, provider), reason.strip()[:500] + "\n")
     except Exception as exc:
         logger.warning("could not write the credit-exhausted marker: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# OpenAI balance confirmation (ladder L1: no Admin key, so the user confirms)
+# ---------------------------------------------------------------------------
+
+
+def confirmation_path(state_dir: str | Path, month: str, provider: str = "openai") -> Path:
+    return Path(state_dir) / BUDGET_DIRNAME / provider / f"{month}.confirmed"
+
+
+def confirm_balance(
+    state_dir: str | Path, month: str, balance_usd: float, now: datetime, provider: str = "openai"
+) -> dict:
+    """Record the balance the user read off the console for ``month``;
+    spend after ``confirmed_at`` is deducted from it."""
+    if not (math.isfinite(balance_usd) and balance_usd >= 0):
+        raise ValueError(f"balance must be a finite amount >= 0, got {balance_usd!r}")
+    record = {"provider": provider, "month": month, "balance_usd": round(float(balance_usd), 2),
+              "confirmed_at": to_utc_iso(now)}
+    atomic_write(confirmation_path(state_dir, month, provider), json.dumps(record) + "\n")
+    return record
+
+
+def read_confirmation(state_dir: str | Path, month: str, provider: str = "openai") -> dict | None:
+    """The month's confirmation, or ``None`` when absent or unreadable."""
+    try:
+        record = json.loads(confirmation_path(state_dir, month, provider).read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(record, dict) or record.get("month") != month:
+        return None
+    balance = record.get("balance_usd")
+    if isinstance(balance, bool) or not isinstance(balance, (int, float)) or not math.isfinite(balance):
+        return None
+    if balance < 0 or _utc_instant(record.get("confirmed_at")) is None:
+        return None
+    return record
+
+
+def remaining_balance(state_dir: str | Path, month: str, provider: str = "openai") -> float | None:
+    """Confirmed balance minus the spend recorded since it was confirmed;
+    ``None`` when the month has no valid confirmation."""
+    record = read_confirmation(state_dir, month, provider)
+    if record is None:
+        return None
+    spent = month_spend(state_dir, month, provider, since=record["confirmed_at"])
+    return round(float(record["balance_usd"]) - spent, 6)
