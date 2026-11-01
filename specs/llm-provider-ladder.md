@@ -59,16 +59,23 @@ their date at implementation; no guessed figures) and per-provider period
 spend. Unknown OpenAI models are billed at the most expensive listed
 OpenAI rate (as Claude's ceiling rule).
 
-## Open decisions (user)
+## User decisions (2026-11-01)
 
-- **Q1** Are the $200 OpenAI credits monthly or a one-time grant (and do
-  they expire)? Monthly → a UTC-month budget like Anthropic's; one-time →
-  a cumulative budget from a start date, with the provider's quota error
-  as the hard stop.
-- **Q2** Models: analysis quick/deep and CLI collect/eval. To be chosen
-  with the official price sheet when the key is added.
-- **Q3** Does codex on the API key replace the interactive codex login on
-  this server, or must the two coexist (scratch `CODEX_HOME` assumed)?
+- **Q1** OpenAI credits are **monthly**; November has only **$71** left.
+  The balance must be confirmed before the pipeline first uses the rung.
+  The project API key cannot read it (`/v1/organization/costs`, `/usage`,
+  `/dashboard/billing/*` → 403; it reads only models, files, batches, `/me`).
+  Mechanism pending: an Admin key for the costs API, or the local ledger
+  plus a manual check.
+- **Q2** Models (official prices per 1M tokens, 2026-11-01, standard tier):
+  quick roles and collection `gpt-5.6-luna` ($0.20 in / $0.02 cached /
+  $1.20 out); Research Manager, Portfolio Manager and evaluation
+  `gpt-5.6-sol` ($4.00 / $0.40 / $20.00). Web search $10 / 1K calls plus
+  search content tokens at the model's input rate.
+- **Q3** codex uses the **API key only**; no interactive login (the server
+  has none today: `codex login status` → not logged in, and both
+  `collect_backend` and `eval_backend` are `claude`, so codex is unused at
+  runtime).
 
 ## Prior art (specs/README.md rule 6)
 
