@@ -273,8 +273,8 @@ def ladder_cli(tmp_path, monkeypatch):
     claude_cli._reset_route_for_tests()
 
 
-def codex_stream(*, text="brief", fail=None, searches=("q1", "q2"), usage=None):
-    events = [{"type": "thread.started", "thread_id": "t"}, {"type": "turn.started"}]
+def codex_stream(*, text="brief", fail=None, searches=("q1", "q2"), usage=None, thread_id="t"):
+    events = [{"type": "thread.started", "thread_id": thread_id}, {"type": "turn.started"}]
     for query in searches:
         events.append({"type": "item.completed", "item": {"type": "web_search",
                                                           "action": {"type": "search", "query": query}}})
@@ -298,8 +298,9 @@ def test_openai_route_builds_a_hermetic_codex_call(ladder_cli):
     assert claude_cli.cli_route() == "openai"
     # The native binary, never the node launcher (a timeout must kill it).
     assert command[:2] == ["/opt/codex/bin/codex", "exec"] and command[-1] == "-"
-    for flag in ("--ignore-user-config", "--ephemeral", "--json", "--skip-git-repo-check"):
+    for flag in ("--ignore-user-config", "--json", "--skip-git-repo-check"):
         assert flag in command
+    assert "--ephemeral" not in command  # the rollout is read for per-request billing, then deleted
     assert command[command.index("--sandbox") + 1] == "read-only"
     assert command[command.index("-m") + 1] == "gpt-6-luna"
     assert "model_reasoning_effort=low" in command and "tools.web_search=true" in command
@@ -705,3 +706,95 @@ def test_unnamed_ledger_rows_use_the_whole_sum_for_the_tier(tmp_path):
                  profile="openai", clock=lambda: NOW, models=big)
     # Unrelated calls summed: long tier on the sum (over-count), at the astra ceiling.
     assert month_spend(tmp_path, MONTH, "openai") == pytest.approx((400_000 * 20 + 1_000 * 75) / 1e6)
+
+
+TID = "01a19596-42cb-71b0-98e0-40e1766b2a0f"
+
+
+def write_rollout(state, requests, *, thread_id=TID, extra=()):
+    path = state / "codex_home" / "sessions" / "2026" / "11" / "01" / f"rollout-2026-11-01T13-30-15-{thread_id}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [json.dumps({"type": "session_meta", "payload": {"id": thread_id}}), *extra]
+    total = {"input_tokens": 0}
+    for inp, cached, write, out in requests:
+        last = {"input_tokens": inp, "cached_input_tokens": cached, "cache_write_input_tokens": write,
+                "output_tokens": out, "reasoning_output_tokens": 0}
+        total = {"input_tokens": total["input_tokens"] + inp}
+        lines.append(json.dumps({"type": "event_msg", "payload": {"type": "token_count", "info": {
+            "total_token_usage": total, "last_token_usage": last}}}))
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def turn_usage(requests):
+    return {"input_tokens": sum(r[0] for r in requests), "cached_input_tokens": sum(r[1] for r in requests),
+            "cache_write_input_tokens": sum(r[2] for r in requests), "output_tokens": sum(r[3] for r in requests)}
+
+
+# Measured shape (AAPL brief, 2026-11-01): 9 growing requests, 286K summed, largest 48K.
+GROWING = [(12_054, 0, 12_000, 200), *[(n, n - 4_000, 4_000, 250) for n in
+           (16_144, 20_258, 26_311, 32_480, 38_560, 44_686, 47_730, 47_795)]]
+
+
+def short_cost(requests):  # gpt-6-luna, every request under 272K
+    return sum((max(i - c - w, 0) * 0.10 + c * 0.01 + w * 0.10 + o * 0.50) / 1e6 for i, c, w, o in requests)
+
+
+@pytest.mark.unit
+def test_rollout_prices_each_request_on_its_own_tier_and_is_deleted(ladder_cli):
+    state, log, _month = ladder_cli
+    rollout = write_rollout(state, GROWING)
+    claude_cli.claude_command("claude-haiku-5-5", "low")
+    stdout = codex_stream(searches=("q",) * 7, usage=turn_usage(GROWING), thread_id=TID)
+    claude_cli.collect_output("claude", stdout, component="ticker_collector")
+    line = json.loads(log.read_text().splitlines()[-1])
+    assert sum(r[0] for r in GROWING) > 272_000  # the summed turn alone would read as long
+    assert line["billed_usd"] == pytest.approx(short_cost(GROWING) + 7 * 0.01, abs=1e-6)
+    assert not rollout.exists()  # prompts and pages never linger
+    # Re-parsing the same stdout prices it the same (cached), though the file is gone.
+    again = claude_cli.parse_envelope(stdout)
+    assert again["total_cost_usd"] == pytest.approx(line["billed_usd"], abs=1e-6)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("case", ["missing", "mismatch", "bad-id"])
+def test_rollout_problems_fall_back_to_the_whole_sum(ladder_cli, case):
+    state, log, _month = ladder_cli
+    thread_id = TID
+    if case == "mismatch":  # a request missing from the record: never trusted
+        write_rollout(state, GROWING[:-1])
+    elif case == "bad-id":
+        thread_id = "../../etc/x*"
+    claude_cli.claude_command("claude-haiku-5-5", "low")
+    stdout = codex_stream(searches=(), usage=turn_usage(GROWING), thread_id=thread_id)
+    claude_cli.collect_output("claude", stdout, component="ticker_collector")
+    total = turn_usage(GROWING)
+    i, c, w, o = total["input_tokens"], total["cached_input_tokens"], total["cache_write_input_tokens"], total["output_tokens"]
+    long_rate = (max(i - c - w, 0) * 0.20 + c * 0.02 + w * 0.20 + o * 0.75) / 1e6  # summed > 272K → long tier
+    assert json.loads(log.read_text().splitlines()[-1])["billed_usd"] == pytest.approx(long_rate, abs=1e-6)
+
+
+@pytest.mark.unit
+def test_a_failed_turn_deletes_its_rollout_and_keeps_the_estimate(ladder_cli):
+    state, log, _month = ladder_cli
+    rollout = write_rollout(state, GROWING[:3])
+    claude_cli.claude_command("claude-haiku-5-5", "low")
+    claude_cli.record_failed_call("ticker_collector", "claude-haiku-5-5", "low",
+                                  codex_stream(fail="stream disconnected", searches=("q",), thread_id=TID))
+    assert not rollout.exists()
+    line = json.loads(log.read_text().splitlines()[-1])
+    assert line["billed_usd"] == pytest.approx(0.01 + claude_cli.CODEX_CUT_CALL_ESTIMATE_USD)
+
+
+@pytest.mark.unit
+def test_stale_rollouts_are_pruned(ladder_cli):
+    import os
+    import time
+
+    state, _log, _month = ladder_cli
+    old = write_rollout(state, GROWING[:1], thread_id="old-thread-0001")
+    fresh = write_rollout(state, GROWING[:1], thread_id="new-thread-0002")
+    stale = time.time() - claude_cli._ROLLOUT_MAX_AGE_SECONDS - 60
+    os.utime(old, (stale, stale))
+    claude_cli.claude_command("claude-haiku-5-5", "low")  # builds the codex call → prunes
+    assert not old.exists() and fresh.exists()

@@ -55,7 +55,7 @@ DeepSeek and RM knobs. Structured output and usage capture verified live
 
 On the openai rung every pipeline `claude -p` call is built as a
 hermetic `codex exec`:
-`codex exec --ignore-user-config --ephemeral --sandbox read-only
+`codex exec --ignore-user-config --sandbox read-only
 --skip-git-repo-check --json -c tools.web_search=true -m <model>
 -c model_reasoning_effort=<effort> --disable <feature>… --cd <codex_home>/work
 [--output-schema <file>] -`, prompt on stdin. Isolation (the calls read
@@ -70,7 +70,9 @@ untrusted web pages, as the claude path's HERMETIC_FLAGS assume):
 - the env is an allow-list (PATH, locale, TZ, TMPDIR, CA and proxy vars)
   plus `CODEX_API_KEY` (verified to authenticate without a login),
   `CODEX_HOME=HOME=<state_dir>/codex_home`; no other key reaches codex;
-- the cwd is an empty `codex_home/work`, never the repo.
+- the cwd is an empty `codex_home/work`, never the repo;
+- the session rollout (prompts, fetched pages) stays under `codex_home`
+  only until the call is billed (L4).
 
 All four probed live on 2026-11-01: no shell ("no shell tool
 available"), `file://` opens and `id` fail, JS `require`/`fs`/`process`
@@ -143,12 +145,20 @@ ceiling, never at $0. Per 1M tokens, in / cached / out, prompts ≤ 272K
 lines: `gpt-5.6-sol` $4 / $0.40 / $20, `gpt-5.6-luna` $0.20 / $0.02 /
 $1.20). Prompts over 272K bill at each model's long-context tier (×2
 input/cached, ×1.5 output); no cache-write surcharge (writes bill as
-input, at the tier's rate). The tier is a per-request rule, but codex
-reports a turn's usage summed over its requests (and a ledger row sums
-calls), with no per-request sizes: summed usage is judged on the whole sum
-— the only rule that never under-bills; a long turn of short requests is
-over-counted (budget-safe; it may move the ladder to DeepSeek a little
-early). `gpt-6-astra` ($10 / $1 / $50) and
+input, at the tier's rate). The tier is a per-request rule. codex's
+`turn.completed` usage sums the turn's requests, but its session rollout
+(`codex_home/sessions/**/rollout-*-<thread_id>.jsonl`, `token_count`
+events' `last_token_usage`) records each request: codex therefore runs
+without `--ephemeral`, and after each call the rollout of its
+`thread.started` id is read, every request priced on its own tier, and the
+file deleted (failed turns too; leftovers from a crash are pruned after
+24 h; rows are cached per thread so a re-parse prices the same). The
+rollout is used only when its requests add up exactly to the turn's
+usage; otherwise — and for ledger rows of summed calls — the sum is judged
+as one request (never under-bills, may over-count). Measured 2026-11-01:
+a real AAPL brief made 9 requests, largest 48K, summed 286K (would have
+read as long-tier); `gpt-6-luna`'s context window is 258,400 tokens, so
+its requests can never reach the long tier. `gpt-6-astra` ($10 / $1 / $50) and
 `gpt-6-sol` ($2 / $0.20 / $10) are listed though unused, so an override
 prices exactly and the unlisted-model ceiling is the highest real rate
 (`gpt-6-astra`). Unknown `gpt-*`

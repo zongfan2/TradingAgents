@@ -19,9 +19,11 @@ import logging
 import math
 import os
 import platform
+import re
 import shutil
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -85,6 +87,7 @@ def _reset_route_for_tests() -> None:
     with _ROUTE_LOCK:
         _ROUTE = None
     _CALL.__dict__.clear()
+    _ROLLOUT_CACHE.clear()
 
 
 def _state_dir() -> Path:
@@ -193,11 +196,12 @@ CODEX_DISABLED_FEATURES = (
     "in_app_local_automation", "workspace_dependencies", "worktrees", "tool_suggest",
     "realtime_conversation", "collaboration_modes",
 )
-#: Hermetic codex: no user config, no session files, read-only sandbox,
-#: every non-search tool disabled, web search on, JSONL events on stdout.
+#: Hermetic codex: no user config, read-only sandbox, every non-search tool
+#: disabled, web search on, JSONL events on stdout. Not ``--ephemeral``: the
+#: session rollout (in the pipeline-only CODEX_HOME) is the only per-request
+#: token record — it is read for billing, then deleted (ladder L4).
 CODEX_FLAGS = (
     "--ignore-user-config",
-    "--ephemeral",
     "--sandbox",
     "read-only",
     "--skip-git-repo-check",
@@ -272,7 +276,68 @@ def _codex_home() -> Path:
     the user's ``~/.codex``."""
     home = Path(_state_dir()) / "codex_home"
     home.mkdir(parents=True, exist_ok=True)
+    _prune_rollouts(home)
     return home
+
+
+#: Rollouts are deleted once billed; any a crash left behind (they hold
+#: prompts and fetched pages) are pruned after this many seconds.
+_ROLLOUT_MAX_AGE_SECONDS = 24 * 3600
+_THREAD_ID_RE = re.compile(r"[0-9A-Za-z-]{8,64}")
+#: thread id → per-request token rows, so re-parsing one stdout (failure
+#: message, usage log) prices it the same after the file is deleted.
+_ROLLOUT_CACHE: dict[str, list[dict[str, int]] | None] = {}
+_ROLLOUT_LOCK = threading.Lock()
+
+
+def _prune_rollouts(home: Path) -> None:
+    try:
+        cutoff = time.time() - _ROLLOUT_MAX_AGE_SECONDS
+        for path in (home / "sessions").glob("**/rollout-*.jsonl"):
+            if path.stat().st_mtime < cutoff:
+                path.unlink(missing_ok=True)
+    except OSError as exc:  # pruning never fails a call
+        logger.warning("could not prune codex rollouts: %s", exc)
+
+
+def _rollout_requests(thread_id: object) -> list[dict[str, int]] | None:
+    """Per-request token usage of codex thread ``thread_id`` from its session
+    rollout (``token_count`` events' ``last_token_usage``), deleting the
+    file; ``None`` when absent or unreadable. Never raises."""
+    if not isinstance(thread_id, str) or not _THREAD_ID_RE.fullmatch(thread_id):
+        return None
+    with _ROLLOUT_LOCK:
+        if thread_id in _ROLLOUT_CACHE:
+            return _ROLLOUT_CACHE[thread_id]
+        requests: list[dict[str, int]] | None = None
+        try:
+            files = list((_codex_home() / "sessions").glob(f"**/rollout-*-{thread_id}.jsonl"))
+            if len(files) == 1:
+                requests = []
+                for raw in files[0].read_text(encoding="utf-8", errors="replace").split("\n"):
+                    try:
+                        event = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    payload = event.get("payload") if isinstance(event, dict) else None
+                    info = payload.get("info") if isinstance(payload, dict) and payload.get("type") == "token_count" else None
+                    last = info.get("last_token_usage") if isinstance(info, dict) else None
+                    if isinstance(last, dict):
+                        requests.append({
+                            "input": _count(last.get("input_tokens")),
+                            "cache_read": _count(last.get("cached_input_tokens")),
+                            "cache_write": _count(last.get("cache_write_input_tokens")),
+                            "output": _count(last.get("output_tokens")),
+                        })
+            for path in files:
+                path.unlink(missing_ok=True)
+        except Exception as exc:  # billing falls back to the whole-sum rule
+            logger.warning("could not read codex rollout %s: %s", thread_id, exc)
+            requests = None
+        if len(_ROLLOUT_CACHE) > 256:
+            _ROLLOUT_CACHE.clear()
+        _ROLLOUT_CACHE[thread_id] = requests
+        return requests
 
 
 def strict_output_schema(node: object) -> object:
@@ -461,8 +526,11 @@ def _codex_envelope(events: list[dict]) -> tuple[dict | None, dict[str, object]]
     tokens = {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0}
     calls: dict[str, object] = {"web_search_queries": [], "web_fetch_urls": [], "web_fetch_requests": 0}
     searches = 0
+    thread_id = None
     for event in events:
         kind = event.get("type")
+        if kind == "thread.started":
+            thread_id = event.get("thread_id")
         if kind == "turn.completed":
             completed = True
             usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
@@ -493,9 +561,15 @@ def _codex_envelope(events: list[dict]) -> tuple[dict | None, dict[str, object]]
                         calls["web_search_queries"].append(query[:_MAX_TOOL_ARG_CHARS])
     model = getattr(_CALL, "model", None) or "gpt-unknown"
     try:
-        # One turn sums several model requests: the long tier is judged on
-        # the whole sum (may over-count, never under-bills).
-        cost = openai_call_cost(model, {**tokens}) + searches * WEB_SEARCH_USD_PER_CALL
+        # Exact: each request priced on its own tier, from the rollout — used
+        # only when it accounts for the whole turn. Otherwise the turn sum is
+        # judged as one request (may over-count, never under-bills).
+        requests = _rollout_requests(thread_id)  # read + delete, also for a failed turn
+        if completed and requests and {key: sum(r[key] for r in requests) for key in tokens} == tokens:
+            token_cost = sum(openai_call_cost(model, request) for request in requests)
+        else:
+            token_cost = openai_call_cost(model, {**tokens})
+        cost = token_cost + searches * WEB_SEARCH_USD_PER_CALL
     except Exception:
         cost = searches * WEB_SEARCH_USD_PER_CALL
     if not completed:
