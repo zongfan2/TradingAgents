@@ -55,9 +55,9 @@ DeepSeek and RM knobs. Structured output and usage capture verified live
 
 On the openai rung every pipeline `claude -p` call is built as a
 hermetic `codex exec`:
-`codex exec --ignore-user-config --ephemeral --sandbox read-only
+`codex exec --ignore-user-config --sandbox read-only
 --skip-git-repo-check --json -c tools.web_search=true -m <model>
--c model_reasoning_effort=<effort> --disable <feature>… --cd <codex_home>/work
+-c model_reasoning_effort=<effort> --disable <feature>… --cd <call_home>/work
 [--output-schema <file>] -`, prompt on stdin. Isolation (the calls read
 untrusted web pages, as the claude path's HERMETIC_FLAGS assume):
 
@@ -69,8 +69,17 @@ untrusted web pages, as the claude path's HERMETIC_FLAGS assume):
 - the read-only sandbox refuses writes (`apply_patch`);
 - the env is an allow-list (PATH, locale, TZ, TMPDIR, CA and proxy vars)
   plus `CODEX_API_KEY` (verified to authenticate without a login),
-  `CODEX_HOME=HOME=<state_dir>/codex_home`; no other key reaches codex;
-- the cwd is an empty `codex_home/work`, never the repo.
+  `CODEX_HOME=HOME=<call_home>` (below); no other key reaches codex;
+- every call gets its own throw-away `CODEX_HOME`
+  (`codex_home/calls/<uuid>`, cwd its empty `work/`, never the repo):
+  without `--ephemeral` codex writes the session rollout **and** its
+  state/thread-history SQLite databases with the prompt and fetched pages
+  there (measured: `--ephemeral` left no prompt text, the non-ephemeral
+  run did), so the whole dir is deleted once the call is billed (L4) —
+  concurrent calls never share one, so deletion never races a running
+  codex; dirs a crash or launch failure left are pruned after 24 h by
+  every CLI call, whatever its route.
+  Only the content-addressed output schemas stay in `codex_home/schemas`.
 
 All four probed live on 2026-11-01: no shell ("no shell tool
 available"), `file://` opens and `id` fail, JS `require`/`fs`/`process`
@@ -143,12 +152,21 @@ ceiling, never at $0. Per 1M tokens, in / cached / out, prompts ≤ 272K
 lines: `gpt-5.6-sol` $4 / $0.40 / $20, `gpt-5.6-luna` $0.20 / $0.02 /
 $1.20). Prompts over 272K bill at each model's long-context tier (×2
 input/cached, ×1.5 output); no cache-write surcharge (writes bill as
-input, at the tier's rate). The tier is a per-request rule, but codex
-reports a turn's usage summed over its requests (and a ledger row sums
-calls), with no per-request sizes: summed usage is judged on the whole sum
-— the only rule that never under-bills; a long turn of short requests is
-over-counted (budget-safe; it may move the ladder to DeepSeek a little
-early). `gpt-6-astra` ($10 / $1 / $50) and
+input, at the tier's rate). The tier is a per-request rule. codex's
+`turn.completed` usage sums the turn's requests, but its session rollout
+(`codex_home/sessions/**/rollout-*-<thread_id>.jsonl`, `token_count`
+events' `last_token_usage`) records each request: codex therefore runs
+without `--ephemeral`, and after each call the rollout of its
+`thread.started` id is read from the call's home, every request priced on
+its own tier, and the call home deleted (failed turns too; rows are cached
+per thread so a re-parse prices the same). A failed or cut turn bills its
+finished requests exactly plus the estimate for the one in flight. The
+rollout is used only when its requests add up exactly to the turn's
+usage; otherwise — and for ledger rows of summed calls — the sum is judged
+as one request (never under-bills, may over-count). Measured 2026-11-01:
+a real AAPL brief made 9 requests, largest 48K, summed 286K (would have
+read as long-tier); `gpt-6-luna`'s context window is 258,400 tokens, so
+its requests can never reach the long tier. `gpt-6-astra` ($10 / $1 / $50) and
 `gpt-6-sol` ($2 / $0.20 / $10) are listed though unused, so an override
 prices exactly and the unlisted-model ceiling is the highest real rate
 (`gpt-6-astra`). Unknown `gpt-*`
@@ -194,6 +212,8 @@ installed version (0.164.0 on 2026-11-01).
    skipped.
 2. A quota error on the OpenAI rung moves the process to DeepSeek and
    writes the marker; the failed call is not retried on the same rung.
-3. codex calls run hermetically (no user config, no session files, key
-   never on argv) and log usage with `billing: openai-api`.
+3. codex calls run hermetically (no user config, only web search, key
+   never on argv, each in its own call home whose session files — rollout,
+   state databases — are deleted once the call is billed) and log usage
+   with `billing: openai-api`, each request priced on its own tier.
 4. `claude-first` behaviour is unchanged.

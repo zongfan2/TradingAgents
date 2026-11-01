@@ -19,9 +19,13 @@ import logging
 import math
 import os
 import platform
+import re
 import shutil
 import sys
 import threading
+import time
+import uuid
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -85,6 +89,7 @@ def _reset_route_for_tests() -> None:
     with _ROUTE_LOCK:
         _ROUTE = None
     _CALL.__dict__.clear()
+    _ROLLOUT_CACHE.clear()
 
 
 def _state_dir() -> Path:
@@ -193,11 +198,12 @@ CODEX_DISABLED_FEATURES = (
     "in_app_local_automation", "workspace_dependencies", "worktrees", "tool_suggest",
     "realtime_conversation", "collaboration_modes",
 )
-#: Hermetic codex: no user config, no session files, read-only sandbox,
-#: every non-search tool disabled, web search on, JSONL events on stdout.
+#: Hermetic codex: no user config, read-only sandbox, every non-search tool
+#: disabled, web search on, JSONL events on stdout. Not ``--ephemeral``: the
+#: session rollout (in the pipeline-only CODEX_HOME) is the only per-request
+#: token record — it is read for billing, then deleted (ladder L4).
 CODEX_FLAGS = (
     "--ignore-user-config",
-    "--ephemeral",
     "--sandbox",
     "read-only",
     "--skip-git-repo-check",
@@ -268,11 +274,127 @@ def codex_executable() -> tuple[str, Path | None] | None:
 
 
 def _codex_home() -> Path:
-    """A pipeline-only CODEX_HOME: codex keeps auth/state there, never in
-    the user's ``~/.codex``."""
+    """The pipeline-only codex base dir (never the user's ``~/.codex``):
+    shared output schemas, and one throw-away CODEX_HOME per call under
+    ``calls/``."""
     home = Path(_state_dir()) / "codex_home"
     home.mkdir(parents=True, exist_ok=True)
-    return home
+    return home  # stale call homes: pruned once per CLI call (claude_command)
+
+
+def _new_call_home() -> Path:
+    """A fresh CODEX_HOME for one call: codex writes the session rollout and
+    its state/thread-history databases (prompts, fetched pages) there, and
+    the whole dir is deleted once the call is billed (ladder L3/L4) — no
+    other call shares it, so the deletion never races a running codex."""
+    call_home = _codex_home() / "calls" / uuid.uuid4().hex
+    (call_home / "work").mkdir(parents=True)
+    return call_home
+
+
+#: Call homes are deleted once billed; any a crash or a launch failure left
+#: behind are pruned after this many seconds.
+_CALL_HOME_MAX_AGE_SECONDS = 24 * 3600
+_THREAD_ID_RE = re.compile(r"[0-9A-Za-z-]{8,64}")
+#: thread id → per-request token rows, so re-parsing one stdout (failure
+#: message, usage log) prices it the same after its call home is deleted.
+_ROLLOUT_CACHE: OrderedDict[str, list[dict[str, int]] | None] = OrderedDict()
+_ROLLOUT_CACHE_SIZE = 1024
+_ROLLOUT_LOCK = threading.Lock()
+
+
+def _remove_call_home(call_home: Path) -> None:
+    """Delete one call home (prompt and page text); a failure is logged —
+    retention must never fail silently — and an already-gone path is fine.
+    Never raises."""
+    failures: list[str] = []
+
+    def failed(_func: object, path: str, exc: BaseException) -> None:
+        if not isinstance(exc, FileNotFoundError):
+            failures.append(f"{path}: {exc}")
+
+    try:
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(call_home, onexc=failed)
+        else:  # requires-python >= 3.10: onexc is 3.12+
+            shutil.rmtree(call_home, onerror=lambda func, path, info: failed(func, path, info[1]))
+    except Exception as exc:
+        failures.append(str(exc))
+    if failures:
+        logger.warning("could not delete codex call home %s (%d paths left): %s",
+                       call_home.name, len(failures), failures[0])
+
+
+def _prune_call_homes(home: Path) -> None:
+    cutoff = time.time() - _CALL_HOME_MAX_AGE_SECONDS
+    try:
+        entries = list((home / "calls").glob("*"))
+    except OSError as exc:  # pruning never fails a call
+        logger.warning("could not list codex call homes: %s", exc)
+        return
+    for call_home in entries:
+        try:  # per entry: a home its own call just deleted is no error
+            if call_home.stat().st_mtime < cutoff:
+                _remove_call_home(call_home)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            logger.warning("could not prune codex call home %s: %s", call_home.name, exc)
+
+
+def _prune_leftover_call_homes() -> None:
+    """Prune stale call homes on every CLI call, whatever its route: one a
+    crash left (prompt and page text) must not outlive 24 h just because the
+    ladder has moved off OpenAI. Never raises; creates nothing."""
+    try:
+        home = Path(_state_dir()) / "codex_home"
+        if home.is_dir():
+            _prune_call_homes(home)
+    except Exception as exc:
+        logger.warning("could not prune codex call homes: %s", exc)
+
+
+def _rollout_requests(thread_id: object, call_home: Path | None) -> list[dict[str, int]] | None:
+    """Per-request token usage of codex thread ``thread_id`` from the
+    session rollout in ``call_home`` (``token_count`` events'
+    ``last_token_usage``), then delete ``call_home``; ``None`` when absent
+    or unreadable. Never raises."""
+    if not isinstance(thread_id, str) or not _THREAD_ID_RE.fullmatch(thread_id):
+        thread_id = None
+    with _ROLLOUT_LOCK:
+        if thread_id is not None and thread_id in _ROLLOUT_CACHE:
+            return _ROLLOUT_CACHE[thread_id]
+        requests: list[dict[str, int]] | None = None
+        try:
+            files = (list((call_home / "sessions").glob(f"**/rollout-*-{thread_id}.jsonl"))
+                     if call_home is not None and thread_id is not None else [])
+            if len(files) == 1:
+                requests = []
+                for raw in files[0].read_text(encoding="utf-8", errors="replace").split("\n"):
+                    try:
+                        event = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    payload = event.get("payload") if isinstance(event, dict) else None
+                    info = payload.get("info") if isinstance(payload, dict) and payload.get("type") == "token_count" else None
+                    last = info.get("last_token_usage") if isinstance(info, dict) else None
+                    if isinstance(last, dict):
+                        requests.append({
+                            "input": _count(last.get("input_tokens")),
+                            "cache_read": _count(last.get("cached_input_tokens")),
+                            "cache_write": _count(last.get("cache_write_input_tokens")),
+                            "output": _count(last.get("output_tokens")),
+                        })
+        except Exception as exc:  # billing falls back to the whole-sum rule
+            logger.warning("could not read codex rollout %s: %s", thread_id, exc)
+            requests = None
+        if call_home is not None:
+            _remove_call_home(call_home)
+        if thread_id is not None:
+            _ROLLOUT_CACHE[thread_id] = requests
+            while len(_ROLLOUT_CACHE) > _ROLLOUT_CACHE_SIZE:  # evict oldest only: a
+                _ROLLOUT_CACHE.popitem(last=False)          # re-parse follows at once
+        return requests
 
 
 def strict_output_schema(node: object) -> object:
@@ -302,7 +424,9 @@ def strict_output_schema(node: object) -> object:
     return out
 
 
-def _codex_command(role: str, effort: str, extra: tuple[str, ...]) -> tuple[list[str], str, dict[str, str]]:
+def _codex_command(
+    role: str, effort: str, extra: tuple[str, ...]
+) -> tuple[list[str], str, dict[str, str], Path]:
     """``(argv, model, env)`` for one hermetic ``codex exec`` call. The API
     key goes in the env only (``CODEX_API_KEY``), never on argv."""
     model = (os.environ.get(OPENAI_CLI_MODEL_ENV[role]) or "").strip() or OPENAI_CLI_MODELS[role]
@@ -311,8 +435,8 @@ def _codex_command(role: str, effort: str, extra: tuple[str, ...]) -> tuple[list
         raise RuntimeError("no native codex binary found")
     binary, package_root = resolved
     home = _codex_home()
-    work = home / "work"  # an empty cwd, never the repo
-    work.mkdir(exist_ok=True)
+    call_home = _new_call_home()
+    work = call_home / "work"  # an empty cwd, never the repo
     argv = [binary, "exec", *CODEX_FLAGS, "--cd", str(work), "-m", model,
             "-c", f"model_reasoning_effort={_CODEX_EFFORT.get(effort, 'medium')}"]
     rest = list(extra)
@@ -325,16 +449,17 @@ def _codex_command(role: str, effort: str, extra: tuple[str, ...]) -> tuple[list
                 atomic_write(path, schema)
             argv += ["--output-schema", str(path)]
         else:
+            _remove_call_home(call_home)
             raise ValueError(f"claude flag {flag!r} has no codex equivalent")
     argv.append("-")  # prompt on stdin
     env = {name: os.environ[name] for name in _CODEX_ENV_KEEP if name in os.environ}
     env["CODEX_API_KEY"] = os.environ.get("OPENAI_API_KEY", "")
-    env["CODEX_HOME"] = str(home)
-    env["HOME"] = str(home)
+    env["CODEX_HOME"] = str(call_home)
+    env["HOME"] = str(call_home)
     if package_root is not None:  # what the npm launcher sets for its child
         env["CODEX_MANAGED_BY_NPM"] = "1"
         env["CODEX_MANAGED_PACKAGE_ROOT"] = str(package_root)
-    return argv, model, env
+    return argv, model, env, call_home
 
 
 def claude_command(model: str, effort: str, *extra: str, role: str = "collect") -> list[str]:
@@ -345,6 +470,7 @@ def claude_command(model: str, effort: str, *extra: str, role: str = "collect") 
     if role not in OPENAI_CLI_MODELS:
         raise ValueError(f"unknown CLI role {role!r}")
     cli_route()
+    _prune_leftover_call_homes()
     with _ROUTE_LOCK:
         # Route and env are captured together under the lock the DeepSeek
         # switch holds while rewriting os.environ; the launch site passes
@@ -353,9 +479,10 @@ def claude_command(model: str, effort: str, *extra: str, role: str = "collect") 
         _CALL.route = route
         _CALL.env = dict(os.environ)
         _CALL.model = None
+        _CALL.codex_home = None
     if route == "openai":
-        argv, cli_model, env = _codex_command(role, effort, extra)
-        _CALL.env, _CALL.model, _CALL.built = env, cli_model, argv
+        argv, cli_model, env, call_home = _codex_command(role, effort, extra)
+        _CALL.env, _CALL.model, _CALL.built, _CALL.codex_home = env, cli_model, argv, call_home
         return argv
     if route == "deepseek":
         from pipeline.llm_routing import DEEPSEEK_CLI_MODEL
@@ -461,8 +588,11 @@ def _codex_envelope(events: list[dict]) -> tuple[dict | None, dict[str, object]]
     tokens = {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0}
     calls: dict[str, object] = {"web_search_queries": [], "web_fetch_urls": [], "web_fetch_requests": 0}
     searches = 0
+    thread_id = None
     for event in events:
         kind = event.get("type")
+        if kind == "thread.started":
+            thread_id = event.get("thread_id")
         if kind == "turn.completed":
             completed = True
             usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
@@ -493,9 +623,20 @@ def _codex_envelope(events: list[dict]) -> tuple[dict | None, dict[str, object]]
                         calls["web_search_queries"].append(query[:_MAX_TOOL_ARG_CHARS])
     model = getattr(_CALL, "model", None) or "gpt-unknown"
     try:
-        # One turn sums several model requests: the long tier is judged on
-        # the whole sum (may over-count, never under-bills).
-        cost = openai_call_cost(model, {**tokens}) + searches * WEB_SEARCH_USD_PER_CALL
+        # Exact: each request priced on its own tier, from the rollout — used
+        # only when it accounts for the whole turn. Otherwise the turn sum is
+        # judged as one request (may over-count, never under-bills).
+        # Read + delete the call home, also for a failed turn.
+        requests = _rollout_requests(thread_id, getattr(_CALL, "codex_home", None))
+        if completed and requests and {key: sum(r[key] for r in requests) for key in tokens} == tokens:
+            token_cost = sum(openai_call_cost(model, request) for request in requests)
+        elif not completed and requests:
+            # The requests that finished are exact; the in-flight one gets
+            # the estimate below.
+            token_cost = sum(openai_call_cost(model, request) for request in requests)
+        else:
+            token_cost = openai_call_cost(model, {**tokens})
+        cost = token_cost + searches * WEB_SEARCH_USD_PER_CALL
     except Exception:
         cost = searches * WEB_SEARCH_USD_PER_CALL
     if not completed:
