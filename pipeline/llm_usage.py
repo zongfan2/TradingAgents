@@ -38,7 +38,7 @@ CREDIT_EXHAUSTED_MARKERS = ("credit balance is too low", "credit balance too low
 @dataclass(frozen=True)
 class Price:
     """USD per 1 M tokens. ``long_*`` apply to a call whose prompt exceeds
-    ``long_prompt_tokens`` (Haiku 5.5's > 100 K tier)."""
+    ``long_prompt_tokens`` (Haiku 5.5's > 100 K tier, OpenAI's > 272 K)."""
 
     input: float
     output: float
@@ -48,6 +48,7 @@ class Price:
     long_input: float | None = None
     long_output: float | None = None
     long_cache_read: float | None = None
+    long_cache_write: float | None = None
 
 
 #: Anthropic first-party list prices (claude-api reference, 2026-10); cache
@@ -63,9 +64,19 @@ PRICES: dict[str, Price] = {
         long_prompt_tokens=100_000, long_input=0.50, long_output=2.50, long_cache_read=0.05,
     ),
     # OpenAI list prices (developers.openai.com/api/docs/pricing, standard
-    # tier, 2026-11-01); no cache-write surcharge, so writes bill as input.
-    "gpt-5.6-sol": Price(4.00, 20.00, 0.40, 4.00),
-    "gpt-5.6-luna": Price(0.20, 1.20, 0.02, 0.20),
+    # tier, 2026-11-01); no cache-write surcharge, so writes bill as input;
+    # prompts over 272K tokens bill at the long-context tier.
+    "gpt-6-luna": Price(0.10, 0.50, 0.01, 0.10, long_prompt_tokens=272_000,
+                        long_input=0.20, long_output=0.75, long_cache_read=0.02, long_cache_write=0.20),
+    "gpt-6.1-terra": Price(1.00, 5.00, 0.05, 1.00, long_prompt_tokens=272_000,
+                           long_input=2.00, long_output=7.50, long_cache_read=0.10, long_cache_write=2.00),
+    "gpt-6.1-sol": Price(2.00, 10.00, 0.10, 2.00, long_prompt_tokens=272_000,
+                         long_input=4.00, long_output=15.00, long_cache_read=0.20, long_cache_write=4.00),
+    # Previous generation, kept so older ledger lines and overrides price.
+    "gpt-5.6-sol": Price(4.00, 20.00, 0.40, 4.00, long_prompt_tokens=272_000,
+                         long_input=8.00, long_output=30.00, long_cache_read=0.80, long_cache_write=8.00),
+    "gpt-5.6-luna": Price(0.20, 1.20, 0.02, 0.20, long_prompt_tokens=272_000,
+                          long_input=0.40, long_output=1.80, long_cache_read=0.04, long_cache_write=0.40),
     "deepseek-v4-pro": Price(1.74, 3.48, 0.0145, 1.74),
     "deepseek-flash": Price(0.14, 0.28, 0.0028, 0.14),
     "deepseek-v4-flash": Price(0.14, 0.28, 0.0028, 0.14),
@@ -134,7 +145,8 @@ def call_cost(model: str, tokens: dict[str, int]) -> float | None:
     return (
         uncached * rate_in
         + cache_read * rate_read
-        + cache_write * price.cache_write
+        + cache_write * (price.long_cache_write if long and price.long_cache_write is not None
+                         else price.cache_write)
         + tokens.get("output", 0) * rate_out
     ) / 1_000_000
 

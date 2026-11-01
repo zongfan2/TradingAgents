@@ -172,7 +172,7 @@ def call_env(command: list[str]) -> dict[str, str] | None:
 
 #: ladder L3 — codex models per CLI role (user decision 2026-11-01): the
 #: collector and the evaluator stay on different models (evaluator R2).
-OPENAI_CLI_MODELS = {"collect": "gpt-5.6-luna", "eval": "gpt-5.6-sol"}
+OPENAI_CLI_MODELS = {"collect": "gpt-6-luna", "eval": "gpt-6.1-terra"}
 OPENAI_CLI_MODEL_ENV = {"collect": "TRADINGAGENTS_OPENAI_COLLECT_MODEL", "eval": "TRADINGAGENTS_OPENAI_EVAL_MODEL"}
 #: claude --effort → codex model_reasoning_effort.
 _CODEX_EFFORT = {"low": "low", "medium": "medium", "high": "high", "xhigh": "high", "max": "high"}
@@ -434,7 +434,8 @@ def _tool_calls(events: list[dict]) -> dict[str, object]:
 
 #: Billed for a codex call that ended without ``turn.completed`` (failed or
 #: cut; its token usage is never reported): above a typical eval call
-#: (measured ≈$0.05 on gpt-5.6-sol), so the balance gate over-counts.
+#: (measured ≈$0.10 on gpt-6.1-terra with one search), so the balance gate
+#: over-counts.
 CODEX_CUT_CALL_ESTIMATE_USD = 0.25
 
 #: Event types only ``codex exec --json`` prints (ladder L3).

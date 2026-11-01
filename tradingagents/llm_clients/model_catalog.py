@@ -81,13 +81,16 @@ _MINIMAX_MODELS: dict[str, list[ModelOption]] = {
 MODEL_OPTIONS: ProviderModeOptions = {
     "openai": {
         "quick": [
-            ("GPT-5.6 Luna - Current small model, fast and inexpensive", "gpt-5.6-luna"),
+            ("GPT-6 Luna - Current small model, fast and inexpensive", "gpt-6-luna"),
+            ("GPT-5.6 Luna - Previous small model", "gpt-5.6-luna"),
             ("GPT-5.4 Mini - Fast, strong coding and tool use", "gpt-5.4-mini"),
             ("GPT-5.4 Nano - Cheapest, high-volume tasks", "gpt-5.4-nano"),
             ("GPT-5.5 - Latest frontier, 1M context", "gpt-5.5"),
         ],
         "deep": [
-            ("GPT-5.6 Sol - Current frontier", "gpt-5.6-sol"),
+            ("GPT-6.1 Sol - Current frontier", "gpt-6.1-sol"),
+            ("GPT-6.1 Terra - Current mid-size, inexpensive", "gpt-6.1-terra"),
+            ("GPT-5.6 Sol - Previous frontier", "gpt-5.6-sol"),
             ("GPT-5.5 - Latest frontier, 1M context", "gpt-5.5"),
             ("GPT-5.4 - Previous-gen frontier, 1M context, cost-effective", "gpt-5.4"),
             ("GPT-5.2 - Strong reasoning, cost-effective", "gpt-5.2"),
