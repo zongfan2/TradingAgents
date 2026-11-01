@@ -426,3 +426,20 @@ def test_eval_schema_is_sent_in_strict_form(ladder_cli):
                          for o in found)
     assert "default" not in json.dumps(sent).replace('"default_', "")
     assert _ModelJudgment.model_json_schema() == json.loads(schema)  # caller's schema untouched
+
+
+@pytest.mark.unit
+def test_every_claude_command_caller_states_its_cli_role():
+    """On the openai rung the role picks the GPT model (collect=luna,
+    eval=sol): pin the callers so a new evaluation path cannot silently run
+    on the collector's model, and none passes a flag codex cannot map."""
+    root = Path(__file__).resolve().parent.parent
+    calls = {}
+    for path in sorted((root / "pipeline").glob("*.py")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if "claude_command(" in line and "def claude_command" not in line:
+                calls.setdefault(path.name, []).append(line.strip())
+    assert calls == {
+        "claude_cli.py": ["return claude_command(*_collect_model_effort())"],
+        "evaluator.py": ['command = claude_command(model, effort, "--json-schema", schema, role="eval")'],
+    }

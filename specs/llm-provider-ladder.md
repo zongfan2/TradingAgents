@@ -69,6 +69,15 @@ OpenAI **strict** form — every object's properties all `required`,
 and the pydantic schema is rejected otherwise (`invalid_json_schema`,
 measured 2026-11-01; the strict form validates live).
 
+Measured codex-cli 0.164.0 event semantics (2026-11-01, live): `codex
+exec` runs one turn, so one `turn.completed` carries that turn's usage;
+`output_tokens` already includes `reasoning_output_tokens` (102 incl. 14);
+`input_tokens` includes `cached_input_tokens` and `cache_write_input_tokens`.
+Every `web_search` item except an `open_page` action is billed as a search
+(over-counting a non-search action is budget-safe). The only
+`claude_command` callers are the collector path (`collect` role) and the
+evaluator (`eval` role), pinned by a test.
+
 Quota detection also matches codex's own rewrite of `insufficient_quota`
 ("Quota exceeded. Check your plan and billing details.", `quota_exceeded`,
 strings of codex-cli 0.164.0).
