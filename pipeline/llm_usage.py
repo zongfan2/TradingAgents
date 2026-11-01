@@ -425,8 +425,15 @@ def exhausted_marker(state_dir: str | Path, month: str, provider: str = "anthrop
     return Path(state_dir) / BUDGET_DIRNAME / provider / f"{month}.exhausted"
 
 
-#: OpenAI's out-of-credit error (HTTP 429, code ``insufficient_quota``).
-OPENAI_QUOTA_MARKERS = ("insufficient_quota", "exceeded your current quota")
+#: OpenAI's out-of-credit error: the API's HTTP 429 ``insufficient_quota``
+#: (SDK text), and codex's own rewrite of it (strings in codex-cli 0.164.0:
+#: "Quota exceeded. Check your plan and billing details.", ``quota_exceeded``).
+OPENAI_QUOTA_MARKERS = (
+    "insufficient_quota",
+    "exceeded your current quota",
+    "quota exceeded. check your plan and billing details",
+    "quota_exceeded",
+)
 
 
 def is_credit_exhausted_error(error: str | None, provider: str = "anthropic") -> bool:

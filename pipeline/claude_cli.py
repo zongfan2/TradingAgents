@@ -198,6 +198,24 @@ def _codex_home() -> Path:
     return home
 
 
+def strict_output_schema(node: object) -> object:
+    """A JSON schema in OpenAI strict structured-output form (codex
+    ``--output-schema`` is sent strict): every object lists all its
+    properties in ``required`` and forbids additional ones, and ``default``
+    (unsupported) is dropped. Measured 2026-11-01: the evaluator's pydantic
+    schema (optional ``flagged_claims``/``notes``) is rejected with
+    ``invalid_json_schema`` otherwise. Returns a new object."""
+    if isinstance(node, list):
+        return [strict_output_schema(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+    out = {key: strict_output_schema(value) for key, value in node.items() if key != "default"}
+    if isinstance(out.get("properties"), dict):
+        out["required"] = list(out["properties"])
+        out["additionalProperties"] = False
+    return out
+
+
 def _codex_command(role: str, effort: str, extra: tuple[str, ...]) -> tuple[list[str], str, dict[str, str]]:
     """``(argv, model, env)`` for one hermetic ``codex exec`` call. The API
     key goes in the env only (``CODEX_API_KEY``), never on argv."""
@@ -209,7 +227,7 @@ def _codex_command(role: str, effort: str, extra: tuple[str, ...]) -> tuple[list
     while rest:
         flag = rest.pop(0)
         if flag == "--json-schema" and rest:
-            schema = rest.pop(0)
+            schema = json.dumps(strict_output_schema(json.loads(rest.pop(0))), sort_keys=True)
             path = home / "schemas" / f"{hashlib.sha256(schema.encode('utf-8')).hexdigest()[:16]}.json"
             if not path.exists():
                 atomic_write(path, schema)

@@ -228,6 +228,8 @@ def test_lark_line_shows_the_openai_balance():
 def test_openai_quota_error_detection():
     assert is_credit_exhausted_error("Error code: 429 - {'code': 'insufficient_quota'}", "openai")
     assert is_credit_exhausted_error("You exceeded your current quota, please check", "openai")
+    assert is_credit_exhausted_error("Quota exceeded. Check your plan and billing details.", "openai")  # codex
+    assert is_credit_exhausted_error("stream error: quota_exceeded", "openai")
     assert not is_credit_exhausted_error("Your credit balance is too low", "openai")
     assert not is_credit_exhausted_error("insufficient_quota")  # Anthropic markers only
 
@@ -342,7 +344,7 @@ def test_codex_quota_error_marks_openai_and_moves_to_deepseek(ladder_cli):
     state, log, month = ladder_cli
     claude_cli.claude_command("claude-haiku-5-5", "low")
     claude_cli.record_failed_call("ticker_collector", "claude-haiku-5-5", "low",
-                                  codex_stream(fail="429 Too Many Requests: insufficient_quota"))
+                                  codex_stream(fail="Quota exceeded. Check your plan and billing details."))
     assert exhausted_marker(state, month, "openai").exists()
     assert claude_cli.cli_route() == "deepseek"
     assert os.environ["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
@@ -386,3 +388,28 @@ def test_llm_budget_cli(tmp_path, monkeypatch, capsys):
     assert llm_budget.main(["status"], now=NOW) == 0
     assert "left $71.00" in capsys.readouterr().out
     assert llm_budget.main(["confirm", "openai", "-3"], now=NOW) == 2
+
+
+@pytest.mark.unit
+def test_eval_schema_is_sent_in_strict_form(ladder_cli):
+    from pipeline.evaluator import _ModelJudgment
+
+    schema = json.dumps(_ModelJudgment.model_json_schema())
+    command = claude_cli.claude_command("claude-opus-5-5", "medium", "--json-schema", schema, role="eval")
+    sent = json.loads(Path(command[command.index("--output-schema") + 1]).read_text())
+
+    def objects(node):
+        if isinstance(node, dict):
+            if isinstance(node.get("properties"), dict):
+                yield node
+            for value in node.values():
+                yield from objects(value)
+        elif isinstance(node, list):
+            for value in node:
+                yield from objects(value)
+
+    found = list(objects(sent))
+    assert found and all(set(o["required"]) == set(o["properties"]) and o["additionalProperties"] is False
+                         for o in found)
+    assert "default" not in json.dumps(sent).replace('"default_', "")
+    assert _ModelJudgment.model_json_schema() == json.loads(schema)  # caller's schema untouched

@@ -63,7 +63,15 @@ role: collect `gpt-5.6-luna`, eval `gpt-5.6-sol`
 (`TRADINGAGENTS_OPENAI_{COLLECT,EVAL}_MODEL`), so collector and evaluator
 stay on different models (evaluator R2). Effort maps low/medium/high,
 xhigh/max → high. The evaluator's `--json-schema` becomes an
-`--output-schema` file (content-addressed under `codex_home/schemas`).
+`--output-schema` file (content-addressed under `codex_home/schemas`) in
+OpenAI **strict** form — every object's properties all `required`,
+`additionalProperties: false`, no `default` — since codex sends it strict
+and the pydantic schema is rejected otherwise (`invalid_json_schema`,
+measured 2026-11-01; the strict form validates live).
+
+Quota detection also matches codex's own rewrite of `insufficient_quota`
+("Quota exceeded. Check your plan and billing details.", `quota_exceeded`,
+strings of codex-cli 0.164.0).
 
 The JSONL events become the claude envelope shape: the last
 `agent_message` is the result (parsed to `structured_output` when it is a
