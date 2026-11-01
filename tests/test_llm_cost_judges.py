@@ -271,3 +271,36 @@ def test_tool_calls_are_bounded_and_junk_reads_empty(monkeypatch, tmp_path):
     assert _usage_line(monkeypatch, tmp_path, envelope)["web_fetch_requests"] == 100  # unbounded count
     line = _usage_line(monkeypatch, tmp_path, {**envelope, "_tool_calls": "junk"})
     assert (line["web_search_requests"], line["web_search_queries"], line["web_fetch_requests"]) == (0, [], 0)
+
+
+def _runner_cases():
+    import pipeline.evaluator as ev
+    import pipeline.macro_collector as mc
+    import pipeline.pool_builder as pb
+    import pipeline.ticker_collector as tc
+
+    return [
+        (tc, lambda: tc.default_runner("claude", "PROMPT", 60), tc.CollectorError),
+        (mc, lambda: mc.default_runner("claude", "PROMPT"), mc.CollectorError),
+        (pb, lambda: pb.default_runner("claude", "PROMPT"), pb.NominationError),
+        (ev, lambda: ev.claude_runner("PROMPT"), ev.BackendError),
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("case", range(4), ids=["ticker", "macro", "pool", "evaluator"])
+def test_failed_call_messages_quote_the_result_envelope(monkeypatch, tmp_path, case):
+    import subprocess
+
+    import pipeline.claude_cli as cc
+
+    monkeypatch.setenv(cc.USAGE_LOG_ENV, str(tmp_path / "usage.jsonl"))
+    module, run, error = _runner_cases()[case]
+    stdout = _stream({"type": "system", "subtype": "init", "tools": ["WebSearch"]},
+                     _result(is_error=True, subtype="error_during_execution", result="boom"))
+    monkeypatch.setattr(module.subprocess, "run",
+                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, stdout=stdout, stderr=""))
+    with pytest.raises(error) as raised:
+        run()
+    assert "boom" in str(raised.value)
+    assert '"subtype": "init"' not in str(raised.value)
