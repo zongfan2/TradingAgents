@@ -102,9 +102,10 @@ The JSONL events become the claude envelope shape: the last
 `agent_message` is the result (parsed to `structured_output` when it is a
 JSON object); `turn.completed` usage is summed and priced (tokens + $0.01
 per web search call); `turn.failed`, or `error` events without a completed
-turn, are an error result. A stream cut before either (timeout, crash)
-is an error result billed at the searches seen + a $0.25 estimate for the
-unreported tokens (over-count: the confirmed balance is never
+turn, are an error result. Any call that ends without `turn.completed`
+(failed, or cut by a timeout/crash, including after transient
+"Reconnecting…" errors) is billed at the searches seen + a $0.25 estimate
+for its unreported tokens (over-count: the confirmed balance is never
 over-reported); every launch site records a timed-out call's partial
 stdout. Usage lines carry `billing: openai-api`, the GPT model that
 served the call, and the R11 search fields (`web_search` items:

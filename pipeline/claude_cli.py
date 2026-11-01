@@ -372,8 +372,8 @@ def _tool_calls(events: list[dict]) -> dict[str, object]:
     return calls
 
 
-#: Billed for a codex call whose stream was cut before ``turn.completed``
-#: (its token usage is never reported): above a typical eval call
+#: Billed for a codex call that ended without ``turn.completed`` (failed or
+#: cut; its token usage is never reported): above a typical eval call
 #: (measured ≈$0.05 on gpt-5.6-sol), so the balance gate over-counts.
 CODEX_CUT_CALL_ESTIMATE_USD = 0.25
 
@@ -435,19 +435,19 @@ def _codex_envelope(events: list[dict]) -> tuple[dict | None, dict[str, object]]
         cost = openai_call_cost(model, {**tokens}) + searches * WEB_SEARCH_USD_PER_CALL
     except Exception:
         cost = searches * WEB_SEARCH_USD_PER_CALL
-    cut = not completed and failure is None and last_error is None
-    if cut:
-        # Killed (timeout/crash) before its turn finished: the tokens are
-        # unreported but billed — over-count so the confirmed balance is
-        # never over-reported.
+    if not completed:
+        # No turn.completed (failed, or killed by a timeout/crash — also
+        # after transient "Reconnecting…" errors): the requests made so far
+        # are billed but their tokens are never reported — over-count so the
+        # confirmed balance is never over-reported.
         cost += CODEX_CUT_CALL_ESTIMATE_USD
-        last_error = "codex stream ended before its turn finished"
     is_error = failure is not None or not completed
     envelope: dict = {
         "type": "result",
         "subtype": "error_during_execution" if is_error else "success",
         "is_error": is_error,
-        "result": (failure or last_error or "codex turn did not complete") if is_error else (text or ""),
+        "result": (failure or last_error or "codex stream ended before its turn finished")
+        if is_error else (text or ""),
         "usage": {
             "input_tokens": max(tokens["input"] - tokens["cache_read"] - tokens["cache_write"], 0),
             "cache_creation_input_tokens": tokens["cache_write"],

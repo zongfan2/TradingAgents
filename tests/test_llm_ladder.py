@@ -529,3 +529,20 @@ def test_strict_schema_keeps_a_property_named_default():
     strict = claude_cli.strict_output_schema(schema)
     assert strict["required"] == ["default", "n"] and strict["additionalProperties"] is False
     assert strict["properties"]["default"] == {"type": "string"}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("tail", [
+    [{"type": "error", "message": "Reconnecting... 1/5"}],                      # killed while reconnecting
+    [{"type": "turn.failed", "error": {"message": "stream disconnected"}}],    # failed mid-turn
+])
+def test_any_unfinished_codex_turn_adds_the_token_estimate(ladder_cli, tail):
+    _state, log, _month = ladder_cli
+    claude_cli.claude_command("claude-haiku-5-5", "low")
+    events = [{"type": "thread.started"}, {"type": "turn.started"},
+              {"type": "item.completed", "item": {"type": "web_search", "action": {"type": "search", "query": "q"}}},
+              *tail]
+    claude_cli.record_failed_call("ticker_collector", "claude-haiku-5-5", "low",
+                                  "\n".join(json.dumps(e) for e in events))
+    line = json.loads(log.read_text().splitlines()[-1])
+    assert line["billed_usd"] == pytest.approx(0.01 + claude_cli.CODEX_CUT_CALL_ESTIMATE_USD)
