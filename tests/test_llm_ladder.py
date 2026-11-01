@@ -64,10 +64,14 @@ def test_gpt_prices_and_provider():
     ceiling, exact = price_for("gpt-9-unknown")
     assert (ceiling.output, exact) == (50.00, False)  # the highest listed rate (gpt-6-astra)
     assert price_for("gpt-6-astra") == (ceiling, True)
-    # The long tier is per request: 10 requests × 30K is short, 1 × 300K is long.
+    # Per request, on the largest growing request's bound 2·sum/(n+1):
+    short, long = (300_000 * 2 + 1_000 * 10) / 1e6, (300_000 * 4 + 1_000 * 15) / 1e6
     summed = {"input": 300_000, "output": 1_000}
-    assert call_cost("gpt-6.1-sol", summed, requests=10) == pytest.approx((300_000 * 2 + 1_000 * 10) / 1e6)
-    assert call_cost("gpt-6.1-sol", summed) == pytest.approx((300_000 * 4 + 1_000 * 15) / 1e6)
+    assert call_cost("gpt-6.1-sol", summed, growing_requests=10) == pytest.approx(short)  # bound 54.5K
+    assert call_cost("gpt-6.1-sol", summed) == pytest.approx(long)  # one request
+    # 100K + 200K + 300K: average 200K, but the last request is long.
+    assert call_cost("gpt-6.1-sol", {"input": 600_000, "output": 1_000}, growing_requests=3) == pytest.approx(
+        (600_000 * 4 + 1_000 * 15) / 1e6)
 
 
 # ---------------------------------------------------------------------------
@@ -677,3 +681,30 @@ def test_codex_executable_finds_a_hoisted_platform_package(tmp_path, monkeypatch
     native.chmod(0o755)
     monkeypatch.setattr(claude_cli.shutil, "which", lambda cli: str(launcher))
     assert claude_cli.codex_executable() == (str(native), modules / "@openai" / "codex")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("input_tokens", "searches", "tier"), [
+    (300_000, 9, "short"),   # 10 requests: largest ≥ 54.5K
+    (300_000, 0, "long"),    # one request of 300K
+    (600_000, 2, "long"),    # 3 growing requests: largest ≥ 300K
+])
+def test_codex_turn_long_tier_wiring(ladder_cli, input_tokens, searches, tier):
+    _state, log, _month = ladder_cli
+    claude_cli.claude_command("claude-haiku-5-5", "low")
+    usage = {"input_tokens": input_tokens, "cached_input_tokens": 0, "cache_write_input_tokens": 0, "output_tokens": 1_000}
+    claude_cli.collect_output("claude", codex_stream(searches=tuple(f"q{i}" for i in range(searches)), usage=usage),
+                              component="ticker_collector")
+    rate_in, rate_out = (0.10, 0.50) if tier == "short" else (0.20, 0.75)  # gpt-6-luna
+    expected = (input_tokens * rate_in + 1_000 * rate_out) / 1e6 + searches * 0.01
+    assert json.loads(log.read_text().splitlines()[-1])["billed_usd"] == pytest.approx(expected)
+
+
+@pytest.mark.unit
+def test_unnamed_ledger_rows_use_the_whole_sum_for_the_tier(tmp_path):
+    big = {"unknown": {"calls": 20, "input": 400_000, "output": 1_000, "cache_read": 0, "cache_write": 0,
+                       "reasoning": 0, "cost_usd": 0.0, "priced": False}}
+    append_usage(tmp_path, run_id="r", date="2026-08-07", session="us", ticker="A", arm="brief",
+                 profile="openai", clock=lambda: NOW, models=big)
+    # Unrelated calls summed: long tier on the sum (over-count), at the astra ceiling.
+    assert month_spend(tmp_path, MONTH, "openai") == pytest.approx((400_000 * 20 + 1_000 * 75) / 1e6)
