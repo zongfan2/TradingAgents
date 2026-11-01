@@ -326,3 +326,24 @@ def test_a_stream_cut_after_one_event_logs_nothing(monkeypatch, tmp_path):
     assert not log.exists()
     cc.record_failed_call("ticker_collector", "m", "low", json.dumps({"usage": {}, "total_cost_usd": 0.01}))
     assert json.loads(log.read_text())["outcome"] == "error"  # a lone non-event object still logs
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("case", range(3), ids=["ticker", "macro", "pool"])
+def test_codex_failure_messages_keep_their_stdout(monkeypatch, case):
+    import subprocess
+
+    import pipeline.macro_collector as mc
+    import pipeline.pool_builder as pb
+    import pipeline.ticker_collector as tc
+
+    module, run, error = [
+        (tc, lambda: tc.default_runner("codex", "PROMPT", 60), tc.CollectorError),
+        (mc, lambda: mc.default_runner("codex", "PROMPT"), mc.CollectorError),
+        (pb, lambda: pb.default_runner("codex", "PROMPT"), pb.NominationError),
+    ][case]
+    monkeypatch.setattr(module.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(
+        cmd, 1, stdout='partial\n{"ticker": "AAPL"}\n', stderr=""))
+    with pytest.raises(error) as raised:
+        run()
+    assert "partial" in str(raised.value) and "no output" not in str(raised.value)

@@ -316,6 +316,12 @@ def collect_output(backend: str, stdout: str, *, component: str) -> str:
     return text
 
 
+def failure_stdout(backend: str, stdout: str) -> str:
+    """The stdout a failed collector call's message quotes: claude's result
+    envelope (:func:`envelope_line`), any other backend's stdout as is."""
+    return envelope_line(stdout) if backend == "claude" else stdout
+
+
 def collect_failed(backend: str, stdout: str, *, component: str) -> None:
     """Log the usage of a collector call that exited non-zero (claude only)."""
     if backend == "claude":
