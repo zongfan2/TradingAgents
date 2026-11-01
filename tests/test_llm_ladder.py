@@ -848,3 +848,30 @@ def test_leftover_call_homes_are_pruned_on_other_routes_too(ladder_cli, monkeypa
     monkeypatch.setenv("TRADINGAGENTS_LLM_ROUTING", "claude")  # off the OpenAI rung
     command = claude_cli.claude_command("claude-haiku-5-5", "low")
     assert command[0] == "claude" and not leftover.exists()
+
+
+@pytest.mark.unit
+def test_prune_survives_a_home_deleted_mid_pass(ladder_cli, monkeypatch, caplog):
+    import os
+    import shutil
+    import time
+
+    homes = []
+    for _ in range(3):
+        claude_cli.claude_command("claude-haiku-5-5", "low")
+        homes.append(claude_cli._CALL.codex_home)
+    stale = time.time() - claude_cli._CALL_HOME_MAX_AGE_SECONDS - 60
+    for home in homes:
+        os.utime(home, (stale, stale))
+    base = homes[0].parent.parent
+    real_glob = type(base / "calls").glob
+
+    def glob_then_vanish(self, pattern):
+        found = list(real_glob(self, pattern))
+        shutil.rmtree(sorted(found)[0])  # another thread billed and deleted its home
+        return found
+
+    monkeypatch.setattr(type(base / "calls"), "glob", glob_then_vanish)
+    claude_cli._prune_call_homes(base)
+    assert not any(home.exists() for home in homes)
+    assert "could not prune" not in caplog.text

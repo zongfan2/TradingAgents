@@ -303,13 +303,20 @@ _ROLLOUT_LOCK = threading.Lock()
 
 
 def _prune_call_homes(home: Path) -> None:
+    cutoff = time.time() - _CALL_HOME_MAX_AGE_SECONDS
     try:
-        cutoff = time.time() - _CALL_HOME_MAX_AGE_SECONDS
-        for call_home in (home / "calls").glob("*"):
+        entries = list((home / "calls").glob("*"))
+    except OSError as exc:  # pruning never fails a call
+        logger.warning("could not list codex call homes: %s", exc)
+        return
+    for call_home in entries:
+        try:  # per entry: a home its own call just deleted is no error
             if call_home.stat().st_mtime < cutoff:
                 shutil.rmtree(call_home, ignore_errors=True)
-    except OSError as exc:  # pruning never fails a call
-        logger.warning("could not prune codex call homes: %s", exc)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            logger.warning("could not prune codex call home %s: %s", call_home.name, exc)
 
 
 def _prune_leftover_call_homes() -> None:
