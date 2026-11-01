@@ -388,6 +388,19 @@ def test_llm_budget_cli(tmp_path, monkeypatch, capsys):
     assert llm_budget.main(["status"], now=NOW) == 0
     assert "left $71.00" in capsys.readouterr().out
     assert llm_budget.main(["confirm", "openai", "-3"], now=NOW) == 2
+    assert llm_budget.main(["confirm", "openai", "71", "--month", "2026-1"], now=NOW) == 2
+
+
+@pytest.mark.unit
+def test_cli_lines_with_naive_or_junk_ts_still_count(tmp_path, monkeypatch):
+    state = tmp_path / "state"
+    log = tmp_path / "cli.jsonl"
+    monkeypatch.setenv("TRADINGAGENTS_CLAUDE_USAGE_LOG", str(log))
+    with open(log, "a", encoding="utf-8") as handle:
+        for ts in (f"{MONTH}-07T10:00:00", f"{MONTH}-junk"):
+            handle.write(json.dumps({"ts": ts, "billing": "openai-api", "billed_usd": 1.0}) + "\n")
+    assert month_spend(state, MONTH, "openai") == pytest.approx(2.0)
+    assert month_spend(state, MONTH, "openai", since=NOW.isoformat()) == pytest.approx(2.0)
 
 
 @pytest.mark.unit

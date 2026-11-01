@@ -349,7 +349,12 @@ def cli_month_spend(
             if not isinstance(row, dict) or row.get("billing") != billing:
                 continue
             ts = _utc_instant(row.get("ts"))
-            if ts is None or ts.strftime("%Y-%m") != month or (since_at and ts < since_at):
+            if ts is None:
+                # A naive/junk ts keeps the old prefix rule and, with
+                # ``since``, counts (over-counting is budget-safe).
+                if str(row.get("ts") or "")[:7] != month:
+                    continue
+            elif ts.strftime("%Y-%m") != month or (since_at and ts < since_at):
                 continue
             total += _spend(row.get("billed_usd"))
         except Exception:  # a malformed line never breaks the fold
@@ -463,6 +468,8 @@ def confirm_balance(
 ) -> dict:
     """Record the balance the user read off the console for ``month``;
     spend after ``confirmed_at`` is deducted from it."""
+    if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", month):
+        raise ValueError(f"month must be YYYY-MM, got {month!r}")
     if not (math.isfinite(balance_usd) and balance_usd >= 0):
         raise ValueError(f"balance must be a finite amount >= 0, got {balance_usd!r}")
     record = {"provider": provider, "month": month, "balance_usd": round(float(balance_usd), 2),
