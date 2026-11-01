@@ -904,3 +904,27 @@ def test_a_failed_call_home_deletion_is_logged(ladder_cli, monkeypatch, caplog):
     claude_cli._remove_call_home(home)
     claude_cli._remove_call_home(home)  # already gone: silent
     assert not home.exists() and "could not delete" not in caplog.text
+
+
+@pytest.mark.unit
+def test_call_home_removal_works_without_onexc(ladder_cli, monkeypatch, caplog):
+    """requires-python >= 3.10: before 3.12 rmtree has only onerror."""
+    real_rmtree = claude_cli.shutil.rmtree
+    claude_cli.claude_command("claude-haiku-5-5", "low")
+    home = claude_cli._CALL.codex_home
+    monkeypatch.setattr(claude_cli.sys, "version_info", (3, 11, 9))
+    monkeypatch.setattr(claude_cli.shutil, "rmtree",
+                        lambda path, onerror=None: real_rmtree(path, onerror=onerror))
+    claude_cli._remove_call_home(home)
+    assert not home.exists() and "could not delete" not in caplog.text
+
+
+@pytest.mark.unit
+def test_stale_homes_are_pruned_once_per_call(ladder_cli, monkeypatch):
+    seen = []
+    real = claude_cli._prune_call_homes
+    monkeypatch.setattr(claude_cli, "_prune_call_homes", lambda home: seen.append(home) or real(home))
+    claude_cli.claude_command("claude-haiku-5-5", "low")  # creates codex_home
+    seen.clear()
+    claude_cli.claude_command("claude-haiku-5-5", "low")
+    assert len(seen) == 1

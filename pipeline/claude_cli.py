@@ -279,8 +279,7 @@ def _codex_home() -> Path:
     ``calls/``."""
     home = Path(_state_dir()) / "codex_home"
     home.mkdir(parents=True, exist_ok=True)
-    _prune_call_homes(home)
-    return home
+    return home  # stale call homes: pruned once per CLI call (claude_command)
 
 
 def _new_call_home() -> Path:
@@ -315,7 +314,10 @@ def _remove_call_home(call_home: Path) -> None:
             failures.append(f"{path}: {exc}")
 
     try:
-        shutil.rmtree(call_home, onexc=failed)
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(call_home, onexc=failed)
+        else:  # requires-python >= 3.10: onexc is 3.12+
+            shutil.rmtree(call_home, onerror=lambda func, path, info: failed(func, path, info[1]))
     except Exception as exc:
         failures.append(str(exc))
     if failures:
