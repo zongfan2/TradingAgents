@@ -792,6 +792,11 @@ _GRAPH_CONFIG_KEYS = (
 )
 
 
+#: Keys added after the digest format settled: an unset value is left out,
+#: so profiles that never set them keep their digest (ladder L2).
+_DIGEST_OMIT_WHEN_UNSET = frozenset({"openai_deep_reasoning_effort", "openai_quick_reasoning_effort"})
+
+
 def effective_analysis_config(env_overrides: Mapping[str, str] | None = None) -> dict:
     """The analysis-side effective configuration (config-digest input).
 
@@ -821,7 +826,11 @@ def effective_analysis_config(env_overrides: Mapping[str, str] | None = None) ->
             if value == "" and env_var in _ENV_OVERRIDES:
                 graph_config[_ENV_OVERRIDES[env_var]] = None
     return {
-        "graph": {key: graph_config.get(key) for key in _GRAPH_CONFIG_KEYS},
+        "graph": {
+            key: graph_config.get(key)
+            for key in _GRAPH_CONFIG_KEYS
+            if key not in _DIGEST_OMIT_WHEN_UNSET or graph_config.get(key) is not None
+        },
         "prompt_templates": {
             "trader.trade_plan_instructions": sha256_text(TRADE_PLAN_INSTRUCTIONS),
             "trader.position_maintain_instructions": sha256_text(POSITION_MAINTAIN_INSTRUCTIONS),

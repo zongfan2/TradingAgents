@@ -468,3 +468,64 @@ def test_an_unpriced_codex_model_is_budgeted_at_the_openai_ceiling(ladder_cli, m
     claude_cli.collect_output("claude", codex_stream(searches=()), component="ticker_collector")
     line = json.loads(log.read_text().splitlines()[-1])
     assert line["billed_usd"] == pytest.approx((1_000 * 4 + 10_000 * 0.4 + 14_000 * 4 + 500 * 20) / 1e6)
+
+
+@pytest.mark.unit
+def test_unset_openai_knobs_leave_other_profiles_digests_alone():
+    for env in (CLAUDE.env, DEEPSEEK.env, {}):
+        graph = ar.effective_analysis_config(env)["graph"]
+        assert "openai_deep_reasoning_effort" not in graph and "openai_quick_reasoning_effort" not in graph
+    assert ar.effective_analysis_config(OPENAI.env)["graph"]["openai_quick_reasoning_effort"] == "low"
+
+
+@pytest.mark.unit
+def test_a_cut_codex_stream_is_billed_conservatively(ladder_cli):
+    _state, log, _month = ladder_cli
+    claude_cli.claude_command("claude-haiku-5-5", "low")
+    events = [{"type": "thread.started"}, {"type": "turn.started"},
+              {"type": "item.completed", "item": {"type": "web_search", "action": {"type": "search", "query": "q"}}}]
+    cut = "\n".join(json.dumps(e) for e in events) + "\n"
+    with pytest.raises(claude_cli.EnvelopeError):
+        claude_cli.parse_envelope(cut)
+    claude_cli.record_failed_call("ticker_collector", "claude-haiku-5-5", "low", cut)
+    line = json.loads(log.read_text().splitlines()[-1])
+    assert (line["outcome"], line["billing"]) == ("error", "openai-api")
+    assert line["billed_usd"] == pytest.approx(0.01 + claude_cli.CODEX_CUT_CALL_ESTIMATE_USD)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("site", ["ticker", "macro", "pool", "evaluator"])
+def test_a_timed_out_call_records_its_spend(ladder_cli, monkeypatch, site):
+    import subprocess
+
+    import pipeline.evaluator as ev
+    import pipeline.macro_collector as mc
+    import pipeline.pool_builder as pb
+    import pipeline.ticker_collector as tc
+
+    _state, log, _month = ladder_cli
+    module, run_it, error = {
+        "ticker": (tc, lambda: tc.default_runner("claude", "P", 60), tc.CollectorError),
+        "macro": (mc, lambda: mc.default_runner("claude", "P"), mc.CollectorError),
+        "pool": (pb, lambda: pb.default_runner("claude", "P"), pb.NominationError),
+        "evaluator": (ev, lambda: ev.claude_runner("P"), ev.BackendError),
+    }[site]
+    partial = (json.dumps({"type": "thread.started"}) + "\n").encode()  # bytes, as TimeoutExpired carries
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, 60, output=partial)
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    with pytest.raises(error, match="timed out"):
+        run_it()
+    line = json.loads(log.read_text().splitlines()[-1])
+    assert line["billed_usd"] == pytest.approx(claude_cli.CODEX_CUT_CALL_ESTIMATE_USD)
+
+
+@pytest.mark.unit
+def test_strict_schema_keeps_a_property_named_default():
+    schema = {"type": "object", "properties": {"default": {"type": "string", "default": "x"},
+                                               "n": {"type": "integer"}}, "required": ["n"]}
+    strict = claude_cli.strict_output_schema(schema)
+    assert strict["required"] == ["default", "n"] and strict["additionalProperties"] is False
+    assert strict["properties"]["default"] == {"type": "string"}

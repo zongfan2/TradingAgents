@@ -58,6 +58,7 @@ from pipeline.claude_cli import (
     collect_failed,
     collect_output,
     failure_stdout,
+    timeout_stdout,
 )
 from pipeline.common import (
     LOG_FIELD_SEPARATOR,
@@ -264,6 +265,7 @@ def default_runner(
     except FileNotFoundError as exc:
         raise CollectorError(f"backend CLI '{command[0]}' not found on PATH") from exc
     except subprocess.TimeoutExpired as exc:
+        collect_failed(backend, timeout_stdout(exc), component="ticker_collector")  # spend so far
         raise CollectorError(
             f"backend '{backend}' timed out after {int(timeout)}s"
         ) from exc

@@ -45,7 +45,8 @@ moves to DeepSeek on either provider's exhaustion (one-way).
 effort low), deep `gpt-5.6-sol` (medium) for both judges (no Research
 Manager override). New per-role knobs `openai_deep_reasoning_effort` /
 `openai_quick_reasoning_effort` (env `TRADINGAGENTS_OPENAI_{DEEP,QUICK}_REASONING_EFFORT`)
-override `openai_reasoning_effort` and are in the config digest; the
+override `openai_reasoning_effort` and are in the config digest when set
+(left out when unset, so the other profiles' digests are unchanged); the
 other profiles clear them, the `openai` profile clears the Anthropic,
 DeepSeek and RM knobs. Structured output and usage capture verified live
 (2026-11-01).
@@ -101,8 +102,11 @@ The JSONL events become the claude envelope shape: the last
 `agent_message` is the result (parsed to `structured_output` when it is a
 JSON object); `turn.completed` usage is summed and priced (tokens + $0.01
 per web search call); `turn.failed`, or `error` events without a completed
-turn, are an error result; a stream that ends before either has no
-envelope. Usage lines carry `billing: openai-api`, the GPT model that
+turn, are an error result. A stream cut before either (timeout, crash)
+is an error result billed at the searches seen + a $0.25 estimate for the
+unreported tokens (over-count: the confirmed balance is never
+over-reported); every launch site records a timed-out call's partial
+stdout. Usage lines carry `billing: openai-api`, the GPT model that
 served the call, and the R11 search fields (`web_search` items:
 `search` → queries, `open_page` → fetch URLs).
 

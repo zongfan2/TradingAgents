@@ -233,7 +233,16 @@ def strict_output_schema(node: object) -> object:
         return [strict_output_schema(item) for item in node]
     if not isinstance(node, dict):
         return node
-    out = {key: strict_output_schema(value) for key, value in node.items() if key != "default"}
+    out = {}
+    for key, value in node.items():
+        if key == "default":
+            continue
+        if key in ("properties", "$defs", "definitions") and isinstance(value, dict):
+            # Name → schema maps: the names are data (a field may be called
+            # "default"); only their schemas are rewritten.
+            out[key] = {name: strict_output_schema(sub) for name, sub in value.items()}
+        else:
+            out[key] = strict_output_schema(value)
     if isinstance(out.get("properties"), dict):
         out["required"] = list(out["properties"])
         out["additionalProperties"] = False
@@ -363,6 +372,11 @@ def _tool_calls(events: list[dict]) -> dict[str, object]:
     return calls
 
 
+#: Billed for a codex call whose stream was cut before ``turn.completed``
+#: (its token usage is never reported): above a typical eval call
+#: (measured ≈$0.05 on gpt-5.6-sol), so the balance gate over-counts.
+CODEX_CUT_CALL_ESTIMATE_USD = 0.25
+
 #: Event types only ``codex exec --json`` prints (ladder L3).
 _CODEX_EVENT_TYPES = ("thread.started", "turn.started", "turn.completed", "turn.failed")
 
@@ -416,13 +430,18 @@ def _codex_envelope(events: list[dict]) -> tuple[dict | None, dict[str, object]]
                     query = action.get("query")
                     if isinstance(query, str) and query.strip() and len(calls["web_search_queries"]) < _MAX_TOOL_CALLS:
                         calls["web_search_queries"].append(query[:_MAX_TOOL_ARG_CHARS])
-    if not completed and failure is None and last_error is None:
-        return None, calls
     model = getattr(_CALL, "model", None) or "gpt-unknown"
     try:
         cost = openai_call_cost(model, {**tokens}) + searches * WEB_SEARCH_USD_PER_CALL
     except Exception:
         cost = searches * WEB_SEARCH_USD_PER_CALL
+    cut = not completed and failure is None and last_error is None
+    if cut:
+        # Killed (timeout/crash) before its turn finished: the tokens are
+        # unreported but billed — over-count so the confirmed balance is
+        # never over-reported.
+        cost += CODEX_CUT_CALL_ESTIMATE_USD
+        last_error = "codex stream ended before its turn finished"
     is_error = failure is not None or not completed
     envelope: dict = {
         "type": "result",
@@ -526,6 +545,15 @@ def collect_output(backend: str, stdout: str, *, component: str) -> str:
         raise
     record_usage(component, model, effort, envelope)
     return text
+
+
+def timeout_stdout(exc: BaseException) -> str:
+    """What a timed-out call printed before it was killed (``TimeoutExpired``
+    carries bytes even under ``text=True``)."""
+    out = getattr(exc, "stdout", None) or getattr(exc, "output", None) or ""
+    if isinstance(out, bytes):
+        return out.decode("utf-8", errors="replace")
+    return out if isinstance(out, str) else ""
 
 
 def failure_stdout(backend: str, stdout: str) -> str:
