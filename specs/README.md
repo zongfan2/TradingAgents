@@ -39,7 +39,9 @@ specifies Flash for every model-assisted backup role without activating it.
 | [orchestrator.md](orchestrator.md) | Per-session scheduling, ordering, settle job, status file, notifications | Claude Code | **Implemented** |
 | [webui-pages.md](webui-pages.md) | Status banner, pool/briefs views, A/B aggregates, halt toggle | Claude Code | **Implemented** |
 | [decision-funnel.md](decision-funnel.md) | Per-slot exclusion record (event log, snapshot, webui page) | Claude Code | **Implemented** (P1–P3) |
-| [llm-cost.md](llm-cost.md) | LLM usage ledger, Claude-first routing with a monthly budget, run-volume cuts | Claude Code | **Draft** |
+| [llm-cost.md](llm-cost.md) | LLM usage ledger, Claude-first routing with a monthly budget, run-volume cuts | Claude Code | **Implemented** (R1–R4, R6–R11; R5 deferred) |
+| [llm-provider-ladder.md](llm-provider-ladder.md) | Claude → OpenAI (GPT, hermetic codex) → DeepSeek routing; monthly OpenAI balance confirmation (`pipeline.llm_budget`) | Claude Code | **Implemented** |
+| [ticker-brief-dossier.md](ticker-brief-dossier.md) | Ticker brief dossier + daily delta (cross-day research dedup) | Claude Code | **Draft** |
 
 ## System overview
 

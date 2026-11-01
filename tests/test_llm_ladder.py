@@ -390,8 +390,13 @@ def test_llm_budget_cli(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("TRADINGAGENTS_SKIP_DOTENV", "1")
     monkeypatch.setenv("TRADINGAGENTS_STATE_DIR", str(tmp_path))
     monkeypatch.setenv("OPENAI_API_KEY", "sk-proj-test")
+    monkeypatch.setenv("TRADINGAGENTS_ANTHROPIC_MONTHLY_BUDGET_USD", "150")
     assert llm_budget.main(["status"], now=NOW) == 0
-    assert "NOT confirmed" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "NOT confirmed" in out and "/ budget $150" in out
+    monkeypatch.setenv("TRADINGAGENTS_ANTHROPIC_MONTHLY_BUDGET_USD", "lots")
+    assert llm_budget.main(["status"], now=NOW) == 0  # junk shows, never crashes
+    assert "budget unreadable" in capsys.readouterr().out
     assert llm_budget.main(["confirm", "openai", "71"], now=NOW) == 0
     assert read_confirmation(tmp_path, MONTH)["balance_usd"] == 71
     assert llm_budget.main(["status"], now=NOW) == 0

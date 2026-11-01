@@ -16,7 +16,7 @@ import os
 import sys
 from datetime import datetime, timezone
 
-from pipeline.llm_routing import DEFAULT_ANTHROPIC_MONTHLY_BUDGET_USD, openai_usable
+from pipeline.llm_routing import openai_usable
 from pipeline.llm_usage import (
     confirm_balance,
     exhausted_marker,
@@ -63,10 +63,15 @@ def main(argv: list[str] | None = None, now: datetime | None = None) -> int:
         print(f"{args.provider} {target}: balance ${record['balance_usd']:.2f} confirmed at {record['confirmed_at']}")
         return 0
     anthropic = month_spend(state_dir, month, "anthropic")
-    budget = os.environ.get("TRADINGAGENTS_ANTHROPIC_MONTHLY_BUDGET_USD", "").strip()
     print(f"month {month} (UTC)")
     marker = " (credits exhausted)" if exhausted_marker(state_dir, month).exists() else ""
-    print(f"  anthropic spend ${anthropic:.2f} / budget ${float(budget or DEFAULT_ANTHROPIC_MONTHLY_BUDGET_USD):.0f}{marker}")
+    try:  # the budget the analysis runner gates on
+        from pipeline.analysis_runner import load_settings
+
+        budget = f"${load_settings(os.environ).anthropic_monthly_budget_usd:.0f}"
+    except Exception as exc:
+        budget = f"unreadable ({exc})"
+    print(f"  anthropic spend ${anthropic:.2f} / budget {budget}{marker}")
     record = read_confirmation(state_dir, month, "openai")
     if record is None:
         print("  openai    balance NOT confirmed — run: python -m pipeline.llm_budget confirm openai <USD>")
