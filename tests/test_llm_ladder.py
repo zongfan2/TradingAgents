@@ -374,6 +374,8 @@ def test_missing_codex_binary_skips_the_openai_rung(ladder_cli, monkeypatch):
 
 @pytest.mark.unit
 def test_codex_executable_resolves_the_native_binary_behind_the_npm_launcher(tmp_path, monkeypatch):
+    monkeypatch.setattr(claude_cli, "_codex_target",
+                        lambda: ("x86_64-unknown-linux-musl", "@openai/codex-linux-x64"))
     root = tmp_path / "lib" / "node_modules" / "@openai" / "codex"
     (root / "bin").mkdir(parents=True)
     launcher = root / "bin" / "codex.js"
@@ -382,6 +384,11 @@ def test_codex_executable_resolves_the_native_binary_behind_the_npm_launcher(tmp
     native.parent.mkdir(parents=True)
     native.write_bytes(b"\x7fELF....")
     native.chmod(0o755)
+    # Another target installed next to it (sorts first) is never picked.
+    other = root / "vendor" / "aarch64-apple-darwin" / "bin" / "codex"
+    other.parent.mkdir(parents=True)
+    other.write_bytes(b"\xcf\xfa\xed\xfe")
+    other.chmod(0o755)
     shim = tmp_path / "bin" / "codex"
     shim.parent.mkdir()
     shim.symlink_to(launcher)
@@ -603,3 +610,17 @@ def test_openai_child_usage_is_captured_and_an_unnamed_model_still_counts(tmp_pa
                  profile="openai", clock=lambda: NOW, models=unnamed)
     assert month_spend(tmp_path, MONTH, "openai") == pytest.approx((1000 * 4 + 100 * 20) / 1e6)
     assert month_spend(tmp_path, MONTH, "anthropic") == 0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("plat", "machine", "triple"), [
+    ("linux", "x86_64", "x86_64-unknown-linux-musl"), ("linux", "AMD64", "x86_64-unknown-linux-musl"),
+    ("linux", "aarch64", "aarch64-unknown-linux-musl"), ("linux", "arm64", "aarch64-unknown-linux-musl"),
+    ("darwin", "arm64", "aarch64-apple-darwin"), ("darwin", "x86_64", "x86_64-apple-darwin"),
+    ("win32", "AMD64", None), ("linux", "riscv64", None),
+])
+def test_codex_target_follows_the_launcher(monkeypatch, plat, machine, triple):
+    monkeypatch.setattr(claude_cli.sys, "platform", plat)
+    monkeypatch.setattr(claude_cli.platform, "machine", lambda: machine)
+    target = claude_cli._codex_target()
+    assert (target[0] if target else None) == triple

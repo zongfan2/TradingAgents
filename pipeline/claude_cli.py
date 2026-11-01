@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import os
+import platform
 import shutil
 import sys
 import threading
@@ -213,6 +214,25 @@ _CODEX_ENV_KEEP = (
 )
 
 
+#: The npm launcher's target triple → platform package (codex.js 0.164.0).
+_CODEX_TARGETS = {
+    ("linux", "x86_64"): ("x86_64-unknown-linux-musl", "@openai/codex-linux-x64"),
+    ("linux", "aarch64"): ("aarch64-unknown-linux-musl", "@openai/codex-linux-arm64"),
+    ("darwin", "x86_64"): ("x86_64-apple-darwin", "@openai/codex-darwin-x64"),
+    ("darwin", "arm64"): ("aarch64-apple-darwin", "@openai/codex-darwin-arm64"),
+}
+
+
+def _codex_target() -> tuple[str, str] | None:
+    """This host's ``(target triple, platform package)``, as the launcher
+    picks it; ``None`` on an unsupported host (the rung is skipped)."""
+    machine = platform.machine().lower()
+    machine = {"amd64": "x86_64", "arm64": "arm64" if sys.platform == "darwin" else "aarch64"}.get(machine, machine)
+    if sys.platform == "darwin" and machine == "aarch64":
+        machine = "arm64"
+    return _CODEX_TARGETS.get((sys.platform, machine))
+
+
 def codex_executable() -> tuple[str, Path | None] | None:
     """``(native binary, npm package root)`` for the installed codex, or
     ``None``. The npm ``codex`` is a node launcher that spawns the native
@@ -229,9 +249,13 @@ def codex_executable() -> tuple[str, Path | None] | None:
                 return str(real), None
     except OSError:
         return None
+    target = _codex_target()
+    if target is None:
+        return None
+    triple, package = target
     root = real.parent.parent  # .../@openai/codex (bin/codex.js)
-    candidates = sorted(root.glob("node_modules/@openai/codex-*/vendor/*/bin/codex"))
-    candidates += sorted(root.glob("vendor/*/bin/codex"))
+    candidates = [root / "node_modules" / package / "vendor" / triple / "bin" / "codex",
+                  root / "vendor" / triple / "bin" / "codex"]
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return str(candidate), root
