@@ -1444,11 +1444,16 @@ def _analysis_llm_text(result: RunResult) -> str | None:
         return None
     try:
         profiles = "/".join(f"{name} {n}" for name, n in sorted((llm.get("profiles") or {}).items()))
-        return (
+        line = (
             f"LLM {profiles or 'no runs'} ${float(llm.get('cost_usd') or 0):.2f}; "
             f"Anthropic month ${float(llm.get('anthropic_month_usd') or 0):.2f}"
             f"/${float(llm.get('anthropic_budget_usd') or 0):.0f}"
         )
+        if "openai_remaining_usd" in llm:  # ladder routing (L1)
+            remaining = llm.get("openai_remaining_usd")
+            line += ("; OpenAI balance unconfirmed" if remaining is None
+                     else f"; OpenAI left ${float(remaining):.2f}")
+        return line
     except (TypeError, ValueError, AttributeError):
         return None
 

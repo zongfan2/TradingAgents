@@ -183,7 +183,10 @@ class TradingAgentsGraph:
                 kwargs["thinking_level"] = thinking_level
 
         elif provider == "openai":
-            reasoning_effort = self.config.get("openai_reasoning_effort")
+            reasoning_effort = (
+                self.config.get(f"openai_{role}_reasoning_effort")
+                or self.config.get("openai_reasoning_effort")
+            )
             if reasoning_effort:
                 kwargs["reasoning_effort"] = reasoning_effort
 

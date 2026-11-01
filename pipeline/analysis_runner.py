@@ -81,16 +81,19 @@ from pipeline.funnel_events import FunnelEvents, best_effort
 from pipeline.llm_routing import (
     DEEPSEEK,
     DEFAULT_ANTHROPIC_MONTHLY_BUDGET_USD,
+    OPENAI,
     ROUTING_CHOICES,
     Profile,
     RoutingDecision,
     choose_profile,
+    openai_usable,
 )
 from pipeline.llm_usage import (
     append_usage,
     is_credit_exhausted_error,
     mark_exhausted,
     month_spend,
+    remaining_balance,
 )
 from pipeline.run_one import REPAIR_PROMPT, RESULT_SENTINEL, USAGE_SENTINEL
 
@@ -782,11 +785,18 @@ _GRAPH_CONFIG_KEYS = (
     "output_language",
     "google_thinking_level",
     "openai_reasoning_effort",
+    "openai_deep_reasoning_effort",
+    "openai_quick_reasoning_effort",
     "anthropic_effort",
     "anthropic_deep_effort",
     "anthropic_quick_effort",
     "deepseek_quick_thinking",
 )
+
+
+#: Keys added after the digest format settled: an unset value is left out,
+#: so profiles that never set them keep their digest (ladder L2).
+_DIGEST_OMIT_WHEN_UNSET = frozenset({"openai_deep_reasoning_effort", "openai_quick_reasoning_effort"})
 
 
 def effective_analysis_config(env_overrides: Mapping[str, str] | None = None) -> dict:
@@ -818,7 +828,11 @@ def effective_analysis_config(env_overrides: Mapping[str, str] | None = None) ->
             if value == "" and env_var in _ENV_OVERRIDES:
                 graph_config[_ENV_OVERRIDES[env_var]] = None
     return {
-        "graph": {key: graph_config.get(key) for key in _GRAPH_CONFIG_KEYS},
+        "graph": {
+            key: graph_config.get(key)
+            for key in _GRAPH_CONFIG_KEYS
+            if key not in _DIGEST_OMIT_WHEN_UNSET or graph_config.get(key) is not None
+        },
         "prompt_templates": {
             "trader.trade_plan_instructions": sha256_text(TRADE_PLAN_INSTRUCTIONS),
             "trader.position_maintain_instructions": sha256_text(POSITION_MAINTAIN_INSTRUCTIONS),
@@ -1171,6 +1185,14 @@ class _LlmRouter:
 
     def month_spend(self) -> float:
         return month_spend(self.config.state_dir, self.clock().strftime("%Y-%m"), "anthropic")
+
+    def openai_usable(self) -> bool:
+        return openai_usable(self.config.state_dir, self.clock().strftime("%Y-%m"))[0]
+
+    def openai_remaining(self) -> float | None:
+        """Confirmed OpenAI balance minus spend since (ladder L1); ``None``
+        when this month is unconfirmed."""
+        return remaining_balance(self.config.state_dir, self.clock().strftime("%Y-%m"), "openai")
 
 
 def make_child_runner(config: PipelineConfig) -> ChildRunner:
@@ -1566,23 +1588,39 @@ def _run_job_impl(
             result = child_runner(spec, settings.run_timeout_seconds)
         except Exception as exc:  # R3: the slot never aborts on one ticker
             result = ChildResult(-1, None, f"child runner raised: {exc}")
-        if (
+        exhausted_providers: set[str] = set()
+        while (
             profile is not None
-            and profile.provider == "anthropic"
+            and profile.provider in ("anthropic", "openai")
             and result.returncode != 0
-            and is_credit_exhausted_error(result.error)
+            and is_credit_exhausted_error(result.error, profile.provider)
         ):
-            # llm-cost R2: the credits are gone — mark the month and rerun
-            # this run once on DeepSeek; only the final result is recorded.
+            # llm-cost R2 / ladder L1: the credits are gone — mark the month
+            # and rerun this run on the next rung (at most anthropic → openai
+            # → deepseek: each pass marks its provider, and DeepSeek never
+            # loops); only the final result is recorded.
             month = clock().strftime("%Y-%m")
-            mark_exhausted(config.state_dir, month, result.error or "credit balance too low")
-            logger.warning("%s: anthropic credits exhausted — retrying on deepseek", job.ticker)
+            mark_exhausted(config.state_dir, month, result.error or "credits exhausted", profile.provider)
             append_usage(
                 config.state_dir, run_id=None, date=date_iso, session=session,
                 ticker=job.ticker, arm=arm, profile=profile.name,
                 models=result.usage or {}, error=result.error, clock=clock,
             )
-            profile = DEEPSEEK  # also for the job's remaining arms
+            exhausted = profile
+            exhausted_providers.add(exhausted.provider)
+            profile = router.choose().profile if settings.llm_routing == "ladder" else DEEPSEEK
+            # Never a rung this run already ran out on — even when the marker
+            # write failed and choose() would offer it again: step down.
+            if profile.provider in exhausted_providers:
+                profile = (
+                    OPENAI
+                    if settings.llm_routing == "ladder"
+                    and "openai" not in exhausted_providers
+                    and router.openai_usable()
+                    else DEEPSEEK
+                )
+            logger.warning("%s: %s credits exhausted — retrying on %s",
+                           job.ticker, exhausted.provider, profile.name)
             run_digest = router.digest(profile)
             spec = replace(spec, env=tuple(sorted(profile.env.items())))
             try:
@@ -1920,6 +1958,9 @@ def run_slot(
             "anthropic_month_usd": round(router.month_spend(), 2),
             "anthropic_budget_usd": settings.anthropic_monthly_budget_usd,
         }
+        if settings.llm_routing == "ladder":
+            remaining = router.openai_remaining()
+            summary["llm"]["openai_remaining_usd"] = None if remaining is None else round(remaining, 2)
     return SlotOutcome(summary=summary, records=records)
 
 

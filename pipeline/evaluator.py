@@ -52,6 +52,7 @@ from pipeline.claude_cli import (
     parse_envelope,
     record_failed_call,
     record_usage,
+    timeout_stdout,
 )
 from pipeline.common import append_log_line, archive_existing, atomic_write, sha256_text, to_utc_iso
 from pipeline.config import core_analysis_sessions, load_config
@@ -192,7 +193,7 @@ def claude_runner(prompt: str) -> str:
     schema = json.dumps(_ModelJudgment.model_json_schema(), separators=(",", ":"))
     config = load_config()
     model, effort = config.claude_eval_model, config.claude_eval_effort
-    command = claude_command(model, effort, "--json-schema", schema)
+    command = claude_command(model, effort, "--json-schema", schema, role="eval")
     timeout = backend_timeout_seconds()
     try:
         proc = subprocess.run(
@@ -206,6 +207,7 @@ def claude_runner(prompt: str) -> str:
     except FileNotFoundError as exc:
         raise BackendError("claude CLI not found on PATH") from exc
     except subprocess.TimeoutExpired as exc:
+        record_failed_call("evaluator", model, effort, timeout_stdout(exc))  # spend so far
         raise BackendError(f"claude -p timed out after {int(timeout)}s") from exc
     if proc.returncode != 0:
         record_failed_call("evaluator", model, effort, proc.stdout)

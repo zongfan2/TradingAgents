@@ -425,6 +425,30 @@ Anthropic key and count toward the same monthly budget; once it is spent
 they run on DeepSeek Flash through DeepSeek's Anthropic-compatible endpoint
 (R7). `claude_usage.jsonl` lines carry `billing` and `billed_usd`.
 
+## 7b. LLM provider ladder (Claude → OpenAI → DeepSeek)
+
+With `TRADINGAGENTS_LLM_ROUTING=ladder` (specs/llm-provider-ladder.md) the
+pipeline spends Anthropic credits first (budget $190 per UTC month), then
+OpenAI, then DeepSeek. The OpenAI API key cannot read the account balance,
+so **confirm it once a month** from the OpenAI console before the rung is
+used; until then it is skipped (Lark: "OpenAI balance unconfirmed"):
+
+```bash
+.venv/bin/python -m pipeline.llm_budget confirm openai 71   # USD left this month
+.venv/bin/python -m pipeline.llm_budget status
+```
+
+Spend recorded after the confirmation is deducted; the rung stops $5
+before zero (`TRADINGAGENTS_OPENAI_BALANCE_MARGIN_USD`), and OpenAI's own
+`insufficient_quota` error writes `llm_budget/openai/<YYYY-MM>.exhausted`
+(delete it after a top-up, then confirm again). Collection and evaluation
+on this rung run `codex exec` hermetically on the API key
+(`~/.tradingagents/codex_home`, never `~/.codex`), launching codex's
+native binary directly (found behind the npm `codex` launcher, so a
+timeout kills it). The scheduled jobs' PATH must contain the `codex`
+directory (re-run the schedule install from a shell with nvm loaded) —
+without it the CLI steps skip to DeepSeek.
+
 ## 8. Troubleshooting
 
 **Missed slot.** The watchdog notifies once per session/day when a weekday

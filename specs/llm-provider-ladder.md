@@ -1,7 +1,6 @@
 # Spec: LLM provider ladder — Claude → OpenAI (GPT / codex) → DeepSeek
 
-**Builder**: Claude Code · **Status**: Draft (2026-11-01) — waiting on the
-user's OpenAI API key and the open decisions below. Extends
+**Builder**: Claude Code · **Status**: Implemented (2026-11-01). Extends
 [llm-cost.md](llm-cost.md) R2 (analysis routing) and R7 (CLI routing).
 
 ## Why
@@ -15,49 +14,136 @@ until $190/UTC month, then DeepSeek).
 
 ### L1 — Ladder routing (generalises R2/R7)
 
-`TRADINGAGENTS_LLM_ROUTING=ladder` (new; `claude-first` keeps today's
-behaviour). Rungs, in order: `anthropic`, `openai`, `deepseek`. A rung is
-usable while (a) its key is set, (b) its period spend from the ledger is
-below its budget (`TRADINGAGENTS_<PROVIDER>_BUDGET_USD`, Anthropic default
-190), and (c) no exhausted marker exists (`llm_budget/<provider>/<period>.exhausted`).
-DeepSeek is the floor (no budget). The decision is made per analysis run
-and once per CLI process, as today; switches are one-way within a process,
-and a credit-exhausted error (Anthropic: "credit balance too low";
-OpenAI: HTTP 429 `insufficient_quota`) writes the marker and moves the
-process to the next rung.
+`TRADINGAGENTS_LLM_ROUTING=ladder` (`claude-first` keeps today's behaviour
+and never uses OpenAI). Rungs, in order:
+
+1. **anthropic** — no exhausted marker and month spend < budget (R2);
+2. **openai** — `OPENAI_API_KEY` set, no `llm_budget/openai/<YYYY-MM>.exhausted`,
+   the month's balance **confirmed** and *confirmed balance − spend recorded
+   since the confirmation* > margin (`TRADINGAGENTS_OPENAI_BALANCE_MARGIN_USD`,
+   default $5);
+3. **deepseek** — the floor.
+
+The project key cannot read the balance (costs/usage/billing endpoints
+need an Admin key, which the user cannot create), so the user confirms it:
+`python -m pipeline.llm_budget confirm openai <USD>` writes
+`llm_budget/openai/<YYYY-MM>.confirmed` (`balance_usd`, `confirmed_at`);
+`status` shows spend, the remaining balance and whether the rung is
+usable. An unconfirmed month skips the rung, and the Lark LLM line says
+"OpenAI balance unconfirmed" (else "OpenAI left $X").
+
+The decision is made per analysis job and once per CLI process. A
+credit-exhausted failure (Anthropic "credit balance too low"; OpenAI
+`insufficient_quota` / "exceeded your current quota") marks that
+provider's month and reruns the run on the next rung — at most
+anthropic → openai → deepseek, never the same rung twice. A CLI process
+moves to DeepSeek on either provider's exhaustion (one-way).
 
 ### L2 — Analysis on OpenAI
 
-New `openai` profile for the graph: provider `openai`, quick and deep
-models per open decision Q2, per-role reasoning effort
-(`openai_reasoning_effort` split into deep/quick like R3), structured
-output through the existing OpenAI client path. The Research Manager
-override (R9) gets the OpenAI quick-or-deep choice from the same profile.
-The `deepseek` profile clears every OpenAI knob, as it clears Anthropic's.
+`openai` profile: provider `openai`, quick `gpt-5.6-luna` (reasoning
+effort low), deep `gpt-5.6-sol` (medium) for both judges (no Research
+Manager override). New per-role knobs `openai_deep_reasoning_effort` /
+`openai_quick_reasoning_effort` (env `TRADINGAGENTS_OPENAI_{DEEP,QUICK}_REASONING_EFFORT`)
+override `openai_reasoning_effort` and are in the config digest when set
+(left out when unset, so the other profiles' digests are unchanged); the
+other profiles clear them, the `openai` profile clears the Anthropic,
+DeepSeek and RM knobs. Structured output and usage capture verified live
+(2026-11-01).
 
 ### L3 — Collection and evaluation on codex
 
-The `codex` CLI backend already exists (`codex exec`, web search on) but
-rides the user's interactive login and config. On the `openai` rung the
-claude CLI steps switch to a **hermetic** codex call:
+On the openai rung every pipeline `claude -p` call is built as a
+hermetic `codex exec`:
+`codex exec --ignore-user-config --ephemeral --sandbox read-only
+--skip-git-repo-check --json -c tools.web_search=true -m <model>
+-c model_reasoning_effort=<effort> --disable <feature>… --cd <codex_home>/work
+[--output-schema <file>] -`, prompt on stdin. Isolation (the calls read
+untrusted web pages, as the claude path's HERMETIC_FLAGS assume):
 
-- `codex exec --ignore-user-config --ephemeral --sandbox read-only
-  -c tools.web_search=true --skip-git-repo-check --json -m <model> -`,
-  prompt on stdin, a scratch `CODEX_HOME`, the API key from the env only
-  (never argv);
-- `--json` JSONL events give token usage and the web-search calls, logged
-  to the same usage ledger with `billing: openai-api` (R11 fields);
-- the evaluator uses `--output-schema` for the judgment object;
-- generator identity `codex-deep-search` (already in the contracts);
-- independence (evaluator R2) stays at the model level: collector and
-  evaluator use different pinned models.
+- every default-on feature beyond search is disabled — shell and
+  unified exec, browser/computer use, images, plugins, apps, hooks,
+  skills, sub-agents (`CODEX_DISABLED_FEATURES`); `code_mode_host` stays
+  on because web search runs through it, and its JavaScript has no
+  `require`/`fs`/`process`;
+- the read-only sandbox refuses writes (`apply_patch`);
+- the env is an allow-list (PATH, locale, TZ, TMPDIR, CA and proxy vars)
+  plus `CODEX_API_KEY` (verified to authenticate without a login),
+  `CODEX_HOME=HOME=<state_dir>/codex_home`; no other key reaches codex;
+- the cwd is an empty `codex_home/work`, never the repo.
+
+All four probed live on 2026-11-01: no shell ("no shell tool
+available"), `file://` opens and `id` fail, JS `require`/`fs`/`process`
+are absent, writes are refused, and search still works. Models per
+role: collect `gpt-5.6-luna`, eval `gpt-5.6-sol`
+(`TRADINGAGENTS_OPENAI_{COLLECT,EVAL}_MODEL`), so collector and evaluator
+stay on different models (evaluator R2). Effort maps low/medium/high,
+xhigh/max → high. The evaluator's `--json-schema` becomes an
+`--output-schema` file (content-addressed under `codex_home/schemas`) in
+OpenAI **strict** form — every object's properties all `required`,
+`additionalProperties: false`, no `default` — since codex sends it strict
+and the pydantic schema is rejected otherwise (`invalid_json_schema`,
+measured 2026-11-01; the strict form validates live).
+
+Measured codex-cli 0.164.0 event semantics (2026-11-01, live): `codex
+exec` runs one turn, so one `turn.completed` carries that turn's usage;
+`output_tokens` already includes `reasoning_output_tokens` (102 incl. 14);
+`input_tokens` includes `cached_input_tokens` and `cache_write_input_tokens`.
+Every `web_search` item except an `open_page` action is billed as a search
+(over-counting a non-search action is budget-safe). A routed run's usage under a model name the provider did
+not report (`unknown`) belongs to the run's profile provider and, unpriced,
+is budgeted at that provider's ceiling — never at $0. The only
+`claude_command` callers are the collector path (`collect` role) and the
+evaluator (`eval` role), pinned by a test.
+
+API errors arrive on stdout as `error` / `turn.failed` events under
+`--json` (measured with a 404 model error: five "Reconnecting…" `error`
+events, then `turn.failed`); a quota 429 takes the same path.
+Quota detection also matches codex's own rewrite of `insufficient_quota`
+("Quota exceeded. Check your plan and billing details.", `quota_exceeded`,
+strings of codex-cli 0.164.0).
+
+The JSONL events become the claude envelope shape: the last
+`agent_message` is the result (parsed to `structured_output` when it is a
+JSON object); `turn.completed` usage is summed and priced (tokens + $0.01
+per web search call); `turn.failed`, or `error` events without a completed
+turn, are an error result. Any call that ends without `turn.completed`
+(failed, or cut by a timeout/crash, including after transient
+"Reconnecting…" errors) is billed at the searches seen + a $0.25 estimate
+for its unreported tokens (over-count: the confirmed balance is never
+over-reported); every launch site records a timed-out call's partial
+stdout. Usage lines carry `billing: openai-api`, the GPT model that
+served the call, and the R11 search fields (`web_search` items:
+`search` → queries, `open_page` → fetch URLs).
+
+The brief's `generator` stays the configured backend's identity
+(`claude-deep-search`), as on the DeepSeek route (R7); the provider and
+model that served each call are in the usage log.
+
+The call runs codex's **native binary** directly: the npm `codex` is a
+node launcher that spawns it, and a per-call `subprocess.run` timeout
+would kill only the launcher, leaving the native process spending outside
+the ledger. The binary is found the way the launcher finds it
+(the host's target triple and platform package as codex.js maps them;
+`node_modules/<package>/vendor/<triple>/bin/codex` under the launcher's
+package dir or any ancestor, as Node resolution walks — nested or
+hoisted — then the bundled `vendor/<triple>/…`; or `codex` on PATH already
+being a native, non-script binary), with the
+launcher's `CODEX_MANAGED_BY_NPM` / `CODEX_MANAGED_PACKAGE_ROOT` env. No
+binary found (e.g. `codex` not on the scheduled jobs' PATH, which is
+baked at install time) → the CLI skips the rung to DeepSeek.
 
 ### L4 — Ledger and prices
 
-`llm_usage` gains `openai` prices (official list prices, recorded with
-their date at implementation; no guessed figures) and per-provider period
-spend. Unknown OpenAI models are billed at the most expensive listed
-OpenAI rate (as Claude's ceiling rule).
+A codex model override without a listed price is budgeted at the OpenAI
+ceiling, never at $0. `gpt-5.6-sol` $4.00 in / $0.40 cached / $20.00 out, `gpt-5.6-luna` $0.20 /
+$0.02 / $1.20 per 1M tokens (developers.openai.com/api/docs/pricing,
+standard tier, 2026-11-01); no cache-write surcharge. Unknown `gpt-*`
+models bill at the OpenAI ceiling (`priced: false`); OpenAI snapshot ids
+(`-YYYY-MM-DD`) resolve to their alias. `month_spend(..., "openai")`
+includes CLI lines billed `openai-api`; `since` restricts a fold to spend
+after an instant (an unreadable timestamp counts — over-counting is
+budget-safe).
 
 ## User decisions (2026-11-01)
 
@@ -65,8 +151,8 @@ OpenAI rate (as Claude's ceiling rule).
   The balance must be confirmed before the pipeline first uses the rung.
   The project API key cannot read it (`/v1/organization/costs`, `/usage`,
   `/dashboard/billing/*` → 403; it reads only models, files, batches, `/me`).
-  Mechanism pending: an Admin key for the costs API, or the local ledger
-  plus a manual check.
+  No Admin key can be created, so the user confirms the balance monthly
+  (L1).
 - **Q2** Models (official prices per 1M tokens, 2026-11-01, standard tier):
   quick roles and collection `gpt-5.6-luna` ($0.20 in / $0.02 cached /
   $1.20 out); Research Manager, Portfolio Manager and evaluation
@@ -85,8 +171,9 @@ installed version (0.164.0 on 2026-11-01).
 
 ## Acceptance criteria
 
-1. With `ladder`, each rung is used in order; budget, marker, and missing
-   key each skip a rung; DeepSeek is never skipped.
+1. With `ladder`, each rung is used in order; budget, marker, missing key
+   and an unconfirmed or spent balance each skip a rung; DeepSeek is never
+   skipped.
 2. A quota error on the OpenAI rung moves the process to DeepSeek and
    writes the marker; the failed call is not retried on the same rung.
 3. codex calls run hermetically (no user config, no session files, key

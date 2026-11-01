@@ -13,16 +13,19 @@ run.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
 import os
+import platform
+import shutil
 import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-from pipeline.common import locked_append
+from pipeline.common import atomic_write, locked_append
 
 #: ``claude --effort`` levels accepted by the pipeline config.
 EFFORT_CHOICES = ("low", "medium", "high", "xhigh", "max")
@@ -107,9 +110,10 @@ def _use_deepseek(reason: str) -> bool:
 
 
 def cli_route() -> str:
-    """This process's CLI route, decided once (R7): DeepSeek when the month's
-    Anthropic spend (analysis + API-billed CLI) reached the budget or the
-    credits are marked exhausted, under TRADINGAGENTS_LLM_ROUTING."""
+    """This process's CLI route, decided once (R7, ladder L1): ``anthropic``,
+    ``openai`` (codex, ``ladder`` routing only) or ``deepseek``, from the
+    month's spend, budgets, markers and the OpenAI balance confirmation
+    under TRADINGAGENTS_LLM_ROUTING."""
     global _ROUTE
     with _ROUTE_LOCK:
         if _ROUTE is None:
@@ -117,7 +121,7 @@ def cli_route() -> str:
             try:
                 from pipeline.llm_routing import (
                     DEFAULT_ANTHROPIC_MONTHLY_BUDGET_USD,
-                    cli_uses_deepseek,
+                    cli_rung,
                 )
 
                 routing = os.environ.get("TRADINGAGENTS_LLM_ROUTING", "").strip().lower() or None
@@ -125,41 +129,221 @@ def cli_route() -> str:
                     os.environ.get("TRADINGAGENTS_ANTHROPIC_MONTHLY_BUDGET_USD", "").strip()
                     or DEFAULT_ANTHROPIC_MONTHLY_BUDGET_USD
                 )
-                deepseek, reason = cli_uses_deepseek(
-                    _state_dir(), routing, budget, datetime.now(timezone.utc)
-                )
-                if deepseek and _use_deepseek(reason):
+                rung, reason = cli_rung(_state_dir(), routing, budget, datetime.now(timezone.utc))
+                if rung == "deepseek" and _use_deepseek(reason):
                     _ROUTE = "deepseek"
+                elif rung == "openai":
+                    if codex_executable() is None:  # every call would fail: next rung
+                        if _use_deepseek(f"{reason}; but no native codex binary found"):
+                            _ROUTE = "deepseek"
+                    else:
+                        _ROUTE = "openai"  # codex on the API key (ladder L3)
+                        logger.warning("CLI steps run on OpenAI via codex: %s", reason)
             except Exception as exc:  # routing never breaks a collection call
                 logger.warning("claude CLI routing check failed (staying on Anthropic): %s", exc)
         return _ROUTE
 
 
-def _switch_to_deepseek_after_exhaustion(detail: str) -> None:
+def _switch_to_deepseek_after_exhaustion(detail: str, provider: str = "anthropic") -> None:
+    """Mark ``provider``'s month exhausted and move this process to DeepSeek
+    (one-way; from OpenAI the next rung is DeepSeek, from Anthropic the
+    process skips OpenAI too — a mid-run switch never re-decides)."""
     global _ROUTE
     try:
         from pipeline.llm_usage import mark_exhausted
 
-        mark_exhausted(_state_dir(), datetime.now(timezone.utc).strftime("%Y-%m"), detail)
+        mark_exhausted(_state_dir(), datetime.now(timezone.utc).strftime("%Y-%m"), detail, provider)
     except Exception as exc:
         logger.warning("could not record the credit exhaustion: %s", exc)
     with _ROUTE_LOCK:
-        if _ROUTE != "deepseek" and _use_deepseek("anthropic credits exhausted"):
+        if _ROUTE != "deepseek" and _use_deepseek(f"{provider} credits exhausted"):
             _ROUTE = "deepseek"
 
 
 def call_env(command: list[str]) -> dict[str, str] | None:
     """The env snapshot taken when this thread built ``command`` with
     :func:`claude_command`; ``None`` (inherit) for any other backend."""
+    if command and getattr(_CALL, "built", None) is command:
+        return getattr(_CALL, "env", None)
     if command and command[0] == "claude":
         return getattr(_CALL, "env", None)
     return None
 
 
-def claude_command(model: str, effort: str, *extra: str) -> list[str]:
+#: ladder L3 — codex models per CLI role (user decision 2026-11-01): the
+#: collector and the evaluator stay on different models (evaluator R2).
+OPENAI_CLI_MODELS = {"collect": "gpt-5.6-luna", "eval": "gpt-5.6-sol"}
+OPENAI_CLI_MODEL_ENV = {"collect": "TRADINGAGENTS_OPENAI_COLLECT_MODEL", "eval": "TRADINGAGENTS_OPENAI_EVAL_MODEL"}
+#: claude --effort → codex model_reasoning_effort.
+_CODEX_EFFORT = {"low": "low", "medium": "medium", "high": "high", "xhigh": "high", "max": "high"}
+#: codex features that give the agent anything beyond web search (enabled
+#: by default in codex-cli 0.164.0, ``codex features list``). Pipeline calls
+#: read untrusted web pages, so — as HERMETIC_FLAGS does for claude — no
+#: shell (the read-only sandbox still lets a shell read files such as
+#: ``.env``), browser, computer use, images, plugins, apps, hooks, skills or
+#: sub-agents. ``code_mode_host`` stays ON: web search runs through it
+#: (``web__run``), and its JavaScript has no ``require``/``fs``/``process``
+#: (probed live 2026-11-01); writes are refused by the read-only sandbox.
+CODEX_DISABLED_FEATURES = (
+    "shell_tool", "unified_exec", "unified_exec_tty", "shell_snapshot",
+    "browser_use", "browser_use_external", "browser_use_full_cdp_access", "in_app_browser",
+    "browser_annotation_api", "computer_use", "image_generation", "view_image",
+    "multi_agent", "plugins", "remote_plugin", "plugin_sharing", "apps", "hooks",
+    "skill_search", "skill_mcp_dependency_install", "goals", "sleep_tool",
+    "in_app_local_automation", "workspace_dependencies", "worktrees", "tool_suggest",
+    "realtime_conversation", "collaboration_modes",
+)
+#: Hermetic codex: no user config, no session files, read-only sandbox,
+#: every non-search tool disabled, web search on, JSONL events on stdout.
+CODEX_FLAGS = (
+    "--ignore-user-config",
+    "--ephemeral",
+    "--sandbox",
+    "read-only",
+    "--skip-git-repo-check",
+    "--json",
+    "-c",
+    "tools.web_search=true",
+    *(arg for feature in CODEX_DISABLED_FEATURES for arg in ("--disable", feature)),
+)
+#: The only parent env a codex call inherits (plus CODEX_API_KEY/CODEX_HOME/
+#: HOME): no other secret (Anthropic/DeepSeek/Alpaca/Lark keys) reaches it.
+_CODEX_ENV_KEEP = (
+    "PATH", "LANG", "LC_ALL", "TZ", "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR",
+    "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy",
+)
+
+
+#: The npm launcher's target triple → platform package (codex.js 0.164.0).
+_CODEX_TARGETS = {
+    ("linux", "x86_64"): ("x86_64-unknown-linux-musl", "@openai/codex-linux-x64"),
+    ("linux", "aarch64"): ("aarch64-unknown-linux-musl", "@openai/codex-linux-arm64"),
+    ("darwin", "x86_64"): ("x86_64-apple-darwin", "@openai/codex-darwin-x64"),
+    ("darwin", "arm64"): ("aarch64-apple-darwin", "@openai/codex-darwin-arm64"),
+}
+
+
+def _codex_target() -> tuple[str, str] | None:
+    """This host's ``(target triple, platform package)``, as the launcher
+    picks it; ``None`` on an unsupported host (the rung is skipped)."""
+    machine = platform.machine().lower()
+    machine = {"amd64": "x86_64", "arm64": "arm64" if sys.platform == "darwin" else "aarch64"}.get(machine, machine)
+    if sys.platform == "darwin" and machine == "aarch64":
+        machine = "arm64"
+    return _CODEX_TARGETS.get((sys.platform, machine))
+
+
+def codex_executable() -> tuple[str, Path | None] | None:
+    """``(native binary, npm package root)`` for the installed codex, or
+    ``None``. The npm ``codex`` is a node launcher that spawns the native
+    binary; a subprocess timeout would kill only the launcher and leave the
+    native process spending (ladder L3), so calls run the binary directly
+    (same lookup as the launcher: ``vendor/<target>/bin/codex``)."""
+    found = shutil.which("codex")
+    if found is None:
+        return None
+    real = Path(found).resolve()
+    try:
+        with open(real, "rb") as handle:
+            if handle.read(2) != b"#!":  # not a script: already the native binary (ELF, Mach-O, …)
+                return str(real), None
+    except OSError:
+        return None
+    target = _codex_target()
+    if target is None:
+        return None
+    triple, package = target
+    root = real.parent.parent  # .../@openai/codex (bin/codex.js)
+    # Node module resolution (codex.js: require.resolve(<pkg>/package.json)):
+    # <dir>/node_modules/<pkg> for the package dir and every ancestor — the
+    # nested global layout and a hoisted sibling alike — then the bundled
+    # vendor/ fallback.
+    candidates = [d / "node_modules" / package / "vendor" / triple / "bin" / "codex"
+                  for d in (root, *root.parents)]
+    candidates.append(root / "vendor" / triple / "bin" / "codex")
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate), root
+    return None
+
+
+def _codex_home() -> Path:
+    """A pipeline-only CODEX_HOME: codex keeps auth/state there, never in
+    the user's ``~/.codex``."""
+    home = Path(_state_dir()) / "codex_home"
+    home.mkdir(parents=True, exist_ok=True)
+    return home
+
+
+def strict_output_schema(node: object) -> object:
+    """A JSON schema in OpenAI strict structured-output form (codex
+    ``--output-schema`` is sent strict): every object lists all its
+    properties in ``required`` and forbids additional ones, and ``default``
+    (unsupported) is dropped. Measured 2026-11-01: the evaluator's pydantic
+    schema (optional ``flagged_claims``/``notes``) is rejected with
+    ``invalid_json_schema`` otherwise. Returns a new object."""
+    if isinstance(node, list):
+        return [strict_output_schema(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+    out = {}
+    for key, value in node.items():
+        if key == "default":
+            continue
+        if key in ("properties", "$defs", "definitions") and isinstance(value, dict):
+            # Name → schema maps: the names are data (a field may be called
+            # "default"); only their schemas are rewritten.
+            out[key] = {name: strict_output_schema(sub) for name, sub in value.items()}
+        else:
+            out[key] = strict_output_schema(value)
+    if isinstance(out.get("properties"), dict):
+        out["required"] = list(out["properties"])
+        out["additionalProperties"] = False
+    return out
+
+
+def _codex_command(role: str, effort: str, extra: tuple[str, ...]) -> tuple[list[str], str, dict[str, str]]:
+    """``(argv, model, env)`` for one hermetic ``codex exec`` call. The API
+    key goes in the env only (``CODEX_API_KEY``), never on argv."""
+    model = (os.environ.get(OPENAI_CLI_MODEL_ENV[role]) or "").strip() or OPENAI_CLI_MODELS[role]
+    resolved = codex_executable()
+    if resolved is None:
+        raise RuntimeError("no native codex binary found")
+    binary, package_root = resolved
+    home = _codex_home()
+    work = home / "work"  # an empty cwd, never the repo
+    work.mkdir(exist_ok=True)
+    argv = [binary, "exec", *CODEX_FLAGS, "--cd", str(work), "-m", model,
+            "-c", f"model_reasoning_effort={_CODEX_EFFORT.get(effort, 'medium')}"]
+    rest = list(extra)
+    while rest:
+        flag = rest.pop(0)
+        if flag == "--json-schema" and rest:
+            schema = json.dumps(strict_output_schema(json.loads(rest.pop(0))), sort_keys=True)
+            path = home / "schemas" / f"{hashlib.sha256(schema.encode('utf-8')).hexdigest()[:16]}.json"
+            if not path.exists():
+                atomic_write(path, schema)
+            argv += ["--output-schema", str(path)]
+        else:
+            raise ValueError(f"claude flag {flag!r} has no codex equivalent")
+    argv.append("-")  # prompt on stdin
+    env = {name: os.environ[name] for name in _CODEX_ENV_KEEP if name in os.environ}
+    env["CODEX_API_KEY"] = os.environ.get("OPENAI_API_KEY", "")
+    env["CODEX_HOME"] = str(home)
+    env["HOME"] = str(home)
+    if package_root is not None:  # what the npm launcher sets for its child
+        env["CODEX_MANAGED_BY_NPM"] = "1"
+        env["CODEX_MANAGED_PACKAGE_ROOT"] = str(package_root)
+    return argv, model, env
+
+
+def claude_command(model: str, effort: str, *extra: str, role: str = "collect") -> list[str]:
     """Hermetic web-only ``claude -p`` on a pinned model/effort, JSON envelope.
     On the DeepSeek route every model is pinned to a name DeepSeek serves as
-    Flash (R7)."""
+    Flash (R7); on the OpenAI route (ladder L3) the call is a hermetic
+    ``codex exec`` on the ``role``'s GPT model (``collect`` or ``eval``)."""
+    if role not in OPENAI_CLI_MODELS:
+        raise ValueError(f"unknown CLI role {role!r}")
     cli_route()
     with _ROUTE_LOCK:
         # Route and env are captured together under the lock the DeepSeek
@@ -168,11 +352,16 @@ def claude_command(model: str, effort: str, *extra: str) -> list[str]:
         route = _ROUTE
         _CALL.route = route
         _CALL.env = dict(os.environ)
+        _CALL.model = None
+    if route == "openai":
+        argv, cli_model, env = _codex_command(role, effort, extra)
+        _CALL.env, _CALL.model, _CALL.built = env, cli_model, argv
+        return argv
     if route == "deepseek":
         from pipeline.llm_routing import DEEPSEEK_CLI_MODEL
 
         model = DEEPSEEK_CLI_MODEL
-    return [
+    command = [
         "claude",
         "-p",
         *HERMETIC_FLAGS,
@@ -187,6 +376,8 @@ def claude_command(model: str, effort: str, *extra: str) -> list[str]:
         "--verbose",
         *extra,
     ]
+    _CALL.built = command
+    return command
 
 
 #: Bounds on the tool calls kept per usage line (llm-cost R11).
@@ -241,9 +432,108 @@ def _tool_calls(events: list[dict]) -> dict[str, object]:
     return calls
 
 
+#: Billed for a codex call that ended without ``turn.completed`` (failed or
+#: cut; its token usage is never reported): above a typical eval call
+#: (measured ≈$0.05 on gpt-5.6-sol), so the balance gate over-counts.
+CODEX_CUT_CALL_ESTIMATE_USD = 0.25
+
+#: Event types only ``codex exec --json`` prints (ladder L3).
+_CODEX_EVENT_TYPES = ("thread.started", "turn.started", "turn.completed", "turn.failed")
+
+
+def _is_codex_stream(events: list[dict]) -> bool:
+    return any(event.get("type") in _CODEX_EVENT_TYPES for event in events)
+
+
+def _codex_envelope(events: list[dict]) -> tuple[dict | None, dict[str, object]]:
+    """A claude-shaped result envelope from codex JSONL events: the last
+    ``agent_message`` is the result, ``turn.completed`` usage is summed and
+    priced (tokens + $0.01 per web search), ``turn.failed`` (or an ``error``
+    event with no completed turn) is an error result. ``None`` when the
+    stream ended before any turn finished or failed."""
+    from pipeline.llm_usage import WEB_SEARCH_USD_PER_CALL, openai_call_cost
+
+    text: str | None = None
+    failure: str | None = None
+    last_error: str | None = None
+    completed = False
+    tokens = {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0}
+    calls: dict[str, object] = {"web_search_queries": [], "web_fetch_urls": [], "web_fetch_requests": 0}
+    searches = 0
+    for event in events:
+        kind = event.get("type")
+        if kind == "turn.completed":
+            completed = True
+            usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
+            tokens["input"] += _count(usage.get("input_tokens"))
+            tokens["cache_read"] += _count(usage.get("cached_input_tokens"))
+            tokens["cache_write"] += _count(usage.get("cache_write_input_tokens"))
+            tokens["output"] += _count(usage.get("output_tokens"))
+        elif kind == "turn.failed":
+            error = event.get("error")
+            failure = str(error.get("message") if isinstance(error, dict) else error or "turn failed")
+        elif kind == "error":
+            last_error = str(event.get("message") or "")
+        elif kind == "item.completed" and isinstance(event.get("item"), dict):
+            item = event["item"]
+            if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
+                text = item["text"]
+            elif item.get("type") == "web_search":
+                action = item.get("action") if isinstance(item.get("action"), dict) else {}
+                if action.get("type") == "open_page":
+                    calls["web_fetch_requests"] += 1
+                    url = action.get("url")
+                    if isinstance(url, str) and url.strip() and len(calls["web_fetch_urls"]) < _MAX_TOOL_CALLS:
+                        calls["web_fetch_urls"].append(url[:_MAX_TOOL_ARG_CHARS])
+                else:
+                    searches += 1  # every search call bills, whatever its action
+                    query = action.get("query")
+                    if isinstance(query, str) and query.strip() and len(calls["web_search_queries"]) < _MAX_TOOL_CALLS:
+                        calls["web_search_queries"].append(query[:_MAX_TOOL_ARG_CHARS])
+    model = getattr(_CALL, "model", None) or "gpt-unknown"
+    try:
+        cost = openai_call_cost(model, {**tokens}) + searches * WEB_SEARCH_USD_PER_CALL
+    except Exception:
+        cost = searches * WEB_SEARCH_USD_PER_CALL
+    if not completed:
+        # No turn.completed (failed, or killed by a timeout/crash — also
+        # after transient "Reconnecting…" errors): the requests made so far
+        # are billed but their tokens are never reported — over-count so the
+        # confirmed balance is never over-reported.
+        cost += CODEX_CUT_CALL_ESTIMATE_USD
+    is_error = failure is not None or not completed
+    envelope: dict = {
+        "type": "result",
+        "subtype": "error_during_execution" if is_error else "success",
+        "is_error": is_error,
+        "result": (failure or last_error or "codex stream ended before its turn finished")
+        if is_error else (text or ""),
+        "usage": {
+            "input_tokens": max(tokens["input"] - tokens["cache_read"] - tokens["cache_write"], 0),
+            "cache_creation_input_tokens": tokens["cache_write"],
+            "cache_read_input_tokens": tokens["cache_read"],
+            "output_tokens": tokens["output"],
+        },
+        "modelUsage": {model: {"webSearchRequests": searches}},
+        "total_cost_usd": round(cost, 6),
+        "codex": True,
+    }
+    if not is_error and text is not None:
+        try:
+            structured = json.loads(text)
+        except json.JSONDecodeError:
+            structured = None
+        if isinstance(structured, dict):
+            envelope["structured_output"] = structured
+    return envelope, calls
+
+
 def _result_event(stdout: str) -> tuple[dict | None, dict[str, object]]:
-    """The last ``result`` event (``None`` if absent) and the tool calls."""
+    """The last ``result`` event (``None`` if absent) and the tool calls; a
+    codex stream is converted to the same envelope shape (ladder L3)."""
     events = _events(stdout)
+    if _is_codex_stream(events):
+        return _codex_envelope(events)
     result = next((e for e in reversed(events) if e.get("type") == "result"), None)
     return result, _tool_calls(events)
 
@@ -254,7 +544,10 @@ def envelope_line(stdout: str) -> str:
     (a crash after ``init``: the old format printed nothing then), and
     ``stdout`` itself when it holds no JSON event (another backend's text)."""
     events = _events(stdout)
-    result = next((e for e in reversed(events) if e.get("type") == "result"), None)
+    if _is_codex_stream(events):
+        result, _ = _codex_envelope(events)
+    else:
+        result = next((e for e in reversed(events) if e.get("type") == "result"), None)
     if result is not None:
         return json.dumps(result, ensure_ascii=False)  # as the CLI printed it
     return "" if events else stdout
@@ -314,6 +607,15 @@ def collect_output(backend: str, stdout: str, *, component: str) -> str:
     return text
 
 
+def timeout_stdout(exc: BaseException) -> str:
+    """What a timed-out call printed before it was killed (``TimeoutExpired``
+    carries bytes even under ``text=True``)."""
+    out = getattr(exc, "stdout", None) or getattr(exc, "output", None) or ""
+    if isinstance(out, bytes):
+        return out.decode("utf-8", errors="replace")
+    return out if isinstance(out, str) else ""
+
+
 def failure_stdout(backend: str, stdout: str) -> str:
     """The stdout a failed collector call's message quotes: claude's result
     envelope (:func:`envelope_line`), any other backend's stdout as is."""
@@ -339,6 +641,10 @@ def record_failed_call(component: str, model: str, effort: str, stdout: str) -> 
     call that printed no envelope (timeout, crash) has no usage to report."""
     try:
         envelope, calls = _result_event(stdout)
+        if envelope is None and getattr(_CALL, "route", None) == "openai":
+            # A codex call that printed no event yet (killed while starting)
+            # may still have spent: bill the estimate (ladder L3).
+            envelope, calls = _codex_envelope(_events(stdout))
         if envelope is None:  # a lone JSON object without a "type" still logs
             single = json.loads(stdout)
             # Any typed object is a stream event (the result one is handled
@@ -398,6 +704,9 @@ def _billing(usage: dict, total_cost: object) -> tuple[str, float]:
     Flash rate (the CLI's figure is Anthropic-priced); an Anthropic key in
     the env bills the API; otherwise the subscription pays."""
     route = getattr(_CALL, "route", None) or _ROUTE
+    if route == "openai":  # the codex envelope carries its own priced cost
+        cost = _spend_value(total_cost)
+        return "openai-api", cost
     if route == "deepseek":
         from pipeline.llm_usage import call_cost
 
@@ -414,13 +723,18 @@ def _billing(usage: dict, total_cost: object) -> tuple[str, float]:
         except Exception:  # accounting never fails a call
             return "deepseek", 0.0
     if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
-        try:
-            cost = float(total_cost or 0.0)
-        except Exception:
-            return "anthropic-api", 0.0
-        # NaN would disable the budget gate, Infinity would trip it all month.
-        return "anthropic-api", cost if math.isfinite(cost) and cost > 0 else 0.0
+        return "anthropic-api", _spend_value(total_cost)
     return "subscription", 0.0
+
+
+def _spend_value(total_cost: object) -> float:
+    """A billed cost; NaN would disable the budget gate, Infinity would trip
+    it all month, so junk reads as 0."""
+    try:
+        cost = float(total_cost or 0.0)
+    except Exception:
+        return 0.0
+    return cost if math.isfinite(cost) and cost > 0 else 0.0
 
 
 def record_usage(
@@ -435,16 +749,18 @@ def record_usage(
         calls = _tool_call_fields(envelope)
     except Exception:  # never raises
         searches, calls = 0, {"web_search_queries": [], "web_fetch_urls": [], "web_fetch_requests": 0}
-    if outcome == "error" and billing == "anthropic-api":
+    provider = {"anthropic-api": "anthropic", "openai-api": "openai"}.get(billing)
+    if outcome == "error" and provider is not None:
         detail = str(envelope.get("result") or "")
         from pipeline.llm_usage import is_credit_exhausted_error
 
-        if is_credit_exhausted_error(detail):
-            _switch_to_deepseek_after_exhaustion(" ".join(detail.split())[:300])
+        if is_credit_exhausted_error(detail, provider):
+            _switch_to_deepseek_after_exhaustion(" ".join(detail.split())[:300], provider)
     line = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "component": component,
-        "model": model,
+        # The model that served the call (codex runs its role's GPT model).
+        "model": (getattr(_CALL, "model", None) if billing == "openai-api" else None) or model,
         "effort": effort,
         "outcome": outcome,
         **{name: usage.get(name) for name in _USAGE_FIELDS},
