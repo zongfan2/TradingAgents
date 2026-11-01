@@ -248,8 +248,9 @@ Rollout: off at merge; set to 8 after the Haiku-collection comparison
 Every `claude -p` call runs with `--output-format stream-json --verbose`:
 one JSON event per line, ending with the same `result` envelope `json`
 printed. `parse_envelope` takes the last `result` event (a one-line `json`
-envelope still parses) and failure messages quote that envelope, not the
-stream's first (`init`) event. Each `claude_usage.jsonl` line adds:
+envelope still parses) and failure messages quote that envelope, never
+the stream's first (`init`) event: a stream cut before its result quotes
+nothing (stderr or "no output", as the old format printed nothing then). Each `claude_usage.jsonl` line adds:
 
 - `web_search_requests` — billed searches, summed over
   `modelUsage[*].webSearchRequests`. The CLI's WebSearch is its own

@@ -248,9 +248,14 @@ def _result_event(stdout: str) -> tuple[dict | None, dict[str, object]]:
 
 def envelope_line(stdout: str) -> str:
     """The result envelope as one JSON line (what ``--output-format json``
-    printed) for failure messages; ``stdout`` itself when there is none."""
-    result, _ = _result_event(stdout)
-    return json.dumps(result) if result is not None else stdout
+    printed) for failure messages; ``""`` for a stream cut before its result
+    (a crash after ``init``: the old format printed nothing then), and
+    ``stdout`` itself when it holds no JSON event (another backend's text)."""
+    events = _events(stdout)
+    result = next((e for e in reversed(events) if e.get("type") == "result"), None)
+    if result is not None:
+        return json.dumps(result)
+    return "" if events else stdout
 
 
 def parse_envelope(stdout: str) -> dict:

@@ -254,6 +254,7 @@ def test_error_stream_is_logged_with_its_queries(monkeypatch, tmp_path):
     assert (line["outcome"], line["web_search_queries"]) == ("error", ["q1"])
     assert json.loads(cc.envelope_line(stdout))["result"] == "boom"
     assert cc.envelope_line("plain codex text") == "plain codex text"
+    assert cc.envelope_line(_stream({"type": "system", "subtype": "init"})) == ""
 
 
 @pytest.mark.unit
@@ -287,20 +288,28 @@ def _runner_cases():
     ]
 
 
+_INIT = {"type": "system", "subtype": "init", "tools": ["WebSearch"]}
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize("case", range(4), ids=["ticker", "macro", "pool", "evaluator"])
-def test_failed_call_messages_quote_the_result_envelope(monkeypatch, tmp_path, case):
+@pytest.mark.parametrize(("events", "expected"), [
+    ([_INIT, _result(is_error=True, subtype="error_during_execution", result="boom")], "boom"),
+    ([_INIT, _tool_use("WebSearch", query="q")], None),  # cut before its result
+], ids=["result", "no-result"])
+def test_failed_call_messages_quote_the_result_envelope(monkeypatch, tmp_path, case, events, expected):
     import subprocess
 
     import pipeline.claude_cli as cc
 
     monkeypatch.setenv(cc.USAGE_LOG_ENV, str(tmp_path / "usage.jsonl"))
     module, run, error = _runner_cases()[case]
-    stdout = _stream({"type": "system", "subtype": "init", "tools": ["WebSearch"]},
-                     _result(is_error=True, subtype="error_during_execution", result="boom"))
+    stdout = _stream(*events)
     monkeypatch.setattr(module.subprocess, "run",
                         lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, stdout=stdout, stderr=""))
     with pytest.raises(error) as raised:
         run()
-    assert "boom" in str(raised.value)
-    assert '"subtype": "init"' not in str(raised.value)
+    message = str(raised.value)
+    assert '"subtype": "init"' not in message and '"type": "tool_use"' not in message
+    if expected is not None:
+        assert expected in message
