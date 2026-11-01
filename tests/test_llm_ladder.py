@@ -64,14 +64,11 @@ def test_gpt_prices_and_provider():
     ceiling, exact = price_for("gpt-9-unknown")
     assert (ceiling.output, exact) == (50.00, False)  # the highest listed rate (gpt-6-astra)
     assert price_for("gpt-6-astra") == (ceiling, True)
-    # Per request, on the largest growing request's bound 2·sum/(n+1):
-    short, long = (300_000 * 2 + 1_000 * 10) / 1e6, (300_000 * 4 + 1_000 * 15) / 1e6
-    summed = {"input": 300_000, "output": 1_000}
-    assert call_cost("gpt-6.1-sol", summed, growing_requests=10) == pytest.approx(short)  # bound 54.5K
-    assert call_cost("gpt-6.1-sol", summed) == pytest.approx(long)  # one request
-    # 100K + 200K + 300K: average 200K, but the last request is long.
-    assert call_cost("gpt-6.1-sol", {"input": 600_000, "output": 1_000}, growing_requests=3) == pytest.approx(
-        (600_000 * 4 + 1_000 * 15) / 1e6)
+    # Summed requests are judged on the whole sum: never under-billed.
+    assert call_cost("gpt-6.1-sol", {"input": 300_000, "output": 1_000}) == pytest.approx(
+        (300_000 * 4 + 1_000 * 15) / 1e6)
+    assert call_cost("gpt-6.1-sol", {"input": 272_000, "output": 1_000}) == pytest.approx(
+        (272_000 * 2 + 1_000 * 10) / 1e6)
 
 
 # ---------------------------------------------------------------------------
@@ -685,9 +682,9 @@ def test_codex_executable_finds_a_hoisted_platform_package(tmp_path, monkeypatch
 
 @pytest.mark.unit
 @pytest.mark.parametrize(("input_tokens", "searches", "tier"), [
-    (300_000, 9, "short"),   # 10 requests: largest ≥ 54.5K
-    (300_000, 0, "long"),    # one request of 300K
-    (600_000, 2, "long"),    # 3 growing requests: largest ≥ 300K
+    (272_000, 0, "short"),
+    (300_000, 9, "long"),    # summed over the turn's requests: over-count, never under-bill
+    (20_000 + 280_000, 1, "long"),
 ])
 def test_codex_turn_long_tier_wiring(ladder_cli, input_tokens, searches, tier):
     _state, log, _month = ladder_cli

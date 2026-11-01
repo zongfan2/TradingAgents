@@ -135,13 +135,12 @@ def price_for(model: str) -> tuple[Price | None, bool]:
     return None, False
 
 
-def call_cost(model: str, tokens: dict[str, int], growing_requests: int = 1) -> float | None:
+def call_cost(model: str, tokens: dict[str, int]) -> float | None:
     """USD for one call; ``None`` for a non-Claude model without a price.
-    ``tokens`` may sum ``growing_requests`` model requests whose prompts only
-    grow (one agent turn re-sends its context): the long-context tier is a
-    per-request rule, and the largest such request is at least
-    ``2·sum/(n+1)`` — judging the tier on that bound never under-bills.
-    Sums of unrelated calls keep the default (the whole sum: over-count)."""
+    The long-context tier is a per-request rule; ``tokens`` that sum several
+    requests (a codex turn, a ledger row) are judged on the whole sum — the
+    only bound that never under-bills without per-request sizes (it may
+    over-count, the budget-safe direction)."""
     price, _exact = price_for(model)
     if price is None:
         return None
@@ -149,8 +148,7 @@ def call_cost(model: str, tokens: dict[str, int], growing_requests: int = 1) -> 
     cache_read = tokens.get("cache_read", 0)
     cache_write = tokens.get("cache_write", 0)
     uncached = max(input_total - cache_read - cache_write, 0)
-    largest_bound = 2 * input_total / (max(growing_requests, 1) + 1)
-    long = price.long_prompt_tokens is not None and largest_bound > price.long_prompt_tokens
+    long = price.long_prompt_tokens is not None and input_total > price.long_prompt_tokens
     rate_in = price.long_input if long else price.input
     rate_out = price.long_output if long else price.output
     rate_read = price.long_cache_read if long else price.cache_read
@@ -163,15 +161,15 @@ def call_cost(model: str, tokens: dict[str, int], growing_requests: int = 1) -> 
     ) / 1_000_000
 
 
-def openai_call_cost(model: str, tokens: dict[str, int], growing_requests: int = 1) -> float:
+def openai_call_cost(model: str, tokens: dict[str, int]) -> float:
     """USD for one call billed to the OpenAI account: any model without a
     listed price (an ``o``-series or ``codex-`` override) is budgeted at the
     OpenAI ceiling, never at 0 (ladder L4)."""
-    cost = call_cost(model, tokens, growing_requests)
+    cost = call_cost(model, tokens)
     if cost is not None:
         return cost
     logger.warning("no price for %s — budgeting it at the OpenAI ceiling rate", model)
-    return call_cost("gpt-ceiling-rate", tokens, growing_requests) or 0.0
+    return call_cost("gpt-ceiling-rate", tokens) or 0.0
 
 
 def _tokens_from_message(message: Any) -> tuple[str | None, dict[str, int]] | None:
@@ -455,7 +453,6 @@ def _row_spend(row: dict, month: str, provider: str, since_at: datetime | None =
                 # budgeted at that provider's ceiling — never at $0.
                 owner = row_provider
                 if not cost and owner in _CEILING_MODEL:
-                    # Summed unrelated calls: the tier on the whole sum (over-count).
                     cost = _spend(call_cost(_CEILING_MODEL[owner], _row_tokens(usage)))
             if owner == provider:
                 total += cost
