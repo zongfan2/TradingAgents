@@ -160,7 +160,8 @@ def test_collector_rejects_a_junk_cap_before_any_job(monkeypatch, tmp_path):
 
 
 def _stream(*events):
-    return "\n".join(json.dumps(e) for e in events) + "\n"
+    # ensure_ascii=False: the CLI (JSON.stringify) leaves U+2028 etc. raw.
+    return "\n".join(json.dumps(e, ensure_ascii=False) for e in events) + "\n"
 
 
 def _tool_use(name, **args):
@@ -211,7 +212,22 @@ def test_single_json_envelope_still_parses():
 
     envelope = cc.parse_envelope(json.dumps(_result()))
     assert cc.result_text(envelope) == "brief"
-    assert envelope["_tool_calls"] == {"web_search_queries": [], "web_fetch_urls": []}
+    assert envelope["_tool_calls"] == {"web_search_queries": [], "web_fetch_urls": [], "web_fetch_requests": 0}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("char", ["\u2028", "\u2029", "\u0085"])  # controls are always escaped
+def test_raw_line_separator_characters_do_not_split_events(monkeypatch, tmp_path, char):
+    import pipeline.claude_cli as cc
+
+    stdout = _stream(_tool_use("WebSearch", query=f"q{char}x"),
+                     {"type": "user", "message": {"content": [{"type": "tool_result", "content": f"web{char}page"}]}},
+                     _result(result=f"para1{char}para2"))
+    assert char in stdout  # raw, as the CLI writes it
+    envelope = cc.parse_envelope(stdout)
+    assert cc.result_text(envelope) == f"para1{char}para2"
+    line = _usage_line(monkeypatch, tmp_path, envelope)
+    assert line["web_search_queries"] == [f"q{char}x"]
 
 
 @pytest.mark.unit
@@ -245,10 +261,13 @@ def test_tool_calls_are_bounded_and_junk_reads_empty(monkeypatch, tmp_path):
     import pipeline.claude_cli as cc
 
     stdout = _stream(*[_tool_use("WebSearch", query="x" * 1000) for _ in range(100)],
+                     *[_tool_use("WebFetch", url="https://e.com") for _ in range(100)],
                      _tool_use("WebSearch"), {"type": "assistant", "message": "junk"},
                      _result(modelUsage={"m": {"webSearchRequests": "junk"}, "n": "junk"}))
     envelope = cc.parse_envelope(stdout)
     queries = envelope["_tool_calls"]["web_search_queries"]
     assert len(queries) == cc._MAX_TOOL_CALLS and all(len(q) == cc._MAX_TOOL_ARG_CHARS for q in queries)
+    assert len(envelope["_tool_calls"]["web_fetch_urls"]) == cc._MAX_TOOL_CALLS
+    assert _usage_line(monkeypatch, tmp_path, envelope)["web_fetch_requests"] == 100  # unbounded count
     line = _usage_line(monkeypatch, tmp_path, {**envelope, "_tool_calls": "junk"})
-    assert (line["web_search_requests"], line["web_search_queries"]) == (0, [])
+    assert (line["web_search_requests"], line["web_search_queries"], line["web_fetch_requests"]) == (0, [], 0)

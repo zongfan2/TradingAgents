@@ -196,9 +196,11 @@ _MAX_TOOL_ARG_CHARS = 300
 
 def _events(stdout: str) -> list[dict]:
     """The JSON object lines of a ``stream-json`` stdout (a one-line ``json``
-    envelope is a one-event stream); other lines are skipped."""
+    envelope is a one-event stream); other lines are skipped. Events are
+    split on ``\n`` only: ``str.splitlines`` also breaks on U+2028/U+0085,
+    which JSON.stringify leaves raw inside strings."""
     events = []
-    for line in (stdout or "").splitlines():
+    for line in (stdout or "").split("\n"):
         line = line.strip()
         if not line.startswith("{"):
             continue
@@ -211,10 +213,11 @@ def _events(stdout: str) -> list[dict]:
     return events
 
 
-def _tool_calls(events: list[dict]) -> dict[str, list[str]]:
+def _tool_calls(events: list[dict]) -> dict[str, object]:
     """``{"web_search_queries": [...], "web_fetch_urls": [...]}`` from the
-    assistant ``tool_use`` blocks, in call order, bounded."""
-    calls: dict[str, list[str]] = {"web_search_queries": [], "web_fetch_urls": []}
+    assistant ``tool_use`` blocks, in call order, bounded, plus the
+    unbounded ``web_fetch_requests`` count."""
+    calls: dict[str, object] = {"web_search_queries": [], "web_fetch_urls": [], "web_fetch_requests": 0}
     wanted = {"WebSearch": ("web_search_queries", "query"), "WebFetch": ("web_fetch_urls", "url")}
     for event in events:
         if event.get("type") != "assistant":
@@ -229,12 +232,14 @@ def _tool_calls(events: list[dict]) -> dict[str, list[str]]:
             if target is None or not isinstance(args, dict):
                 continue
             field, arg = target
+            if field == "web_fetch_urls":
+                calls["web_fetch_requests"] += 1
             if len(calls[field]) < _MAX_TOOL_CALLS:
                 calls[field].append(str(args.get(arg, ""))[:_MAX_TOOL_ARG_CHARS])
     return calls
 
 
-def _result_event(stdout: str) -> tuple[dict | None, dict[str, list[str]]]:
+def _result_event(stdout: str) -> tuple[dict | None, dict[str, object]]:
     """The last ``result`` event (``None`` if absent) and the tool calls."""
     events = _events(stdout)
     result = next((e for e in reversed(events) if e.get("type") == "result"), None)
@@ -352,14 +357,17 @@ def _web_search_requests(envelope: dict) -> int:
     )
 
 
-def _tool_call_lists(envelope: dict) -> dict[str, list[str]]:
+def _tool_call_fields(envelope: dict) -> dict[str, object]:
+    """The usage-line web tool fields from ``_tool_calls`` (junk → empty)."""
     calls = envelope.get("_tool_calls")
     calls = calls if isinstance(calls, dict) else {}
-    return {
-        field: [str(item) for item in calls.get(field, ())][:_MAX_TOOL_CALLS]
+    fields: dict[str, object] = {
+        field: [str(item) for item in calls[field]][:_MAX_TOOL_CALLS]
         if isinstance(calls.get(field), list) else []
         for field in ("web_search_queries", "web_fetch_urls")
     }
+    fields["web_fetch_requests"] = _count(calls.get("web_fetch_requests"))
+    return fields
 
 
 def _count(value: object) -> int:
@@ -409,9 +417,9 @@ def record_usage(
     billing, billed = _billing(usage, envelope.get("total_cost_usd"))
     try:
         searches = _web_search_requests(envelope)
-        calls = _tool_call_lists(envelope)
+        calls = _tool_call_fields(envelope)
     except Exception:  # never raises
-        searches, calls = 0, {"web_search_queries": [], "web_fetch_urls": []}
+        searches, calls = 0, {"web_search_queries": [], "web_fetch_urls": [], "web_fetch_requests": 0}
     if outcome == "error" and billing == "anthropic-api":
         detail = str(envelope.get("result") or "")
         from pipeline.llm_usage import is_credit_exhausted_error
@@ -430,7 +438,6 @@ def record_usage(
         "billed_usd": billed,
         # Web searches bill per request ($10/1K), apart from tokens (R10/R11).
         "web_search_requests": searches,
-        "web_fetch_requests": len(calls["web_fetch_urls"]),
         **calls,
         "num_turns": envelope.get("num_turns"),
         "duration_ms": envelope.get("duration_ms"),

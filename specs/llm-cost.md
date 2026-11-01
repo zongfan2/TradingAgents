@@ -257,8 +257,12 @@ stream's first (`init`) event. Each `claude_usage.jsonl` line adds:
   R10's first cut read that field and logged 0);
 - `web_search_queries` / `web_fetch_urls` — the `WebSearch` queries and
   `WebFetch` URLs of the assistant `tool_use` blocks, in call order, at
-  most 60 each, each cut to 300 characters; `web_fetch_requests` is the
-  count of the latter.
+  most 60 each, each cut to 300 characters; `web_fetch_requests` counts
+  every `WebFetch` call (not capped).
+
+Events are split on `\n` only: the CLI's JSON.stringify leaves U+2028,
+U+2029 and U+0085 raw inside strings, where `str.splitlines` would cut an
+event (a successful call would then read as an invalid envelope).
 
 Junk reads as 0 / empty, and logging never raises. Purpose: measure
 duplicate queries within a brief and across days (the baseline for the
