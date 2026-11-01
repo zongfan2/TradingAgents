@@ -56,9 +56,24 @@ On the openai rung every pipeline `claude -p` call is built as a
 hermetic `codex exec`:
 `codex exec --ignore-user-config --ephemeral --sandbox read-only
 --skip-git-repo-check --json -c tools.web_search=true -m <model>
--c model_reasoning_effort=<effort> [--output-schema <file>] -`, prompt on
-stdin, `CODEX_HOME=<state_dir>/codex_home`, the key only in the env
-(`CODEX_API_KEY`, verified to authenticate without a login). Models per
+-c model_reasoning_effort=<effort> --disable <feature>… --cd <codex_home>/work
+[--output-schema <file>] -`, prompt on stdin. Isolation (the calls read
+untrusted web pages, as the claude path's HERMETIC_FLAGS assume):
+
+- every default-on feature beyond search is disabled — shell and
+  unified exec, browser/computer use, images, plugins, apps, hooks,
+  skills, sub-agents (`CODEX_DISABLED_FEATURES`); `code_mode_host` stays
+  on because web search runs through it, and its JavaScript has no
+  `require`/`fs`/`process`;
+- the read-only sandbox refuses writes (`apply_patch`);
+- the env is an allow-list (PATH, locale, TZ, TMPDIR, CA and proxy vars)
+  plus `CODEX_API_KEY` (verified to authenticate without a login),
+  `CODEX_HOME=HOME=<state_dir>/codex_home`; no other key reaches codex;
+- the cwd is an empty `codex_home/work`, never the repo.
+
+All four probed live on 2026-11-01: no shell ("no shell tool
+available"), `file://` opens and `id` fail, JS `require`/`fs`/`process`
+are absent, writes are refused, and search still works. Models per
 role: collect `gpt-5.6-luna`, eval `gpt-5.6-sol`
 (`TRADINGAGENTS_OPENAI_{COLLECT,EVAL}_MODEL`), so collector and evaluator
 stay on different models (evaluator R2). Effort maps low/medium/high,
@@ -99,7 +114,8 @@ is baked at install time).
 
 ### L4 — Ledger and prices
 
-`gpt-5.6-sol` $4.00 in / $0.40 cached / $20.00 out, `gpt-5.6-luna` $0.20 /
+A codex model override without a listed price is budgeted at the OpenAI
+ceiling, never at $0. `gpt-5.6-sol` $4.00 in / $0.40 cached / $20.00 out, `gpt-5.6-luna` $0.20 /
 $0.02 / $1.20 per 1M tokens (developers.openai.com/api/docs/pricing,
 standard tier, 2026-11-01); no cache-write surcharge. Unknown `gpt-*`
 models bill at the OpenAI ceiling (`priced: false`); OpenAI snapshot ids

@@ -176,8 +176,25 @@ OPENAI_CLI_MODELS = {"collect": "gpt-5.6-luna", "eval": "gpt-5.6-sol"}
 OPENAI_CLI_MODEL_ENV = {"collect": "TRADINGAGENTS_OPENAI_COLLECT_MODEL", "eval": "TRADINGAGENTS_OPENAI_EVAL_MODEL"}
 #: claude --effort → codex model_reasoning_effort.
 _CODEX_EFFORT = {"low": "low", "medium": "medium", "high": "high", "xhigh": "high", "max": "high"}
-#: Hermetic codex: no user config, no session files, read-only sandbox (it
-#: only searches), web search on, JSONL events on stdout.
+#: codex features that give the agent anything beyond web search (enabled
+#: by default in codex-cli 0.164.0, ``codex features list``). Pipeline calls
+#: read untrusted web pages, so — as HERMETIC_FLAGS does for claude — no
+#: shell (the read-only sandbox still lets a shell read files such as
+#: ``.env``), browser, computer use, images, plugins, apps, hooks, skills or
+#: sub-agents. ``code_mode_host`` stays ON: web search runs through it
+#: (``web__run``), and its JavaScript has no ``require``/``fs``/``process``
+#: (probed live 2026-11-01); writes are refused by the read-only sandbox.
+CODEX_DISABLED_FEATURES = (
+    "shell_tool", "unified_exec", "unified_exec_tty", "shell_snapshot",
+    "browser_use", "browser_use_external", "browser_use_full_cdp_access", "in_app_browser",
+    "browser_annotation_api", "computer_use", "image_generation", "view_image",
+    "multi_agent", "plugins", "remote_plugin", "plugin_sharing", "apps", "hooks",
+    "skill_search", "skill_mcp_dependency_install", "goals", "sleep_tool",
+    "in_app_local_automation", "workspace_dependencies", "worktrees", "tool_suggest",
+    "realtime_conversation", "collaboration_modes",
+)
+#: Hermetic codex: no user config, no session files, read-only sandbox,
+#: every non-search tool disabled, web search on, JSONL events on stdout.
 CODEX_FLAGS = (
     "--ignore-user-config",
     "--ephemeral",
@@ -187,6 +204,13 @@ CODEX_FLAGS = (
     "--json",
     "-c",
     "tools.web_search=true",
+    *(arg for feature in CODEX_DISABLED_FEATURES for arg in ("--disable", feature)),
+)
+#: The only parent env a codex call inherits (plus CODEX_API_KEY/CODEX_HOME/
+#: HOME): no other secret (Anthropic/DeepSeek/Alpaca/Lark keys) reaches it.
+_CODEX_ENV_KEEP = (
+    "PATH", "LANG", "LC_ALL", "TZ", "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR",
+    "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy",
 )
 
 
@@ -220,9 +244,11 @@ def _codex_command(role: str, effort: str, extra: tuple[str, ...]) -> tuple[list
     """``(argv, model, env)`` for one hermetic ``codex exec`` call. The API
     key goes in the env only (``CODEX_API_KEY``), never on argv."""
     model = (os.environ.get(OPENAI_CLI_MODEL_ENV[role]) or "").strip() or OPENAI_CLI_MODELS[role]
-    argv = ["codex", "exec", *CODEX_FLAGS, "-m", model,
-            "-c", f"model_reasoning_effort={_CODEX_EFFORT.get(effort, 'medium')}"]
     home = _codex_home()
+    work = home / "work"  # an empty cwd, never the repo
+    work.mkdir(exist_ok=True)
+    argv = ["codex", "exec", *CODEX_FLAGS, "--cd", str(work), "-m", model,
+            "-c", f"model_reasoning_effort={_CODEX_EFFORT.get(effort, 'medium')}"]
     rest = list(extra)
     while rest:
         flag = rest.pop(0)
@@ -235,9 +261,10 @@ def _codex_command(role: str, effort: str, extra: tuple[str, ...]) -> tuple[list
         else:
             raise ValueError(f"claude flag {flag!r} has no codex equivalent")
     argv.append("-")  # prompt on stdin
-    env = dict(os.environ)
-    env["CODEX_API_KEY"] = env.get("OPENAI_API_KEY", "")
+    env = {name: os.environ[name] for name in _CODEX_ENV_KEEP if name in os.environ}
+    env["CODEX_API_KEY"] = os.environ.get("OPENAI_API_KEY", "")
     env["CODEX_HOME"] = str(home)
+    env["HOME"] = str(home)
     return argv, model, env
 
 
@@ -350,7 +377,7 @@ def _codex_envelope(events: list[dict]) -> tuple[dict | None, dict[str, object]]
     priced (tokens + $0.01 per web search), ``turn.failed`` (or an ``error``
     event with no completed turn) is an error result. ``None`` when the
     stream ended before any turn finished or failed."""
-    from pipeline.llm_usage import WEB_SEARCH_USD_PER_CALL, call_cost
+    from pipeline.llm_usage import WEB_SEARCH_USD_PER_CALL, openai_call_cost
 
     text: str | None = None
     failure: str | None = None
@@ -393,7 +420,7 @@ def _codex_envelope(events: list[dict]) -> tuple[dict | None, dict[str, object]]
         return None, calls
     model = getattr(_CALL, "model", None) or "gpt-unknown"
     try:
-        cost = (call_cost(model, {**tokens}) or 0.0) + searches * WEB_SEARCH_USD_PER_CALL
+        cost = openai_call_cost(model, {**tokens}) + searches * WEB_SEARCH_USD_PER_CALL
     except Exception:
         cost = searches * WEB_SEARCH_USD_PER_CALL
     is_error = failure is not None or not completed

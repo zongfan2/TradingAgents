@@ -139,6 +139,17 @@ def call_cost(model: str, tokens: dict[str, int]) -> float | None:
     ) / 1_000_000
 
 
+def openai_call_cost(model: str, tokens: dict[str, int]) -> float:
+    """USD for one call billed to the OpenAI account: any model without a
+    listed price (an ``o``-series or ``codex-`` override) is budgeted at the
+    OpenAI ceiling, never at 0 (ladder L4)."""
+    cost = call_cost(model, tokens)
+    if cost is not None:
+        return cost
+    logger.warning("no price for %s — budgeting it at the OpenAI ceiling rate", model)
+    return call_cost("gpt-ceiling-rate", tokens) or 0.0
+
+
 def _tokens_from_message(message: Any) -> tuple[str | None, dict[str, int]] | None:
     usage = getattr(message, "usage_metadata", None)
     if not usage:

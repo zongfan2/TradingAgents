@@ -294,7 +294,16 @@ def test_openai_route_builds_a_hermetic_codex_call(ladder_cli):
     assert not any("sk-proj-secret" in part for part in command)  # key never on argv
     env = claude_cli.call_env(command)
     assert env["CODEX_API_KEY"] == "sk-proj-secret"
-    assert env["CODEX_HOME"] == str(state / "codex_home")
+    assert env["CODEX_HOME"] == env["HOME"] == str(state / "codex_home")
+    # No other secret reaches codex: only the allow-listed parent env.
+    assert set(env) <= {*claude_cli._CODEX_ENV_KEEP, "CODEX_API_KEY", "CODEX_HOME", "HOME"}
+    assert not {"ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY"} & set(env)
+    # Web search only: shell, browser, computer use, code mode ... disabled.
+    disabled = {command[i + 1] for i, part in enumerate(command) if part == "--disable"}
+    assert {"shell_tool", "unified_exec", "browser_use", "computer_use",
+            "multi_agent", "plugins", "apps", "hooks"} <= disabled
+    assert "code_mode_host" not in disabled  # web search runs through code mode
+    assert command[command.index("--cd") + 1] == str(state / "codex_home" / "work")
     schema = json.dumps({"type": "object"})
     evaluate = claude_cli.claude_command("claude-opus-5-5", "xhigh", "--json-schema", schema, role="eval")
     assert evaluate[evaluate.index("-m") + 1] == "gpt-5.6-sol"
@@ -443,3 +452,14 @@ def test_every_claude_command_caller_states_its_cli_role():
         "claude_cli.py": ["return claude_command(*_collect_model_effort())"],
         "evaluator.py": ['command = claude_command(model, effort, "--json-schema", schema, role="eval")'],
     }
+
+
+@pytest.mark.unit
+def test_an_unpriced_codex_model_is_budgeted_at_the_openai_ceiling(ladder_cli, monkeypatch):
+    _state, log, _month = ladder_cli
+    monkeypatch.setenv("TRADINGAGENTS_OPENAI_COLLECT_MODEL", "o9-research")
+    command = claude_cli.claude_command("claude-haiku-5-5", "low")
+    assert command[command.index("-m") + 1] == "o9-research"
+    claude_cli.collect_output("claude", codex_stream(searches=()), component="ticker_collector")
+    line = json.loads(log.read_text().splitlines()[-1])
+    assert line["billed_usd"] == pytest.approx((1_000 * 4 + 10_000 * 0.4 + 14_000 * 4 + 500 * 20) / 1e6)
