@@ -25,6 +25,7 @@ import sys
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -298,7 +299,8 @@ _CALL_HOME_MAX_AGE_SECONDS = 24 * 3600
 _THREAD_ID_RE = re.compile(r"[0-9A-Za-z-]{8,64}")
 #: thread id → per-request token rows, so re-parsing one stdout (failure
 #: message, usage log) prices it the same after its call home is deleted.
-_ROLLOUT_CACHE: dict[str, list[dict[str, int]] | None] = {}
+_ROLLOUT_CACHE: OrderedDict[str, list[dict[str, int]] | None] = OrderedDict()
+_ROLLOUT_CACHE_SIZE = 1024
 _ROLLOUT_LOCK = threading.Lock()
 
 
@@ -368,9 +370,9 @@ def _rollout_requests(thread_id: object, call_home: Path | None) -> list[dict[st
         if call_home is not None:
             shutil.rmtree(call_home, ignore_errors=True)
         if thread_id is not None:
-            if len(_ROLLOUT_CACHE) > 256:
-                _ROLLOUT_CACHE.clear()
             _ROLLOUT_CACHE[thread_id] = requests
+            while len(_ROLLOUT_CACHE) > _ROLLOUT_CACHE_SIZE:  # evict oldest only: a
+                _ROLLOUT_CACHE.popitem(last=False)          # re-parse follows at once
         return requests
 
 

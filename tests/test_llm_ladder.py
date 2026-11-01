@@ -875,3 +875,11 @@ def test_prune_survives_a_home_deleted_mid_pass(ladder_cli, monkeypatch, caplog)
     claude_cli._prune_call_homes(base)
     assert not any(home.exists() for home in homes)
     assert "could not prune" not in caplog.text
+
+
+@pytest.mark.unit
+def test_rollout_cache_evicts_oldest_only(ladder_cli, monkeypatch):
+    monkeypatch.setattr(claude_cli, "_ROLLOUT_CACHE_SIZE", 3)
+    for i in range(5):
+        claude_cli._rollout_requests(f"thread-{i:04d}", None)
+    assert list(claude_cli._ROLLOUT_CACHE) == ["thread-0002", "thread-0003", "thread-0004"]
