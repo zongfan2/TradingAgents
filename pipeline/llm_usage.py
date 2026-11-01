@@ -72,6 +72,12 @@ PRICES: dict[str, Price] = {
                            long_input=2.00, long_output=7.50, long_cache_read=0.10, long_cache_write=2.00),
     "gpt-6.1-sol": Price(2.00, 10.00, 0.10, 2.00, long_prompt_tokens=272_000,
                          long_input=4.00, long_output=15.00, long_cache_read=0.20, long_cache_write=4.00),
+    # Not chosen (top tier / superseded) but listed, so an override is priced
+    # exactly and the unlisted-model ceiling is the highest real rate.
+    "gpt-6-astra": Price(10.00, 50.00, 1.00, 10.00, long_prompt_tokens=272_000,
+                         long_input=20.00, long_output=75.00, long_cache_read=2.00, long_cache_write=20.00),
+    "gpt-6-sol": Price(2.00, 10.00, 0.20, 2.00, long_prompt_tokens=272_000,
+                       long_input=4.00, long_output=15.00, long_cache_read=0.40, long_cache_write=4.00),
     # Previous generation, kept so older ledger lines and overrides price.
     "gpt-5.6-sol": Price(4.00, 20.00, 0.40, 4.00, long_prompt_tokens=272_000,
                          long_input=8.00, long_output=30.00, long_cache_read=0.80, long_cache_write=8.00),
@@ -129,8 +135,11 @@ def price_for(model: str) -> tuple[Price | None, bool]:
     return None, False
 
 
-def call_cost(model: str, tokens: dict[str, int]) -> float | None:
-    """USD for one call; ``None`` for a non-Claude model without a price."""
+def call_cost(model: str, tokens: dict[str, int], requests: int = 1) -> float | None:
+    """USD for one call; ``None`` for a non-Claude model without a price.
+    ``tokens`` may sum ``requests`` model requests (a codex turn, a ledger
+    row): the long-context tier is a per-request rule, so it applies when
+    the average prompt per request exceeds the threshold."""
     price, _exact = price_for(model)
     if price is None:
         return None
@@ -138,7 +147,7 @@ def call_cost(model: str, tokens: dict[str, int]) -> float | None:
     cache_read = tokens.get("cache_read", 0)
     cache_write = tokens.get("cache_write", 0)
     uncached = max(input_total - cache_read - cache_write, 0)
-    long = price.long_prompt_tokens is not None and input_total > price.long_prompt_tokens
+    long = price.long_prompt_tokens is not None and input_total / max(requests, 1) > price.long_prompt_tokens
     rate_in = price.long_input if long else price.input
     rate_out = price.long_output if long else price.output
     rate_read = price.long_cache_read if long else price.cache_read
@@ -151,15 +160,15 @@ def call_cost(model: str, tokens: dict[str, int]) -> float | None:
     ) / 1_000_000
 
 
-def openai_call_cost(model: str, tokens: dict[str, int]) -> float:
+def openai_call_cost(model: str, tokens: dict[str, int], requests: int = 1) -> float:
     """USD for one call billed to the OpenAI account: any model without a
     listed price (an ``o``-series or ``codex-`` override) is budgeted at the
     OpenAI ceiling, never at 0 (ladder L4)."""
-    cost = call_cost(model, tokens)
+    cost = call_cost(model, tokens, requests)
     if cost is not None:
         return cost
     logger.warning("no price for %s — budgeting it at the OpenAI ceiling rate", model)
-    return call_cost("gpt-ceiling-rate", tokens) or 0.0
+    return call_cost("gpt-ceiling-rate", tokens, requests) or 0.0
 
 
 def _tokens_from_message(message: Any) -> tuple[str | None, dict[str, int]] | None:
@@ -443,7 +452,8 @@ def _row_spend(row: dict, month: str, provider: str, since_at: datetime | None =
                 # budgeted at that provider's ceiling — never at $0.
                 owner = row_provider
                 if not cost and owner in _CEILING_MODEL:
-                    cost = _spend(call_cost(_CEILING_MODEL[owner], _row_tokens(usage)))
+                    cost = _spend(call_cost(_CEILING_MODEL[owner], _row_tokens(usage),
+                                            requests=_row_tokens(usage, "calls").get("calls", 1)))
             if owner == provider:
                 total += cost
         return total
@@ -457,9 +467,9 @@ _PROFILE_PROVIDER = {"claude": "anthropic", "openai": "openai", "deepseek": "dee
 _CEILING_MODEL = {"anthropic": "claude-unpriced", "openai": "gpt-unpriced"}
 
 
-def _row_tokens(usage: dict) -> dict[str, int]:
+def _row_tokens(usage: dict, *keys: str) -> dict[str, int]:
     tokens = {}
-    for key in ("input", "output", "cache_read", "cache_write"):
+    for key in keys or ("input", "output", "cache_read", "cache_write"):
         try:
             tokens[key] = max(int(usage.get(key) or 0), 0)
         except Exception:

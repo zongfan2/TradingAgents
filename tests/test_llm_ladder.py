@@ -62,7 +62,12 @@ def test_gpt_prices_and_provider():
     assert call_cost("gpt-6.1-terra", {"input": 200_000, "output": 200_000}) == pytest.approx(0.2 + 1.0)
     assert price_for("gpt-6-luna-2026-09-14") == (price_for("gpt-6-luna")[0], True)  # snapshot id
     ceiling, exact = price_for("gpt-9-unknown")
-    assert (ceiling.output, exact) == (20.00, False)  # never budgeted below sol
+    assert (ceiling.output, exact) == (50.00, False)  # the highest listed rate (gpt-6-astra)
+    assert price_for("gpt-6-astra") == (ceiling, True)
+    # The long tier is per request: 10 requests × 30K is short, 1 × 300K is long.
+    summed = {"input": 300_000, "output": 1_000}
+    assert call_cost("gpt-6.1-sol", summed, requests=10) == pytest.approx((300_000 * 2 + 1_000 * 10) / 1e6)
+    assert call_cost("gpt-6.1-sol", summed) == pytest.approx((300_000 * 4 + 1_000 * 15) / 1e6)
 
 
 # ---------------------------------------------------------------------------
@@ -509,7 +514,7 @@ def test_an_unpriced_codex_model_is_budgeted_at_the_openai_ceiling(ladder_cli, m
     assert command[command.index("-m") + 1] == "o9-research"
     claude_cli.collect_output("claude", codex_stream(searches=()), component="ticker_collector")
     line = json.loads(log.read_text().splitlines()[-1])
-    assert line["billed_usd"] == pytest.approx((1_000 * 4 + 10_000 * 0.4 + 14_000 * 4 + 500 * 20) / 1e6)
+    assert line["billed_usd"] == pytest.approx((1_000 * 10 + 10_000 * 1 + 14_000 * 10 + 500 * 50) / 1e6)
 
 
 @pytest.mark.unit
@@ -613,7 +618,7 @@ def test_openai_child_usage_is_captured_and_an_unnamed_model_still_counts(tmp_pa
                            "reasoning": 0, "cost_usd": 0.0, "priced": False}}
     append_usage(tmp_path, run_id="r", date="2026-08-07", session="us", ticker="A", arm="brief",
                  profile="openai", clock=lambda: NOW, models=unnamed)
-    assert month_spend(tmp_path, MONTH, "openai") == pytest.approx((1000 * 4 + 100 * 20) / 1e6)
+    assert month_spend(tmp_path, MONTH, "openai") == pytest.approx((1000 * 10 + 100 * 50) / 1e6)
     assert month_spend(tmp_path, MONTH, "anthropic") == 0
 
 

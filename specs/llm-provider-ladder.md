@@ -143,8 +143,12 @@ ceiling, never at $0. Per 1M tokens, in / cached / out, prompts ≤ 272K
 lines: `gpt-5.6-sol` $4 / $0.40 / $20, `gpt-5.6-luna` $0.20 / $0.02 /
 $1.20). Prompts over 272K bill at each model's long-context tier (×2
 input/cached, ×1.5 output); no cache-write surcharge (writes bill as
-input, at the tier's rate). The ceiling is the highest listed rate
-(`gpt-5.6-sol`). Unknown `gpt-*`
+input, at the tier's rate). The tier is per request: a codex turn (≥ one
+request per search + the answer) and a ledger row (`calls`) are judged by
+their average prompt per request. `gpt-6-astra` ($10 / $1 / $50) and
+`gpt-6-sol` ($2 / $0.20 / $10) are listed though unused, so an override
+prices exactly and the unlisted-model ceiling is the highest real rate
+(`gpt-6-astra`). Unknown `gpt-*`
 models bill at the OpenAI ceiling (`priced: false`); OpenAI snapshot ids
 (`-YYYY-MM-DD`) resolve to their alias. `month_spend(..., "openai")`
 includes CLI lines billed `openai-api`; `since` restricts a fold to spend

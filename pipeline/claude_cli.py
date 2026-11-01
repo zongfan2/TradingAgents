@@ -493,7 +493,9 @@ def _codex_envelope(events: list[dict]) -> tuple[dict | None, dict[str, object]]
                         calls["web_search_queries"].append(query[:_MAX_TOOL_ARG_CHARS])
     model = getattr(_CALL, "model", None) or "gpt-unknown"
     try:
-        cost = openai_call_cost(model, {**tokens}) + searches * WEB_SEARCH_USD_PER_CALL
+        # One turn = several model requests (at least one per search plus
+        # the answer): the long tier is judged per request.
+        cost = openai_call_cost(model, {**tokens}, requests=searches + 1) + searches * WEB_SEARCH_USD_PER_CALL
     except Exception:
         cost = searches * WEB_SEARCH_USD_PER_CALL
     if not completed:
