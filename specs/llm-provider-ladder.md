@@ -77,7 +77,8 @@ untrusted web pages, as the claude path's HERMETIC_FLAGS assume):
   there (measured: `--ephemeral` left no prompt text, the non-ephemeral
   run did), so the whole dir is deleted once the call is billed (L4) —
   concurrent calls never share one, so deletion never races a running
-  codex; dirs a crash or launch failure left are pruned after 24 h.
+  codex; dirs a crash or launch failure left are pruned after 24 h by
+  every CLI call, whatever its route.
   Only the content-addressed output schemas stay in `codex_home/schemas`.
 
 All four probed live on 2026-11-01: no shell ("no shell tool

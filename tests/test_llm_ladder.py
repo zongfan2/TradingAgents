@@ -833,3 +833,18 @@ def test_concurrent_calls_get_separate_homes(ladder_cli):
     for thread in threads:
         thread.join()
     assert len(set(homes)) == 4
+
+
+@pytest.mark.unit
+def test_leftover_call_homes_are_pruned_on_other_routes_too(ladder_cli, monkeypatch):
+    import os
+    import time
+
+    claude_cli.claude_command("claude-haiku-5-5", "low")
+    leftover = claude_cli._CALL.codex_home  # e.g. the call crashed before billing
+    stale = time.time() - claude_cli._CALL_HOME_MAX_AGE_SECONDS - 60
+    os.utime(leftover, (stale, stale))
+    claude_cli._reset_route_for_tests()
+    monkeypatch.setenv("TRADINGAGENTS_LLM_ROUTING", "claude")  # off the OpenAI rung
+    command = claude_cli.claude_command("claude-haiku-5-5", "low")
+    assert command[0] == "claude" and not leftover.exists()

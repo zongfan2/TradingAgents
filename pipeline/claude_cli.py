@@ -312,6 +312,18 @@ def _prune_call_homes(home: Path) -> None:
         logger.warning("could not prune codex call homes: %s", exc)
 
 
+def _prune_leftover_call_homes() -> None:
+    """Prune stale call homes on every CLI call, whatever its route: one a
+    crash left (prompt and page text) must not outlive 24 h just because the
+    ladder has moved off OpenAI. Never raises; creates nothing."""
+    try:
+        home = Path(_state_dir()) / "codex_home"
+        if home.is_dir():
+            _prune_call_homes(home)
+    except Exception as exc:
+        logger.warning("could not prune codex call homes: %s", exc)
+
+
 def _rollout_requests(thread_id: object, call_home: Path | None) -> list[dict[str, int]] | None:
     """Per-request token usage of codex thread ``thread_id`` from the
     session rollout in ``call_home`` (``token_count`` events'
@@ -428,6 +440,7 @@ def claude_command(model: str, effort: str, *extra: str, role: str = "collect") 
     if role not in OPENAI_CLI_MODELS:
         raise ValueError(f"unknown CLI role {role!r}")
     cli_route()
+    _prune_leftover_call_homes()
     with _ROUTE_LOCK:
         # Route and env are captured together under the lock the DeepSeek
         # switch holds while rewriting os.environ; the launch site passes
