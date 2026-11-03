@@ -84,10 +84,10 @@ def main(argv: list[str] | None = None, *, stream_factory: Any = None, broker_fa
     ledger_dir = config.ledger_dir
     # The first-run cutoff: events from now on are this listener's to report.
     store = trade_notify.SentStore(state_dir)
-    with store.exclusive():  # the same lock deliver decides the first run under
-        # On the broker's clock: the cutoff is compared with broker event times.
-        store.first_started(trade_notify._broker_time(getattr(broker, "now", None))
-                            or datetime.now(timezone.utc))
+    started = trade_notify._broker_time(getattr(broker, "now", None))
+    if started is not None:  # broker clock only; else the first reconcile writes it
+        with store.exclusive():  # the same lock deliver decides the first run under
+            store.first_started(started)
     try:  # a failing snapshot read must not keep the real-time stream down
         trade_notify.reconcile(broker, state_dir=state_dir, send=send, now=datetime.now(timezone.utc),
                                ledger_dir=ledger_dir)

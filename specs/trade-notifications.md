@@ -31,7 +31,7 @@ error text, never logged).
 | Broker event (order) | Message |
 |---|---|
 | `new`/`accepted` of an entry (`…-entry`) or signal close (`…-close-N`) | 📝 下单 — side, qty, limit, bracket stop/target; for an entry the executed run's conviction, catalyst score and invalidation (one line: `orders.jsonl` client_order_id → the run of its live `submitted` (else live `intent`) row, never skip or dry-run rows → `decisions.jsonl`; without that link only a brief-arm, valid BUY plan of the id's date/session/ticker) |
-| `fill` | ✅ 成交 (entry) / 🔚 平仓 (exit: 止损 stop leg, 止盈 target leg — sell stop/limit orders with `order_class: bracket`, measured on the MU/SNDK legs; 信号平仓 close order; manual orders are not reported) — the **order's totals** (filled qty, average price); exits add realized P&L $ and % on those totals vs the entry average |
+| `fill` | ✅ 成交 (entry) / 🔚 平仓 (exit: 止损 stop leg, 止盈 target leg — sell stop/limit orders with `order_class: bracket`, measured on the MU/SNDK legs; 信号平仓 close order; manual simple orders are not reported — a leg does not name its parent, so the legs of a bracket placed *by hand* would read as pipeline exits: the paper account is the pipeline's alone, and missing a real exit is worse) — the **order's totals** (filled qty, average price); exits add realized P&L $ and % on those totals vs the entry average |
 | `canceled` / `expired` / `rejected` of an entry or close order | ⚠️ 撤单 / 过期 / 拒单 with the client order id and, when it partly filled, the filled qty and average (a bracket leg canceled because its sibling filled is not reported) |
 | `partial_fill`, `replaced`, `pending_*`, `done_for_day`… | not reported — orders fill in several executions (measured 10-26..11-02: AAPL 4, SNDK 2, MU 2), the final `fill` reports the totals |
 

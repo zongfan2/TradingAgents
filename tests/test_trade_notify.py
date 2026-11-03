@@ -1079,3 +1079,23 @@ def test_an_unreadable_fill_order_leaves_the_batch_incomplete(tmp_path):
                  state_dir=tmp_path, send=Sender(), now=NOW)
     assert book(tmp_path) == {"MU": {"avg": 893.92, "qty": 5.0}}  # not aligned away
     assert store.last_reconcile() == NOW - timedelta(hours=1)    # the window stays open
+
+
+@pytest.mark.unit
+def test_listener_never_writes_first_started_on_the_host_clock(tmp_path, monkeypatch):
+    from pipeline import trade_monitor
+
+    monkeypatch.setenv("TRADINGAGENTS_SKIP_DOTENV", "1")
+    monkeypatch.setenv("TRADINGAGENTS_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "s")
+    monkeypatch.setenv("TRADINGAGENTS_LARK_TRADES_WEBHOOK_URL", "https://open.feishu.cn/hook/x")
+    monkeypatch.setattr(trade_monitor, "make_trades_sender", lambda config: Sender())
+    monkeypatch.setattr(tn, "reconcile", lambda *a, **k: None)
+
+    class NoClock(Broker):
+        def now(self):
+            raise RuntimeError("clock down")
+
+    trade_monitor.main([], stream_factory=lambda: FakeStream([]), broker_factory=lambda: NoClock())
+    assert not (tmp_path / "trade_notify" / "first_started").exists()
