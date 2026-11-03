@@ -89,7 +89,9 @@ listener or a reconcile runs first; a first-run reconcile uses its
 positions snapshot's broker time for the cutoff and the seed stamp) is recorded **without sending** — old
 events are never replayed into the new group — while later events are sent
 as usual (a listener whose startup reconcile failed loses nothing); the
-marker is written even when that history is empty. A seeded row keeps its
+marker is written even when that history is empty — but not by an
+incomplete first run (a fill's order unreadable), which stays the first
+run so that fill is still recorded as history. A seeded row keeps its
 `seeded_at` through every rewrite.
 
 ### T4 — Listener (`python -m pipeline.trade_monitor`)
@@ -144,7 +146,9 @@ event time is only a lower bound; a seed is stamped with the broker clock
 after its read and remembers the clock before it: a fill inside that read
 window may or may not be in the seeded figure, so it makes the symbol's
 cost basis unknown), never the host's (WSL drifts after sleep): when the
-broker clock cannot be read, the reconcile is skipped and retried. A
+broker clock cannot be read, the reconcile is skipped and retried, and a
+listener position read that cannot be stamped is not used (the fill is
+booked by the fallback rules). A
 listener position read is a fresh seed in the same sense (`seeded_at` = the
 broker clock after the read, `seed_from` = the event time): an order placed
 whose execution started before it, or filled inside that window, makes the

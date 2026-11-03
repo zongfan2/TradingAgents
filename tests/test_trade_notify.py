@@ -1099,3 +1099,45 @@ def test_listener_never_writes_first_started_on_the_host_clock(tmp_path, monkeyp
 
     trade_monitor.main([], stream_factory=lambda: FakeStream([]), broker_factory=lambda: NoClock())
     assert not (tmp_path / "trade_notify" / "first_started").exists()
+
+
+@pytest.mark.unit
+def test_an_incomplete_first_run_stays_the_first_run(tmp_path):
+    from datetime import timedelta
+
+    class Flaky(Broker):
+        fail = True
+
+        def now(self):
+            return NOW - timedelta(minutes=1)
+
+        def order(self, order_id):
+            if Flaky.fail:
+                raise RuntimeError("503")
+            return super().order(order_id)
+
+    old_fill = at(entry("filled", filled_qty=5, avg=893.92), filled=(NOW - timedelta(days=1)).isoformat())
+    broker = Flaky(fills=[{"order_id": "E1", "order_status": "filled"}], by_id={"E1": old_fill})
+    send = Sender()
+    tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)
+    assert not tn.SentStore(tmp_path).initialized()
+    Flaky.fail = False
+    tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)  # still the first run: history
+    assert send.sent == [] and tn.SentStore(tmp_path).initialized()
+
+
+@pytest.mark.unit
+def test_a_listener_read_without_the_broker_clock_is_not_used(tmp_path):
+    tn.SentStore(tmp_path).mark_initialized()
+    tn.Entries(tmp_path).save({"MU": {"avg": 893.92, "qty": 5.0}})
+    stop = order("L-stop", "leg-a", side="sell", type_="stop", status="filled", filled_qty=5, avg=849.55,
+                 limit=None, stop=850.0)
+    send = Sender()
+
+    def no_clock():
+        raise RuntimeError("clock down")
+
+    tn.deliver([tn.event_from_update({"event": "fill", "order": stop})], state_dir=tmp_path, send=send,
+               positions=lambda: [{"symbol": "MU", "avg_entry_price": "1", "qty": "1"}], broker_now=no_clock)
+    assert "盈亏 −$221.85" in send.sent[0][1]  # measured on the book, not on the unstamped read
+    assert "seeded_at" not in tn.Entries(tmp_path).load().get("MU", {})

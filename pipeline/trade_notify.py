@@ -523,8 +523,11 @@ def _apply_fill(
         else:
             # An upper bound on the broker's clock, taken after the read: the
             # figure may include any fill up to here (the event time is only a
-            # lower bound). Host clock only when the broker clock is unknown.
-            read_at = _broker_time(broker_now) or datetime.now(timezone.utc)
+            # lower bound). No broker clock → the read is not used at all (the
+            # book stamps stay broker-clock only); the fallback rules apply.
+            read_at = _broker_time(broker_now) if broker_now is not None else datetime.now(timezone.utc)
+            if read_at is None:
+                current, positions = None, None
     stamp = (held or {}).get("seeded_at")
     seed_from = (held or {}).get("seed_from")
 
@@ -806,7 +809,7 @@ def deliver(
         if reconciled_at is not None and not rebuild_failed and complete:
             store.mark_reconciled(reconciled_at)
             store.prune(reconciled_at, SENT_KEEP)
-        if first_run:
+        if first_run and complete:  # an incomplete first run stays the first run
             store.mark_initialized()
         elif reconcile_positions is not None and not rebuild_book and complete:
             _align_book(book, reconcile_positions, snapshot_at)
