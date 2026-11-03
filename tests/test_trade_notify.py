@@ -1043,3 +1043,39 @@ def test_a_bracket_exit_replayed_after_a_listener_booked_entry_keeps_its_pnl(tmp
     send = Sender()
     tn.reconcile(broker, state_dir=tmp_path, send=send, now=datetime.now(timezone.utc))  # listener missed it
     assert "盈亏 −$221.85" in send.sent[-1][1]
+
+
+@pytest.mark.unit
+def test_the_listener_reads_through_a_seed_window(tmp_path):
+    from datetime import timedelta
+
+    tn.SentStore(tmp_path).mark_initialized()
+    t = datetime.now(timezone.utc) - timedelta(minutes=5)
+    tn.Entries(tmp_path).save({"MU": {"avg": 893.92, "qty": 5.0, "seed_from": t.isoformat(),
+                                      "seeded_at": (t + timedelta(minutes=2)).isoformat(),
+                                      "as_of": (t + timedelta(minutes=2)).isoformat()}})
+    stop = at(order("L-stop", "leg-a", side="sell", type_="stop", status="filled", filled_qty=5, avg=849.55,
+                    limit=None, stop=850.0), filled=(t + timedelta(minutes=1)).isoformat())  # inside the window
+    send = Sender()
+    tn.deliver([tn.event_from_update({"event": "fill", "order": stop})], state_dir=tmp_path, send=send,
+               positions=lambda: [])
+    assert "盈亏 −$221.85" in send.sent[0][1] and book(tmp_path) == {}
+
+
+@pytest.mark.unit
+def test_an_unreadable_fill_order_leaves_the_batch_incomplete(tmp_path):
+    from datetime import timedelta
+
+    store = tn.SentStore(tmp_path)
+    store.mark_initialized()
+    store.mark_reconciled(NOW - timedelta(hours=1))
+    tn.Entries(tmp_path).save({"MU": {"avg": 893.92, "qty": 5.0}})
+
+    class Flaky(Broker):
+        def order(self, order_id):
+            raise RuntimeError("503")
+
+    tn.reconcile(Flaky(positions=[], fills=[{"order_id": "L-stop", "order_status": "filled"}]),
+                 state_dir=tmp_path, send=Sender(), now=NOW)
+    assert book(tmp_path) == {"MU": {"avg": 893.92, "qty": 5.0}}  # not aligned away
+    assert store.last_reconcile() == NOW - timedelta(hours=1)    # the window stays open

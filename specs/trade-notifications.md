@@ -154,7 +154,11 @@ its entry but executes much later, so its exit keeps its P&L); the
 placement time only when no execution time is known. A fallback event
 older than its symbol's `as_of` is already reflected in the row (the
 listener moved the book ahead while this one was missed): it changes
-nothing, and its exit carries no P&L. A filled order's placement older than the fill window is not
+nothing, and its exit carries no P&L. These age and seed-window rules apply
+to fallback replays only — the listener reads the broker's own position,
+the truth whatever the book's age (a sell keeps the average). A batch with
+a fill whose order could not be read is incomplete: it neither aligns the
+book nor closes the window, so the next reconcile replays it intact. A filled order's placement older than the fill window is not
 announced (its fill is out of view, so it would read as a pending order).
 Both go through T3, so anything the listener missed arrives within an hour. The reconcile and the daily report fail
 independently. Best-effort:

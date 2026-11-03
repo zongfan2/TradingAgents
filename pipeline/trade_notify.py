@@ -228,7 +228,8 @@ def events_from_orders(orders: Iterable[Any]) -> list[TradeEvent]:
     return events
 
 
-def events_from_fills(activities: Iterable[Any], get_order: Callable[[str], Any]) -> list[TradeEvent]:
+def events_from_fills(activities: Iterable[Any], get_order: Callable[[str], Any],
+                      skipped: list[str] | None = None) -> list[TradeEvent]:
     """T5: one ``fill`` per order whose FILL activities (by fill time, any
     order age) reached ``order_status: filled``, with the order's totals,
     in fill-time order. An order the broker cannot return is skipped (the
@@ -248,6 +249,8 @@ def events_from_fills(activities: Iterable[Any], get_order: Callable[[str], Any]
             order = order_view(get_order(str(data["order_id"])))
         except Exception as exc:
             logger.warning("order of a fill not readable: %s", type(exc).__name__)
+            if skipped is not None:
+                skipped.append(str(data["order_id"]))
             continue
         if order.id and _reportable("fill", order):
             events.append(TradeEvent("fill", order, first.get(order.id)))
@@ -495,15 +498,20 @@ def _apply_fill(
     when = event.time
     held = entries.get(symbol)
     window = (_instant((held or {}).get("seed_from")), _instant((held or {}).get("seeded_at")))
-    if held and window[0] and window[1] and when is not None and window[0] <= when <= window[1]:
+    # Fallback replays only: the listener reads the broker's own figure.
+    if (positions is None and held and window[0] and window[1] and when is not None
+            and window[0] <= when <= window[1]):
         # Filled while the seed's positions were being read: maybe inside the
         # seeded figure, maybe not — unknown rather than counted 0 or 2 times.
         entries[symbol] = {"unknown": True, "as_of": when.isoformat(),
                            "seeded_at": held["seeded_at"], "seed_from": held["seed_from"]}
         return None
     as_of = _instant(held.get("as_of")) if held else None
-    if as_of is not None and when is not None and when < as_of:
-        return None  # the book is ahead of this event: already in the figure
+    if positions is None and as_of is not None and when is not None and when < as_of:
+        # Fallback replay: the book is ahead of this event (already in the
+        # figure). The listener instead reads the broker's position below —
+        # the truth whatever the book's age; a sell keeps the average.
+        return None
     current = None
     read_at = None
     if positions is not None:
@@ -703,6 +711,7 @@ def deliver(
     broker_now: Callable[[], datetime | None] | None = None,
     snapshot_at: datetime | None = None,
     snapshot_from: datetime | None = None,
+    complete: bool = True,
 ) -> int:
     """Handle each new event once, in order, through a persistent outbox
     (T3); returns the messages sent.
@@ -792,12 +801,14 @@ def deliver(
                 # Rows booked after the snapshot are newer than it: kept.
                 book.save({sym: row for sym, row in book.load().items() if _newer(row, snapshot_at)}, applied)
                 book.seed(held, snapshot_at or _broker_time(broker_now), snapshot_from)  # the broker's figure
-        if reconciled_at is not None and not rebuild_failed:
+        # An incomplete batch (a fill's order unreadable) neither closes the
+        # window nor aligns: the next reconcile replays it with the book intact.
+        if reconciled_at is not None and not rebuild_failed and complete:
             store.mark_reconciled(reconciled_at)
             store.prune(reconciled_at, SENT_KEEP)
         if first_run:
             store.mark_initialized()
-        elif reconcile_positions is not None and not rebuild_book:
+        elif reconcile_positions is not None and not rebuild_book and complete:
             _align_book(book, reconcile_positions, snapshot_at)
     return sent
 
@@ -1021,14 +1032,16 @@ def reconcile(broker: ReadOnlyBroker, *, state_dir: str | Path, send: Sender | N
     events = [event for event in events_from_orders(broker.orders_since(now - ORDER_LOOKBACK))
               if not (event.event == "new" and event.order.status == "filled"
                       and event.at < now - FILL_LOOKBACK)]
-    events += events_from_fills(broker.fills_since(now - FILL_LOOKBACK), broker.order)
+    skipped: list[str] = []
+    events += events_from_fills(broker.fills_since(now - FILL_LOOKBACK), broker.order, skipped)
     events.sort(key=lambda event: event.at)  # one timeline: book changes in the order they happened
     # A hole longer than the fill window may have hidden exits: this batch's
     # P&L is not guessed, and the book is rebuilt from today's positions.
     hole = last is not None and now - last > FILL_LOOKBACK
     return deliver(events, state_dir=state_dir, send=send, reconcile_positions=positions_snapshot,
                    ledger_dir=ledger_dir, rebuild_book=hole, reconciled_at=now,
-                   broker_now=clock, snapshot_at=snapshot_at, snapshot_from=snapshot_from)
+                   broker_now=clock, snapshot_at=snapshot_at, snapshot_from=snapshot_from,
+                   complete=not skipped)
 
 
 def daily_report(broker: ReadOnlyBroker) -> str:
