@@ -734,9 +734,23 @@ def test_a_message_that_never_sends_is_dropped_after_three_tries(tmp_path, caplo
             self.sent.append((title, message))
 
     send, broker = Poison(), Broker(orders=[first, second])
-    for _ in range(2):
+    for _ in range(tn.MAX_SEND_FAILURES - 1):
         tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)
     assert send.sent == []  # still retried in order
     tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)
     assert [m.split(" @")[0] for _, m in send.sent] == ["📝 下单 AMD 买入 5 股"]
-    assert "dropped after 3 failed sends" in caplog.text
+    assert f"dropped after {tn.MAX_SEND_FAILURES} failed sends" in caplog.text
+
+
+@pytest.mark.unit
+def test_a_dropped_fill_message_keeps_its_book_change(tmp_path, monkeypatch):
+    monkeypatch.setattr(tn, "MAX_SEND_FAILURES", 1)
+    tn.SentStore(tmp_path).mark_initialized()
+    tn.Entries(tmp_path).save({"MU": {"avg": 800.0, "qty": 5.0}})
+    stop = order("L-stop", "leg-a", side="sell", type_="stop", status="filled", filled_qty=5, avg=849.0,
+                 limit=None, stop=850.0)
+    tn.deliver([tn.event_from_update({"event": "fill", "order": stop})], state_dir=tmp_path, send=Sender(fail=1))
+    assert book(tmp_path) == {}  # the exit happened: MU is out of the book though its message was dropped
+    reentry = order("E2", "2026-11-04-us-MU-entry", status="filled", filled_qty=5, avg=950.0, legs=())
+    tn.deliver([tn.event_from_update({"event": "fill", "order": reentry})], state_dir=tmp_path, send=Sender())
+    assert book(tmp_path) == {"MU": {"avg": 950.0, "qty": 5.0}}  # not averaged with the stale 800

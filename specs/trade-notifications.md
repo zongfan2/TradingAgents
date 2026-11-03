@@ -46,9 +46,11 @@ count an in-flight or partial fill twice) — and only after a complete
 batch.
 Seeded on the first run from open positions; unknown → the message omits
 P&L rather than guess. A failed send stops the batch (no alignment), so an
-exit is never reported before its entry is booked — up to 3 failed sends of
-one message; then it is dropped with an error log, so a message that never
-goes through cannot hold back every later one.
+exit is never reported before its entry is booked — up to 10 failed sends
+of one message (tries come from the listener and every reconcile, about two
+hours of Lark outage); then the *message* is dropped with an error log — its
+book change is kept, the trade happened — so a message that never goes
+through cannot hold back every later one.
 
 A placement (`new`) is never sent after a later event of the same order was
 already reported (it would arrive out of order), and a rejected order has

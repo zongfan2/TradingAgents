@@ -44,8 +44,9 @@ DAILY_REPORT_AFTER = time(16, 15)
 FILL_LOOKBACK = timedelta(days=3)
 ORDER_LOOKBACK = timedelta(days=30)
 #: Failed sends of one message before it is dropped (logged) so it never
-#: blocks the later ones.
-MAX_SEND_FAILURES = 3
+#: blocks the later ones; tries come from the listener and every reconcile
+#: (~4-5 an hour), so this rides out a Lark outage of about two hours.
+MAX_SEND_FAILURES = 10
 #: Order lifecycle events that are reported (T2); the rest are noise.
 TERMINAL_EVENTS = ("canceled", "expired", "rejected")
 _EVENT_LABEL = {"canceled": "⚠️ 撤单", "expired": "⚠️ 过期", "rejected": "⚠️ 拒单"}
@@ -648,18 +649,20 @@ def deliver(
                 except Exception as exc:  # never the URL: LarkError text is scrubbed
                     reason = exc if exc.__class__.__name__ == "LarkError" else type(exc).__name__
                     failures = store.fail(event.key)
-                    entries = book.load()  # drop the unsent fill's book change
                     if failures < MAX_SEND_FAILURES:
+                        entries = book.load()  # undo the unsent fill's book change: it is retried
                         logger.warning("trade notification %s not sent (%s, attempt %d); the next "
                                        "reconcile resumes there", event.key, reason, failures)
                         stopped = True
                         break
                     # A message that never goes through must not hold back
-                    # every later one: give up on it, loudly, and go on.
+                    # every later one: give up on the *message*, loudly — the
+                    # trade happened, so its book change is kept.
                     logger.error("trade notification %s dropped after %d failed sends (%s)",
                                   event.key, failures, reason)
                     store.record(event.key, sent=False)
                     seen.add(event.key)
+                    book.save(entries)
                     continue
                 sent += 1
             store.record(event.key, sent=not history)
