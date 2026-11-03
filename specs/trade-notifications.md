@@ -144,7 +144,14 @@ event time is only a lower bound; a seed is stamped with the broker clock
 after its read and remembers the clock before it: a fill inside that read
 window may or may not be in the seeded figure, so it makes the symbol's
 cost basis unknown), never the host's (WSL drifts after sleep): when the
-broker clock cannot be read, the reconcile is skipped and retried. A fallback event
+broker clock cannot be read, the reconcile is skipped and retried. A
+listener position read is a fresh seed in the same sense (`seeded_at` = the
+broker clock after the read, `seed_from` = the event time): an order placed
+whose execution started before it, or filled inside that window, makes the
+cost basis unknown when the fallback replays it. "Started" is the order's
+first execution from the fill activities (a bracket leg is *placed* with
+its entry but executes much later, so its exit keeps its P&L); the
+placement time only when no execution time is known. A fallback event
 older than its symbol's `as_of` is already reflected in the row (the
 listener moved the book ahead while this one was missed): it changes
 nothing, and its exit carries no P&L. A filled order's placement older than the fill window is not

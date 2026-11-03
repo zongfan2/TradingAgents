@@ -161,6 +161,9 @@ class TradeEvent:
 
     event: str                 # new | fill | canceled | expired | rejected
     order: OrderView           # the order's state; fills report its totals
+    #: The order's first execution (fill activities), when known: whether a
+    #: fill straddles a seed is decided by it, not by the placement time.
+    first_fill: datetime | None = None
 
     @property
     def time(self) -> datetime | None:
@@ -231,8 +234,14 @@ def events_from_fills(activities: Iterable[Any], get_order: Callable[[str], Any]
     in fill-time order. An order the broker cannot return is skipped (the
     next reconcile retries)."""
     events: list[TradeEvent] = []
-    for activity in activities:
-        data = activity if isinstance(activity, dict) else {}
+    activities = [a for a in activities if isinstance(a, dict)]
+    first: dict[str, datetime] = {}
+    for data in activities:
+        stamp = _instant(data.get("transaction_time"))
+        oid = str(data.get("order_id") or "")
+        if oid and stamp is not None and (oid not in first or stamp < first[oid]):
+            first[oid] = stamp
+    for data in activities:
         if _text(data.get("order_status")) != "filled" or not data.get("order_id"):
             continue
         try:
@@ -241,7 +250,7 @@ def events_from_fills(activities: Iterable[Any], get_order: Callable[[str], Any]
             logger.warning("order of a fill not readable: %s", type(exc).__name__)
             continue
         if order.id and _reportable("fill", order):
-            events.append(TradeEvent("fill", order))
+            events.append(TradeEvent("fill", order, first.get(order.id)))
     return events
 
 
@@ -451,14 +460,16 @@ def _position_row(positions: Iterable[Any], symbol: str) -> dict[str, float] | N
     return None
 
 
-def _placed_before_seed(order: OrderView, seeded_at: object) -> bool:
-    """True for an order placed before the row's seed snapshot (or with no
-    known placement time): its fills may straddle the seed."""
+def _straddles_seed(event: TradeEvent, seeded_at: object) -> bool:
+    """Whether an order's fills may straddle the row's seed: it started
+    executing before the seed. Its first execution decides when known (a
+    bracket leg is *placed* with its entry, long before it fills); else the
+    placement time does (unknown → assume it may)."""
     seeded = _instant(seeded_at) if seeded_at else None
     if seeded is None:
         return False
-    submitted = order.time_of("submitted")
-    return submitted is None or submitted < seeded
+    started = event.first_fill or event.order.time_of("submitted")
+    return started is None or started < seeded
 
 
 def _apply_fill(
@@ -517,6 +528,14 @@ def _apply_fill(
                 out["seed_from"] = seed_from
         return out
 
+    def from_broker(figure: dict[str, Any]) -> dict[str, Any]:
+        """A row from a listener position read is a fresh seed: an order
+        placed before the read may straddle it (partly inside the figure),
+        and a fill between the event and the read may or may not be in it."""
+        at = read_at or datetime.now(timezone.utc)
+        return {**figure, "as_of": at.isoformat(), "seeded_at": at.isoformat(),
+                "seed_from": (when or at).isoformat()}
+
 
 
     if (held or {}).get("unknown") and current is None:
@@ -527,9 +546,9 @@ def _apply_fill(
         return None
     if order.side == "buy":
         if current is not None:
-            entries[symbol] = row(current, read_at)
+            entries[symbol] = from_broker(current)
         elif order.filled_avg_price and order.filled_qty:
-            if _placed_before_seed(order, stamp):
+            if _straddles_seed(event, stamp):
                 # Placed before the seed snapshot but filled after it: some of
                 # its shares may be in the seeded row — averaging in could
                 # count them twice.
@@ -547,8 +566,8 @@ def _apply_fill(
         if current is None:
             entries.pop(symbol, None)
         else:
-            entries[symbol] = row({"avg": avg or current["avg"], "qty": current["qty"]}, read_at)
-    elif held and not held.get("unknown") and _placed_before_seed(order, stamp):
+            entries[symbol] = from_broker({"avg": avg or current["avg"], "qty": current["qty"]})
+    elif held and not held.get("unknown") and _straddles_seed(event, stamp):
         # A leg placed before the seed snapshot may have partly filled before
         # it — the seed already excludes that slice: subtracting the order's
         # total would count it twice.

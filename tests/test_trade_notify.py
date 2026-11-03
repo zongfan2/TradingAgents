@@ -1002,3 +1002,44 @@ def test_a_failing_broker_clock_skips_the_reconcile(tmp_path, caplog):
     send = Sender()
     tn.run_hourly(state_dir=tmp_path, send=send, now=NOW, broker_factory=lambda: NoClock())
     assert not tn.SentStore(tmp_path).initialized() and "reconcile skipped" in caplog.text
+
+
+@pytest.mark.unit
+def test_an_order_straddling_a_listener_read_never_double_counts(tmp_path):
+    """MU 5 @800; add A1 (5 @900) 4 filled when the listener reads 9 @844.44; A1's final fill is missed."""
+    from datetime import timedelta
+
+    tn.SentStore(tmp_path).mark_initialized()
+    tn.Entries(tmp_path).save({"MU": {"avg": 800.0, "qty": 5.0}})
+    t = datetime.now(timezone.utc) - timedelta(minutes=10)
+    other = at(order("B1", "2026-11-03-us-MU-entry", status="filled", filled_qty=0.0001, avg=844.44, legs=()),
+               submitted=(t - timedelta(minutes=1)).isoformat(), filled=t.isoformat())
+    tn.deliver([tn.event_from_update({"event": "fill", "order": other})], state_dir=tmp_path, send=Sender(),
+               positions=lambda: [{"symbol": "MU", "avg_entry_price": "844.44", "qty": "9"}],
+               broker_now=lambda: t + timedelta(seconds=1))  # listener read: 9 @844.44 incl. 4 of A1
+    a1 = at(order("A1", "2026-11-03-us-MU-entry", status="filled", filled_qty=5, avg=900.0, legs=()),
+            submitted=(t - timedelta(minutes=5)).isoformat(), filled=(t + timedelta(minutes=2)).isoformat())
+    tn.deliver([tn.event_from_update({"event": "fill", "order": a1})], state_dir=tmp_path, send=Sender())
+    assert book(tmp_path) == {"MU": "unknown"}  # not 14 shares
+
+
+@pytest.mark.unit
+def test_a_bracket_exit_replayed_after_a_listener_booked_entry_keeps_its_pnl(tmp_path):
+    """The leg was placed with the entry (before the read) but first executes long after it."""
+    from datetime import timedelta
+
+    tn.SentStore(tmp_path).mark_initialized()
+    t = datetime.now(timezone.utc) - timedelta(hours=3)
+    fill = at(entry("filled", filled_qty=5, avg=893.92), filled=t.isoformat())
+    tn.deliver([tn.event_from_update({"event": "fill", "order": fill})], state_dir=tmp_path, send=Sender(),
+               positions=lambda: [{"symbol": "MU", "avg_entry_price": "893.92", "qty": "5"}],
+               broker_now=lambda: t + timedelta(seconds=1))
+    stop_time = t + timedelta(hours=2)
+    stop = at(order("L-stop", "leg-a", side="sell", type_="stop", status="filled", filled_qty=5, avg=849.55,
+                    limit=None, stop=850.0), submitted=(t - timedelta(seconds=5)).isoformat(),
+              filled=stop_time.isoformat())
+    broker = Broker(positions=[], fills=[{"order_id": "L-stop", "order_status": "filled",
+                                          "transaction_time": stop_time.isoformat()}], by_id={"L-stop": stop})
+    send = Sender()
+    tn.reconcile(broker, state_dir=tmp_path, send=send, now=datetime.now(timezone.utc))  # listener missed it
+    assert "盈亏 −$221.85" in send.sent[-1][1]
