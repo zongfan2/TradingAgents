@@ -469,15 +469,30 @@ def deliver(
     *,
     state_dir: str | Path,
     send: Sender | None,
-    record_only: bool = False,
     positions: Callable[[], list[Any]] | None = None,
+    reconcile_positions: Callable[[], list[Any]] | None = None,
 ) -> int:
-    """Send each not-yet-delivered event once (T3). ``record_only`` (the
-    first run) records the history without sending. Returns messages sent.
-    A failed send is logged and left unrecorded for the next reconcile."""
+    """Send each not-yet-delivered event once, in order (T3); returns the
+    messages sent.
+
+    ``positions`` (the listener, at the moment of the fill) lets a fill take
+    its cost basis from the broker's position. ``reconcile_positions`` (the
+    fallback, events possibly hours old) never does — the position *now* is
+    not the position *then* — fills use the orders' own totals, and after
+    the batch the book is only aligned with today's positions (missing
+    symbols added, closed ones dropped). It also decides the first run under
+    the lock: no ``initialized`` marker → the book is seeded from today's
+    positions and the history recorded without sending.
+
+    A failed send stops the batch (logged, unrecorded): the next reconcile
+    resumes there, so an exit is never measured before its entry is booked.
+    """
     store, book = SentStore(state_dir), Entries(state_dir)
     sent = 0
     with store.exclusive():
+        first_run = reconcile_positions is not None and not store.initialized()
+        if first_run:
+            book.seed(reconcile_positions())
         seen = store.keys()
         entries = book.load()
         for event in events:
@@ -485,23 +500,49 @@ def deliver(
                 continue
             # First run: the book was seeded from the broker's positions —
             # replaying history into it would count those fills twice.
-            entry_avg = None if record_only else _apply_fill(entries, event, positions)
-            if not record_only:
+            entry_avg = None if first_run else _apply_fill(entries, event, positions)
+            if not first_run:
                 if send is None:
-                    return sent
+                    break
                 plan = plan_line(state_dir, event.order.client_order_id) if event.event == "new" else None
                 try:
                     send(TITLE, format_event(event, entry_avg=entry_avg, plan=plan))
                 except Exception as exc:  # never the URL: LarkError text is scrubbed
-                    logger.warning("trade notification %s not sent (%s); the next reconcile retries",
+                    logger.warning("trade notification %s not sent (%s); the next reconcile resumes there",
                                    event.key, exc if exc.__class__.__name__ == "LarkError" else type(exc).__name__)
-                    entries = book.load()  # do not keep the unsent fill's book change
-                    continue
+                    entries = book.load()  # drop the unsent fill's book change
+                    break
                 sent += 1
-            store.record(event.key, sent=not record_only)
+            store.record(event.key, sent=not first_run)
             seen.add(event.key)
             book.save(entries)
+        if first_run:
+            store.mark_initialized()
+        elif reconcile_positions is not None:
+            _align_book(book, reconcile_positions)
     return sent
+
+
+def _align_book(book: Entries, positions: Callable[[], list[Any]]) -> None:
+    """After a fallback batch: add open positions the book lacks, drop
+    symbols the broker no longer holds; never rewrite a known average."""
+    try:
+        held = list(positions())
+    except Exception as exc:
+        logger.warning("positions unavailable to align the entry book: %s", type(exc).__name__)
+        return
+    entries = book.load()
+    current = {}
+    for position in held:
+        data = position.model_dump() if hasattr(position, "model_dump") else dict(position or {})
+        symbol = str(data.get("symbol") or "").upper()
+        row = _position_row([data], symbol) if symbol else None
+        if row:
+            current[symbol] = row
+    aligned = {symbol: {"avg": entries[symbol]["avg"], "qty": row["qty"]} if symbol in entries else row
+               for symbol, row in current.items()}
+    if aligned != entries:
+        book.save(aligned)
 
 
 # ---------------------------------------------------------------------------
@@ -595,19 +636,12 @@ def alpaca_keys() -> tuple[str, str]:
 def reconcile(broker: ReadOnlyBroker, *, state_dir: str | Path, send: Sender | None,
               now: datetime) -> int:
     """T5: report anything the listener missed — placements and cancels by
-    submission time, fills by fill time. The first run records history
-    without sending and marks the store initialized, even when empty."""
-    store = SentStore(state_dir)
-    first_run = not store.initialized()
-    if first_run:
-        Entries(state_dir).seed(broker.positions())
+    submission time, fills by fill time. The first run (decided under the
+    store lock) records history without sending and marks the store
+    initialized, even when empty."""
     events = events_from_orders(broker.orders_since(now - ORDER_LOOKBACK))
     events += events_from_fills(broker.fills_since(now - FILL_LOOKBACK), broker.order)
-    sent = deliver(events, state_dir=state_dir, send=send, record_only=first_run,
-                   positions=broker.positions)
-    if first_run:
-        store.mark_initialized()
-    return sent
+    return deliver(events, state_dir=state_dir, send=send, reconcile_positions=broker.positions)
 
 
 def daily_report(broker: ReadOnlyBroker) -> str:

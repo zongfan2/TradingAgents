@@ -36,9 +36,14 @@ error text, never logged).
 | `partial_fill`, `replaced`, `pending_*`, `done_for_day`… | not reported — orders fill in several executions (measured 10-26..11-02: AAPL 4, SNDK 2, MU 2), the final `fill` reports the totals |
 
 Exit P&L uses the entry average recorded when the entry filled — or ended
-partly filled — (`trade_notify/entries.json`: the broker's position after
-the fill, else the order's totals; seeded on the first run from open
-positions); unknown → the message omits P&L rather than guess.
+partly filled — (`trade_notify/entries.json`). The listener, at the moment
+of the fill, takes it from the broker's position (adds average in exactly);
+the fallback, replaying events that may be hours old, uses the orders' own
+totals (today's position is not the position then) and afterwards only
+aligns the book with today's positions (adds missing symbols, drops closed
+ones, never rewrites a known average). Seeded on the first run from open
+positions; unknown → the message omits P&L rather than guess. A failed send
+stops the batch, so an exit is never reported before its entry is booked.
 
 ### T3 — Exactly-once delivery
 
@@ -49,7 +54,8 @@ an answer is treated as not sent and retried, so in that one ambiguous case
 a message can arrive twice (a duplicate is preferred over a missed trade).
 Check-send-record runs under an exclusive file lock, so the listener and
 the fallback (T5) never both send one event; a failed send is not
-recorded (the next fallback retries it). On the very first run (no
+recorded (the next fallback resumes there). On the very first run —
+decided under the store lock, so a concurrent listener and watchdog agree — (no
 `trade_notify/initialized` marker) the current broker history is recorded
 **without sending** — old events are never replayed into the new group —
 and the marker is written even when that history is empty.

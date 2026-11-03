@@ -112,7 +112,6 @@ def test_snapshot_events_match_the_stream_keys():
     assert [(e.key, e.order.filled_qty) for e in events] == [("E1:fill", 5.0), ("L-tgt:fill", 5.0)]
 
 
-@pytest.mark.unit
 # ---------------------------------------------------------------------------
 # T3 — exactly once; T2 — messages and P&L
 # ---------------------------------------------------------------------------
@@ -383,3 +382,37 @@ def test_watchdog_runs_the_hourly_trade_share_only_with_the_webhook(tmp_path, mo
                               "TRADINGAGENTS_LARK_TRADES_WEBHOOK_URL": "https://open.feishu.cn/hook/x"})
     orchestrator._hourly_trade_notifications(config, NOW)
     assert len(calls) == 1 and calls[0]["now"] == NOW
+
+
+@pytest.mark.unit
+def test_fallback_never_takes_a_later_positions_cost_basis(tmp_path):
+    """Listener down while MU entered at 893.92, stopped out, re-entered at 950."""
+    tn.SentStore(tmp_path).mark_initialized()
+    e1 = entry("filled", filled_qty=5, avg=893.92, stop_status="filled", stop_filled=5, stop_avg=849.55,
+               tgt_status="canceled")
+    stop_leg = next(leg for leg in e1["legs"] if leg["id"] == "L-stop")
+    e2 = {**order("E2", "2026-11-03-us-MU-entry", status="filled", filled_qty=5, avg=950.0, legs=())}
+    broker = Broker(orders=[e1, e2], positions=[{"symbol": "MU", "avg_entry_price": "950", "qty": "5"}],
+                    fills=[{"order_id": "E1", "order_status": "filled"}, {"order_id": "L-stop", "order_status": "filled"},
+                           {"order_id": "E2", "order_status": "filled"}],
+                    by_id={"E1": e1, "L-stop": stop_leg, "E2": e2})
+    send = Sender()
+    tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)
+    exit_msg = next(m for _, m in send.sent if m.startswith("🔚"))
+    assert "成本 893.92" in exit_msg and "−$221.85" in exit_msg  # not against today's 950
+    assert tn.Entries(tmp_path).load() == {"MU": {"avg": 950.0, "qty": 5.0}}
+
+
+@pytest.mark.unit
+def test_a_failed_send_stops_the_batch_so_order_is_kept(tmp_path):
+    tn.SentStore(tmp_path).mark_initialized()
+    e1 = entry("filled", filled_qty=5, avg=893.92, stop_status="filled", stop_filled=5, stop_avg=849.55,
+               tgt_status="canceled")
+    stop_leg = next(leg for leg in e1["legs"] if leg["id"] == "L-stop")
+    broker = Broker(orders=[], fills=[{"order_id": "E1", "order_status": "filled"},
+                                      {"order_id": "L-stop", "order_status": "filled"}],
+                    by_id={"E1": e1, "L-stop": stop_leg})
+    send = Sender(fail=1)
+    assert tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW) == 0  # entry failed: exit not sent yet
+    assert tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW) == 2
+    assert "成本 893.92" in send.sent[1][1]
