@@ -28,7 +28,8 @@ def entry(status="new", **kw):
 
 def book(state_dir):
     """The entry book's cost basis and size (bookkeeping fields aside)."""
-    return {sym: {"avg": row["avg"], "qty": row["qty"]} for sym, row in tn.Entries(state_dir).load().items()}
+    return {sym: "unknown" if row.get("unknown") else {"avg": row["avg"], "qty": row["qty"]}
+            for sym, row in tn.Entries(state_dir).load().items()}
 
 
 class Sender:
@@ -609,4 +610,43 @@ def test_a_fill_of_an_order_placed_before_the_seed_never_double_counts(tmp_path)
     filled = {**add, "status": "filled", "filled_qty": "5"}
     broker.orders, broker.fills, broker.by_id = [filled], [{"order_id": "A1", "order_status": "filled"}], {"A1": filled}
     tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)
-    assert book(tmp_path) == {}  # unknown rather than (844.44*9 + 900*5)/14
+    assert book(tmp_path) == {"MU": "unknown"}  # rather than (844.44*9 + 900*5)/14
+
+
+@pytest.mark.unit
+def test_a_seeded_row_stays_seeded_through_an_average_in(tmp_path):
+    from datetime import timedelta
+
+    seed_time = NOW - timedelta(hours=2)
+    tn.SentStore(tmp_path).mark_initialized()
+    tn.Entries(tmp_path).save({"MU": {"avg": 844.44, "qty": 9.0, "seeded_at": seed_time.isoformat()}})
+    b = at(order("B1", "2026-10-30-us-MU-entry", status="filled", filled_qty=2, avg=910.0, legs=()),
+           submitted=(seed_time + timedelta(minutes=5)).isoformat())   # placed after the seed: averages in
+    a1 = at(order("A1", "2026-10-29-us-MU-entry", status="filled", filled_qty=5, avg=900.0, legs=()),
+            submitted=(seed_time - timedelta(hours=1)).isoformat())    # placed before: maybe inside the seed
+    broker = Broker(fills=[{"order_id": "B1", "order_status": "filled"}, {"order_id": "A1", "order_status": "filled"}],
+                    by_id={"B1": b, "A1": a1}, positions=[{"symbol": "MU", "avg_entry_price": "1", "qty": "1"}])
+    tn.reconcile(broker, state_dir=tmp_path, send=Sender(), now=NOW)
+    assert book(tmp_path) == {"MU": "unknown"}  # stays unknown; B1 never restarts it as the whole position
+    stop = order("L-stop", "leg-a", side="sell", type_="stop", status="filled", filled_qty=16, avg=849.0,
+                 limit=None, stop=850.0)
+    broker.fills, broker.by_id, broker._positions = [{"order_id": "L-stop", "order_status": "filled"}], \
+        {"L-stop": stop}, []
+    send = Sender()
+    tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)
+    assert "盈亏" not in send.sent[-1][1] and book(tmp_path) == {}  # no guessed P&L; closed position dropped
+
+
+@pytest.mark.unit
+def test_events_after_the_first_start_are_sent_even_by_a_late_first_run(tmp_path):
+    from datetime import timedelta
+
+    store = tn.SentStore(tmp_path)
+    store.first_started(NOW - timedelta(hours=1))  # the listener started; its startup reconcile failed
+    old = at(order("E0", "2026-10-20-us-AMD-entry", status="new", symbol="AMD", legs=()),
+             submitted=(NOW - timedelta(days=3)).isoformat())
+    missed = at(order("E1", "2026-10-30-us-MU-entry", status="new", legs=()),
+                submitted=(NOW - timedelta(minutes=30)).isoformat())   # during a stream reconnect
+    send = Sender()
+    tn.reconcile(Broker(orders=[old, missed]), state_dir=tmp_path, send=send, now=NOW)  # still the first run
+    assert [m.split(" @")[0] for _, m in send.sent] == ["📝 下单 MU 买入 5 股"]  # history recorded, MU sent

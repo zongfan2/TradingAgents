@@ -254,6 +254,19 @@ class SentStore:
     def mark_reconciled(self, now: datetime) -> None:
         atomic_write(self.dir / "last_reconcile", now.astimezone(timezone.utc).isoformat() + "\n")
 
+    def first_started(self, now: datetime) -> datetime:
+        """When trade notifications first ran here (written once). The first
+        run records only events before it, so a listener that started
+        before the first successful reconcile never has its era swallowed."""
+        path = self.dir / "first_started"
+        stamp = None
+        with contextlib.suppress(OSError):
+            stamp = _instant(path.read_text(encoding="utf-8").strip())
+        if stamp is None:
+            stamp = now.astimezone(timezone.utc)
+            atomic_write(path, stamp.isoformat() + "\n")
+        return stamp
+
     def initialized(self) -> bool:
         """False until the first reconcile recorded the history (T3)."""
         return (self.dir / "initialized").exists()
@@ -311,6 +324,9 @@ class Entries:
         out: dict[str, dict[str, Any]] = {}
         for symbol, row in (data.items() if isinstance(data, dict) else ()):
             row = row if isinstance(row, dict) else {}
+            if row.get("unknown") is True:  # held, but no trustworthy cost basis
+                out[str(symbol)] = {"unknown": True}
+                continue
             avg, qty = _num(row.get("avg")), _num(row.get("qty"))
             if avg is not None and qty is not None and avg > 0 and qty > 0:
                 out[str(symbol)] = {"avg": avg, "qty": qty}
@@ -370,9 +386,21 @@ def _apply_fill(
         except Exception as exc:  # P&L is a courtesy; never block the message
             logger.warning("positions unavailable for %s: %s", symbol, type(exc).__name__)
             positions = None
+    stamp = (entries.get(symbol) or {}).get("seeded_at")
+    if (entries.get(symbol) or {}).get("unknown") and current is None:
+        # Unknown stays unknown until the broker's own figure replaces it
+        # (listener) or the position is gone (sell to zero, alignment).
+        if order.side == "sell" and positions is not None:
+            entries.pop(symbol, None)
+        return None
+
+    def keep_stamp(row: dict[str, Any]) -> dict[str, Any]:
+        # A seeded row stays seeded: a pre-seed order's fill may still come.
+        return {**row, "seeded_at": stamp} if stamp else row
+
     if order.side == "buy":
         if current is not None:
-            entries[symbol] = current
+            entries[symbol] = keep_stamp(current)
         elif order.filled_avg_price and order.filled_qty:
             held = entries.get(symbol)
             seeded = _instant(held.get("seeded_at")) if held else None
@@ -380,11 +408,12 @@ def _apply_fill(
             if seeded is not None and (submitted is None or submitted < seeded):
                 # Placed before the seed snapshot: some of its shares may be in
                 # the seeded row already — averaging in could count them twice.
-                entries.pop(symbol, None)  # cost basis unknown: no P&L, never a wrong one
+                entries[symbol] = {"unknown": True}  # no P&L, never a wrong one
             elif held:  # an add: average in
                 total = held["qty"] + order.filled_qty
-                entries[symbol] = {"avg": (held["avg"] * held["qty"] + order.filled_avg_price * order.filled_qty)
-                                   / total, "qty": total}
+                entries[symbol] = keep_stamp({"avg": (held["avg"] * held["qty"]
+                                                      + order.filled_avg_price * order.filled_qty) / total,
+                                              "qty": total})
             else:
                 entries[symbol] = {"avg": order.filled_avg_price, "qty": order.filled_qty}
         return None
@@ -394,11 +423,11 @@ def _apply_fill(
         if current is None:
             entries.pop(symbol, None)
         else:
-            entries[symbol] = {"avg": avg or current["avg"], "qty": current["qty"]}
+            entries[symbol] = keep_stamp({"avg": avg or current["avg"], "qty": current["qty"]})
     elif held:
         remaining = held["qty"] - (order.filled_qty or 0)
         if remaining > 1e-9:
-            entries[symbol] = {"avg": held["avg"], "qty": remaining}
+            entries[symbol] = keep_stamp({"avg": held["avg"], "qty": remaining})
         else:
             entries.pop(symbol, None)
     return avg
@@ -543,6 +572,7 @@ def deliver(
     sent, stopped = 0, False
     with store.exclusive():
         first_run = reconcile_positions is not None and not store.initialized()
+        cutoff = store.first_started(reconciled_at or datetime.now(timezone.utc)) if first_run else None
         if first_run:
             book.seed(reconcile_positions())
         seen = store.keys()
@@ -556,12 +586,13 @@ def deliver(
                 store.record(event.key, sent=False)
                 seen.add(event.key)
                 continue
-            # First run: the book was seeded from the broker's positions —
-            # replaying history into it would count those fills twice.
-            entry_avg = None if first_run else _apply_fill(entries, event, positions)
+            # First run: history before the first start is recorded, not sent
+            # (and not booked — the book was seeded from today's positions).
+            history = first_run and cutoff is not None and event.at < cutoff
+            entry_avg = None if history else _apply_fill(entries, event, positions)
             if rebuild_book:
                 entry_avg = None  # the book may miss exits from the hole: no guessed P&L
-            if not first_run:
+            if not history:
                 if send is None:
                     stopped = True
                     break
@@ -576,7 +607,7 @@ def deliver(
                     stopped = True
                     break
                 sent += 1
-            store.record(event.key, sent=not first_run)
+            store.record(event.key, sent=not history)
             seen.add(event.key)
             book.save(entries)
         if rebuild_book and not first_run and reconcile_positions is not None and not stopped:

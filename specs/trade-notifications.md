@@ -63,9 +63,13 @@ Check-send-record runs under an exclusive file lock, so the listener and
 the fallback (T5) never both send one event; a failed send is not
 recorded (the next fallback resumes there). On the very first run —
 decided under the store lock, so a concurrent listener and watchdog agree — (no
-`trade_notify/initialized` marker) the current broker history is recorded
-**without sending** — old events are never replayed into the new group —
-and the marker is written even when that history is empty.
+`trade_notify/initialized` marker) the broker history **before the first
+start** (`trade_notify/first_started`, written once by whichever of the
+listener or a reconcile runs first) is recorded **without sending** — old
+events are never replayed into the new group — while later events are sent
+as usual (a listener whose startup reconcile failed loses nothing); the
+marker is written even when that history is empty. A seeded row keeps its
+`seeded_at` through every rewrite.
 
 ### T4 — Listener (`python -m pipeline.trade_monitor`)
 
@@ -106,8 +110,10 @@ current positions (read first: a failed read changes nothing and the hole
 is retried); the "last reconcile" time advances only on a complete batch.
 A seeded row (first run or rebuild) is stamped `seeded_at`: a later
 fallback fill of an order placed before that snapshot may already be inside
-it, so it makes the symbol's cost basis unknown (no P&L) instead of
-averaging in twice. A filled order's placement older than the fill window is not
+it, so it makes the symbol's cost basis **unknown** (no P&L) instead of
+averaging in twice. Unknown is a state, not a deletion: later buys do not
+restart the book as if they were the whole position; it ends when the
+listener reads the broker's own position or the position is closed. A filled order's placement older than the fill window is not
 announced (its fill is out of view, so it would read as a pending order).
 Both go through T3, so anything the listener missed arrives within an hour. The reconcile and the daily report fail
 independently. Best-effort:
