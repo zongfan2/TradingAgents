@@ -607,7 +607,10 @@ def test_a_fill_of_an_order_placed_before_the_seed_never_double_counts(tmp_path)
              submitted="2026-11-02T14:45:00Z")  # before the seed snapshot (taken at the wall clock)
     broker = Broker(orders=[add], positions=[{"symbol": "MU", "avg_entry_price": "844.44", "qty": "9"}])
     tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)  # first run: seeded 9 @ 844.44
-    filled = {**add, "status": "filled", "filled_qty": "5"}
+    from datetime import timedelta
+
+    after_seed = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()  # the seed used the wall clock
+    filled = {**add, "status": "filled", "filled_qty": "5", "filled_at": after_seed}
     broker.orders, broker.fills, broker.by_id = [filled], [{"order_id": "A1", "order_status": "filled"}], {"A1": filled}
     tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)
     assert book(tmp_path) == {"MU": "unknown"}  # rather than (844.44*9 + 900*5)/14
@@ -662,3 +665,25 @@ def test_listener_partial_exit_of_an_unknown_cost_basis(tmp_path):
                       positions=lambda: [{"symbol": "MU", "avg_entry_price": "850", "qty": "4"}])
     assert sent == 1 and "盈亏" not in send.sent[0][1]  # real time, no guessed P&L
     assert book(tmp_path) == {"MU": {"avg": 850.0, "qty": 4.0}}  # the broker's figure ends "unknown"
+
+
+@pytest.mark.unit
+def test_a_missed_fill_older_than_the_book_never_uses_a_later_cost_basis(tmp_path):
+    """Stop fill at T1 missed by the stream; the listener then booked re-entry E2 from the position (T2)."""
+    from datetime import timedelta
+
+    tn.SentStore(tmp_path).mark_initialized()
+    t1 = datetime.now(timezone.utc) - timedelta(minutes=10)
+    send = Sender()
+    e2 = at(order("E2", "2026-11-03-us-MU-entry", status="filled", filled_qty=5, avg=950.0, legs=()),
+            filled=(t1 + timedelta(minutes=5)).isoformat())
+    tn.deliver([tn.event_from_update({"event": "fill", "order": e2})], state_dir=tmp_path, send=send,
+               positions=lambda: [{"symbol": "MU", "avg_entry_price": "950", "qty": "5"}])  # listener, live
+    stop = at(order("L-stop", "leg-a", side="sell", type_="stop", status="filled", filled_qty=5, avg=849.55,
+                    limit=None, stop=850.0), filled=t1.isoformat())
+    broker = Broker(positions=[{"symbol": "MU", "avg_entry_price": "950", "qty": "5"}],
+                    fills=[{"order_id": "L-stop", "order_status": "filled"}], by_id={"L-stop": stop})
+    tn.reconcile(broker, state_dir=tmp_path, send=send, now=datetime.now(timezone.utc))
+    exit_msg = send.sent[-1][1]
+    assert exit_msg.startswith("🔚 止损平仓 MU") and "盈亏" not in exit_msg  # not measured against 950
+    assert book(tmp_path) == {"MU": {"avg": 950.0, "qty": 5.0}}  # the newer figure is untouched

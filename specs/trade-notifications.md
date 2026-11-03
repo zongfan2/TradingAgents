@@ -113,7 +113,13 @@ fallback fill of an order placed before that snapshot may already be inside
 it, so it makes the symbol's cost basis **unknown** (no P&L) instead of
 averaging in twice. Unknown is a state, not a deletion: later buys do not
 restart the book as if they were the whole position; it ends when the
-listener reads the broker's own position or the position is closed. A filled order's placement older than the fill window is not
+listener reads the broker's own position or the position is closed.
+
+Every book row carries `as_of` — the time its figure is valid for (an
+event's time; for a broker position read, the read time). A fallback event
+older than its symbol's `as_of` is already reflected in the row (the
+listener moved the book ahead while this one was missed): it changes
+nothing, and its exit carries no P&L. A filled order's placement older than the fill window is not
 announced (its fill is out of view, so it would read as a pending order).
 Both go through T3, so anything the listener missed arrives within an hour. The reconcile and the daily report fail
 independently. Best-effort:

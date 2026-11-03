@@ -135,6 +135,7 @@ def order_view(raw: Any) -> OrderView:
 
 
 _TIME_FIELDS = ("submitted", "filled", "canceled", "expired", "failed", "updated")
+_NO_TIME = datetime.min.replace(tzinfo=timezone.utc)
 
 
 def _instant(value: object) -> datetime | None:
@@ -155,11 +156,17 @@ class TradeEvent:
     order: OrderView           # the order's state; fills report its totals
 
     @property
+    def time(self) -> datetime | None:
+        """When it happened, None when the broker gave no time."""
+        at = self.at
+        return None if at == _NO_TIME else at
+
+    @property
     def at(self) -> datetime:
         """When it happened, for ordering a reconcile batch."""
         names = {"new": ("submitted",), "fill": ("filled", "updated"), "canceled": ("canceled", "updated"),
                  "expired": ("expired", "updated"), "rejected": ("failed", "updated")}.get(self.event, ("updated",))
-        return self.order.time_of(*names, "updated", "submitted") or datetime.min.replace(tzinfo=timezone.utc)
+        return self.order.time_of(*names, "updated", "submitted") or _NO_TIME
 
     @property
     def key(self) -> str:
@@ -326,12 +333,15 @@ class Entries:
             row = row if isinstance(row, dict) else {}
             if row.get("unknown") is True:  # held, but no trustworthy cost basis
                 out[str(symbol)] = {"unknown": True}
+                if _instant(row.get("as_of")) is not None:
+                    out[str(symbol)]["as_of"] = str(row["as_of"])
                 continue
             avg, qty = _num(row.get("avg")), _num(row.get("qty"))
             if avg is not None and qty is not None and avg > 0 and qty > 0:
                 out[str(symbol)] = {"avg": avg, "qty": qty}
-                if _instant(row.get("seeded_at")) is not None:
-                    out[str(symbol)]["seeded_at"] = str(row["seeded_at"])
+                for stamp in ("seeded_at", "as_of"):
+                    if _instant(row.get(stamp)) is not None:
+                        out[str(symbol)][stamp] = str(row[stamp])
         return out
 
     def save(self, entries: Mapping[str, Mapping[str, float]]) -> None:
@@ -349,8 +359,8 @@ class Entries:
             if symbol and symbol not in entries and avg and qty and qty > 0:
                 # seeded_at: a fill of an order placed before this snapshot may
                 # already be inside it (a partial) — see _apply_fill.
-                entries[symbol] = {"avg": avg, "qty": qty,
-                                   "seeded_at": datetime.now(timezone.utc).isoformat()}
+                seeded = datetime.now(timezone.utc).isoformat()
+                entries[symbol] = {"avg": avg, "qty": qty, "seeded_at": seeded, "as_of": seeded}
                 changed = True
         if changed:
             self.save(entries)
@@ -367,67 +377,80 @@ def _position_row(positions: Iterable[Any], symbol: str) -> dict[str, float] | N
 
 
 def _apply_fill(
-    entries: dict[str, dict[str, float]],
+    entries: dict[str, dict[str, Any]],
     event: TradeEvent,
     positions: Callable[[], list[Any]] | None,
 ) -> float | None:
     """Update the entry book for a fill — or an entry that ended partly
     filled — and return the entry average an exit is measured against (None
-    when unknown). The broker's position is the truth (adds average in
-    exactly); without it, the order's own totals."""
+    when unknown, never guessed).
+
+    Every row carries ``as_of``: the time its figure is valid for (an
+    event's time, or — for a broker position read — the read time). An event
+    older than its symbol's ``as_of`` is already reflected in the row (the
+    listener moved the book ahead while this one was missed), so it changes
+    nothing and its exit carries no P&L. The broker's position is the truth
+    (adds average in exactly); without it, the order's own totals."""
     order, symbol = event.order, event.order.symbol
     filled = (order.filled_qty or 0) > 0
     if not (event.event == "fill" or (event.event in TERMINAL_EVENTS and filled)):
         return None
+    when = event.time
+    held = entries.get(symbol)
+    as_of = _instant(held.get("as_of")) if held else None
+    if as_of is not None and when is not None and when < as_of:
+        return None  # the book is ahead of this event: already in the figure
     current = None
+    read_at = datetime.now(timezone.utc)
     if positions is not None:
         try:
             current = _position_row(positions(), symbol)
         except Exception as exc:  # P&L is a courtesy; never block the message
             logger.warning("positions unavailable for %s: %s", symbol, type(exc).__name__)
             positions = None
-    stamp = (entries.get(symbol) or {}).get("seeded_at")
-    if (entries.get(symbol) or {}).get("unknown") and current is None:
+    stamp = (held or {}).get("seeded_at")
+
+    def row(figure: dict[str, Any], valid_at: datetime | None) -> dict[str, Any]:
+        out = {**figure, "as_of": (valid_at or read_at).isoformat()}
+        if stamp:  # a seeded row stays seeded: a pre-seed order's fill may still come
+            out["seeded_at"] = stamp
+        return out
+
+    if (held or {}).get("unknown") and current is None:
         # Unknown stays unknown until the broker's own figure replaces it
         # (listener) or the position is gone (sell to zero, alignment).
         if order.side == "sell" and positions is not None:
             entries.pop(symbol, None)
         return None
-
-    def keep_stamp(row: dict[str, Any]) -> dict[str, Any]:
-        # A seeded row stays seeded: a pre-seed order's fill may still come.
-        return {**row, "seeded_at": stamp} if stamp else row
-
     if order.side == "buy":
         if current is not None:
-            entries[symbol] = keep_stamp(current)
+            entries[symbol] = row(current, read_at)
         elif order.filled_avg_price and order.filled_qty:
-            held = entries.get(symbol)
-            seeded = _instant(held.get("seeded_at")) if held else None
+            seeded = _instant(stamp) if stamp else None
             submitted = order.time_of("submitted")
             if seeded is not None and (submitted is None or submitted < seeded):
-                # Placed before the seed snapshot: some of its shares may be in
-                # the seeded row already — averaging in could count them twice.
-                entries[symbol] = {"unknown": True}  # no P&L, never a wrong one
-            elif held:  # an add: average in
+                # Placed before the seed snapshot but filled after it: some of
+                # its shares may be in the seeded row — averaging in could
+                # count them twice.
+                entries[symbol] = row({"unknown": True}, when)
+            elif held and not held.get("unknown"):  # an add: average in
                 total = held["qty"] + order.filled_qty
-                entries[symbol] = keep_stamp({"avg": (held["avg"] * held["qty"]
-                                                      + order.filled_avg_price * order.filled_qty) / total,
-                                              "qty": total})
+                entries[symbol] = row({"avg": (held["avg"] * held["qty"]
+                                               + order.filled_avg_price * order.filled_qty) / total,
+                                       "qty": total}, when)
             else:
-                entries[symbol] = {"avg": order.filled_avg_price, "qty": order.filled_qty}
+                entries[symbol] = row({"avg": order.filled_avg_price, "qty": order.filled_qty}, when)
         return None
-    held = entries.get(symbol)
     avg = held["avg"] if held and not held.get("unknown") else None  # unknown: no P&L
     if positions is not None:
         if current is None:
             entries.pop(symbol, None)
         else:
-            entries[symbol] = keep_stamp({"avg": avg or current["avg"], "qty": current["qty"]})
+            entries[symbol] = row({"avg": avg or current["avg"], "qty": current["qty"]}, read_at)
     elif held and not held.get("unknown"):
         remaining = held["qty"] - (order.filled_qty or 0)
         if remaining > 1e-9:
-            entries[symbol] = keep_stamp({"avg": held["avg"], "qty": remaining})
+            entries[symbol] = row({"avg": held["avg"], "qty": remaining}, when)
         else:
             entries.pop(symbol, None)
     return avg
