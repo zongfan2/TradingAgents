@@ -26,6 +26,11 @@ def entry(status="new", **kw):
     return order("E1", "2026-10-30-us-MU-entry", status=status, legs=legs, **kw)
 
 
+def book(state_dir):
+    """The entry book's cost basis and size (bookkeeping fields aside)."""
+    return {sym: {"avg": row["avg"], "qty": row["qty"]} for sym, row in tn.Entries(state_dir).load().items()}
+
+
 class Sender:
     def __init__(self, fail=0):
         self.sent, self.fail = [], fail
@@ -149,7 +154,7 @@ def test_stream_then_snapshot_sends_each_event_once_with_pnl(tmp_path):
     assert messages[1] == "✅ 成交 MU 买入 5 股 @ 均价 893.92（限价 940.00）"  # totals, not the last slice
     assert messages[2].startswith("🔚 止盈平仓 MU 卖出 5 股 @ 均价 980.50")
     assert "盈亏 +$432.90（+9.69%，成本 893.92）" in messages[2]
-    assert tn.Entries(tmp_path).load() == {}
+    assert book(tmp_path) == {}
 
 
 @pytest.mark.unit
@@ -169,7 +174,7 @@ def test_a_partly_filled_entry_that_expires_says_so_and_books_the_entry(tmp_path
     tn.deliver([tn.event_from_update({"event": "expired", "order": expired})], state_dir=tmp_path, send=send,
                positions=lambda: [{"symbol": "MU", "avg_entry_price": "893.92", "qty": "4"}])
     assert send.sent[0][1].splitlines()[0] == "⚠️ 过期 MU 买入 5 股 @ 限价 940.00（已成交 4 股，均价 893.92）"
-    assert tn.Entries(tmp_path).load() == {"MU": {"avg": 893.92, "qty": 4.0}}
+    assert book(tmp_path) == {"MU": {"avg": 893.92, "qty": 4.0}}
 
 
 @pytest.mark.unit
@@ -250,7 +255,7 @@ def test_first_reconcile_records_history_without_sending(tmp_path):
     broker = Broker(orders=[filled], positions=[{"symbol": "MU", "avg_entry_price": "893.92", "qty": "5"}],
                     fills=[{"order_id": "E1", "order_status": "filled"}], by_id={"E1": filled})
     assert tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW) == 0
-    assert send.sent == [] and tn.Entries(tmp_path).load() == {"MU": {"avg": 893.92, "qty": 5.0}}
+    assert send.sent == [] and book(tmp_path) == {"MU": {"avg": 893.92, "qty": 5.0}}
     broker.orders.append(order("E2", "2026-11-02-us-AMD-entry", status="new", symbol="AMD", legs=()))
     assert tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW) == 1
     assert send.sent[0][1].startswith("📝 下单 AMD")
@@ -400,7 +405,7 @@ def test_fallback_never_takes_a_later_positions_cost_basis(tmp_path):
     tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)
     exit_msg = next(m for _, m in send.sent if m.startswith("🔚"))
     assert "成本 893.92" in exit_msg and "−$221.85" in exit_msg  # not against today's 950
-    assert tn.Entries(tmp_path).load() == {"MU": {"avg": 950.0, "qty": 5.0}}  # E2 booked from its own fill
+    assert book(tmp_path) == {"MU": {"avg": 950.0, "qty": 5.0}}  # E2 booked from its own fill
 
 
 @pytest.mark.unit
@@ -432,7 +437,7 @@ def test_a_failed_send_does_not_align_the_book_before_the_retry(tmp_path):
                     by_id={"E1": e1, "L-stop": stop_leg, "E2": e2})
     send = Sender(fail=1)
     tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)
-    assert tn.Entries(tmp_path).load() == {}  # not aligned to today's 950 before the retry
+    assert book(tmp_path) == {}  # not aligned to today's 950 before the retry
     tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)
     exit_msg = next(m for _, m in send.sent if m.startswith("🔚"))
     assert "成本 893.92" in exit_msg and "−$221.85" in exit_msg
@@ -482,12 +487,12 @@ def test_alignment_never_double_counts_a_partly_filled_add(tmp_path):
     broker = Broker(orders=[add], positions=[{"symbol": "MU", "avg_entry_price": "844.44", "qty": "9"}])
     send = Sender()
     tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)  # R1: partial — no fill event yet
-    assert tn.Entries(tmp_path).load() == {"MU": {"avg": 800.0, "qty": 5.0}}
+    assert book(tmp_path) == {"MU": {"avg": 800.0, "qty": 5.0}}
     filled = {**add, "status": "filled", "filled_qty": "5"}
     broker.orders, broker.fills, broker.by_id = [filled], [{"order_id": "A1", "order_status": "filled"}], {"A1": filled}
     broker._positions = [{"symbol": "MU", "avg_entry_price": "850", "qty": "10"}]
     tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)  # R2
-    assert tn.Entries(tmp_path).load() == {"MU": {"avg": 850.0, "qty": 10.0}}
+    assert book(tmp_path) == {"MU": {"avg": 850.0, "qty": 10.0}}
 
 
 @pytest.mark.unit
@@ -540,7 +545,7 @@ def test_reconcile_applies_events_in_the_order_they_happened(tmp_path):
     tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)
     exit_msg = next(m for _, m in send.sent if m.startswith("🔚"))
     assert "成本 800.00" in exit_msg  # measured before the later partial entry was booked
-    assert tn.Entries(tmp_path).load() == {"MU": {"avg": 900.0, "qty": 3.0}}
+    assert book(tmp_path) == {"MU": {"avg": 900.0, "qty": 3.0}}
 
 
 @pytest.mark.unit
@@ -558,7 +563,7 @@ def test_a_hole_longer_than_the_fill_window_never_guesses_pnl(tmp_path):
     send = Sender()
     tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)
     assert send.sent[0][1] == "🔚 止损平仓 MU 卖出 5 股 @ 均价 849.00"  # no P&L in the hole batch
-    assert tn.Entries(tmp_path).load() == {"AMD": {"avg": 150.0, "qty": 10.0}}  # rebuilt from the broker
+    assert book(tmp_path) == {"AMD": {"avg": 150.0, "qty": 10.0}}  # rebuilt from the broker
     assert store.last_reconcile() == NOW
     tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)  # no hole any more
 
@@ -573,3 +578,35 @@ def test_no_stale_placement_for_an_order_filled_outside_the_fill_window(tmp_path
     send = Sender()
     tn.reconcile(Broker(orders=[old_filled, still_open]), state_dir=tmp_path, send=send, now=NOW)
     assert [m.splitlines()[0].startswith("📝 下单 AMD 买入 5 股") for _, m in send.sent] == [True]  # only the open one
+
+
+@pytest.mark.unit
+def test_a_failed_positions_read_never_empties_the_book_on_a_hole_rebuild(tmp_path):
+    from datetime import timedelta
+
+    store = tn.SentStore(tmp_path)
+    store.mark_initialized()
+    store.mark_reconciled(NOW - timedelta(days=5))
+    tn.Entries(tmp_path).save({"MU": {"avg": 800.0, "qty": 5.0}})
+
+    class Flaky(Broker):
+        def positions(self):
+            raise RuntimeError("alpaca 503")
+
+    tn.reconcile(Flaky(), state_dir=tmp_path, send=Sender(), now=NOW)
+    assert book(tmp_path) == {"MU": {"avg": 800.0, "qty": 5.0}}  # untouched
+    assert store.last_reconcile() == NOW - timedelta(days=5)      # the hole is retried next time
+
+
+@pytest.mark.unit
+def test_a_fill_of_an_order_placed_before_the_seed_never_double_counts(tmp_path):
+    """First run seeds MU from a position that already holds 4 of an add's 5 shares."""
+    send = Sender()
+    add = at(order("A1", "2026-11-02-us-MU-entry", status="partially_filled", filled_qty=4, avg=900.0, legs=()),
+             submitted="2026-11-02T14:45:00Z")  # before the seed snapshot (taken at the wall clock)
+    broker = Broker(orders=[add], positions=[{"symbol": "MU", "avg_entry_price": "844.44", "qty": "9"}])
+    tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)  # first run: seeded 9 @ 844.44
+    filled = {**add, "status": "filled", "filled_qty": "5"}
+    broker.orders, broker.fills, broker.by_id = [filled], [{"order_id": "A1", "order_status": "filled"}], {"A1": filled}
+    tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)
+    assert book(tmp_path) == {}  # unknown rather than (844.44*9 + 900*5)/14

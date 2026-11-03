@@ -303,16 +303,19 @@ class Entries:
     def __init__(self, state_dir: str | Path) -> None:
         self.path = Path(state_dir) / STORE_DIRNAME / "entries.json"
 
-    def load(self) -> dict[str, dict[str, float]]:
+    def load(self) -> dict[str, dict[str, Any]]:
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return {}
-        out = {}
+        out: dict[str, dict[str, Any]] = {}
         for symbol, row in (data.items() if isinstance(data, dict) else ()):
-            avg, qty = _num((row or {}).get("avg")), _num((row or {}).get("qty"))
+            row = row if isinstance(row, dict) else {}
+            avg, qty = _num(row.get("avg")), _num(row.get("qty"))
             if avg is not None and qty is not None and avg > 0 and qty > 0:
                 out[str(symbol)] = {"avg": avg, "qty": qty}
+                if _instant(row.get("seeded_at")) is not None:
+                    out[str(symbol)]["seeded_at"] = str(row["seeded_at"])
         return out
 
     def save(self, entries: Mapping[str, Mapping[str, float]]) -> None:
@@ -328,7 +331,10 @@ class Entries:
             symbol = str(data.get("symbol") or "").upper()
             avg, qty = _num(data.get("avg_entry_price")), _num(data.get("qty"))
             if symbol and symbol not in entries and avg and qty and qty > 0:
-                entries[symbol] = {"avg": avg, "qty": qty}
+                # seeded_at: a fill of an order placed before this snapshot may
+                # already be inside it (a partial) — see _apply_fill.
+                entries[symbol] = {"avg": avg, "qty": qty,
+                                   "seeded_at": datetime.now(timezone.utc).isoformat()}
                 changed = True
         if changed:
             self.save(entries)
@@ -369,7 +375,13 @@ def _apply_fill(
             entries[symbol] = current
         elif order.filled_avg_price and order.filled_qty:
             held = entries.get(symbol)
-            if held:  # an add: average in
+            seeded = _instant(held.get("seeded_at")) if held else None
+            submitted = order.time_of("submitted")
+            if seeded is not None and (submitted is None or submitted < seeded):
+                # Placed before the seed snapshot: some of its shares may be in
+                # the seeded row already — averaging in could count them twice.
+                entries.pop(symbol, None)  # cost basis unknown: no P&L, never a wrong one
+            elif held:  # an add: average in
                 total = held["qty"] + order.filled_qty
                 entries[symbol] = {"avg": (held["avg"] * held["qty"] + order.filled_avg_price * order.filled_qty)
                                    / total, "qty": total}
@@ -519,8 +531,8 @@ def deliver(
     its cost basis from the broker's position. ``reconcile_positions`` (the
     fallback, events possibly hours old) never does — the position *now* is
     not the position *then* — fills use the orders' own totals, and after
-    the batch the book is only aligned with today's positions (missing
-    symbols added, closed ones dropped). It also decides the first run under
+    a complete batch symbols the broker no longer holds are dropped (never
+    added or resized). It also decides the first run under
     the lock: no ``initialized`` marker → the book is seeded from today's
     positions and the history recorded without sending.
 
@@ -567,14 +579,20 @@ def deliver(
             store.record(event.key, sent=not first_run)
             seen.add(event.key)
             book.save(entries)
+        if rebuild_book and not first_run and reconcile_positions is not None and not stopped:
+            try:  # read first: a failed read leaves the book and the window as they were
+                held = reconcile_positions()
+            except Exception as exc:
+                logger.warning("positions unavailable to rebuild the entry book: %s", type(exc).__name__)
+                stopped = True
+            else:
+                book.save({})
+                book.seed(held)  # the broker's own cost basis of what is held now
         if reconciled_at is not None and not stopped:
             store.mark_reconciled(reconciled_at)  # only a complete batch closes the window
         if first_run:
             store.mark_initialized()
-        elif rebuild_book and reconcile_positions is not None and not stopped:
-            book.save({})
-            book.seed(reconcile_positions())  # the broker's own cost basis of what is held now
-        elif reconcile_positions is not None and not stopped:
+        elif reconcile_positions is not None and not stopped and not rebuild_book:
             # Only after a complete batch: aligning before an unsent fill is
             # retried would let it average into today's position.
             _align_book(book, reconcile_positions)
