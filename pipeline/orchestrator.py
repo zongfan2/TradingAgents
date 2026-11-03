@@ -1947,7 +1947,20 @@ def run_watchdog(
     execution_time = config.sessions["us"].execution_time
     if execution_time is not None:
         _watch_deferred_execution(config, execution_time, now, notifier)
+    _hourly_trade_notifications(config, now)
     return 0
+
+
+def _hourly_trade_notifications(config: PipelineConfig, now: datetime) -> None:
+    """specs/trade-notifications.md T5/T6: reconcile what the listener missed
+    and send the daily report — only with the trades webhook; never raises."""
+    if not config.notifications_enabled or not config.lark_trades_webhook_url:
+        return
+    from pipeline import trade_notify
+    from pipeline.trade_monitor import make_trades_sender
+
+    trade_notify.run_hourly(state_dir=config.state_dir, send=make_trades_sender(config), now=now,
+                            ledger_dir=config.ledger_dir)
 
 
 def _alertable_days(session: str, at_time: str, now: datetime) -> list[date]:

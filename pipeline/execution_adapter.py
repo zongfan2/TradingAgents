@@ -1,11 +1,13 @@
 """Execution adapter — Alpaca paper broker gateway (specs/execution-adapter.md).
 
-The ONLY broker gateway in the system: ``submit`` (slot step 7, us only) turns
+The ONLY component that acts on the broker: ``submit`` (slot step 7, us only) turns
 the slot's eligible ``brief``-arm decisions into paper bracket/close orders;
 ``refresh`` (invoked by the settle step) refreshes order state, performs the
 two hygiene duties (stale-entry cancels, once-only close re-submission) and
-rewrites ``positions.json`` from live broker state. Nothing else constructs a
-broker client.
+rewrites ``positions.json`` from live broker state. Nothing else places,
+replaces or cancels an order; trade notifications (``pipeline.trade_notify``,
+``pipeline.trade_monitor``) only read the paper account (specs/README.md
+rule 2).
 
 Safety invariants (spec S1-S9, each individually tested):
 
