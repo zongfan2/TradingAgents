@@ -132,7 +132,8 @@ is retried); the "last reconcile" time advances only on a complete batch.
 A seeded row (first run or rebuild) is stamped `seeded_at`: a later
 fallback fill of an order placed before that snapshot may already be inside
 it, so it makes the symbol's cost basis **unknown** (no P&L) instead of
-averaging in twice. Unknown is a state, not a deletion: later buys do not
+averaging in twice — a sell placed before the snapshot (a bracket leg) the
+same, since a slice of it may already be out of the seeded quantity. Unknown is a state, not a deletion: later buys do not
 restart the book as if they were the whole position; it ends when the
 listener reads the broker's own position or the position is closed.
 
@@ -155,8 +156,8 @@ a failure is logged and never fails the watchdog.
 %), each open position (qty, average entry, last price, unrealized P&L $
 and %), and the count of open orders (the broker's open-order listing). It goes
 through the T3 outbox, so it never overtakes a queued trade message. Trading day per the broker calendar;
-once per day (marker `trade_notify/daily-<date>.sent`, written only after
-the send succeeded).
+once per day (marker `trade_notify/daily-<date>.sent`, written once the
+report is queued in the outbox, which then owns its delivery and ordering).
 
 ## Prior art (specs/README.md rule 6)
 

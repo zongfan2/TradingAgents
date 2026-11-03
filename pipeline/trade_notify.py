@@ -448,6 +448,16 @@ def _position_row(positions: Iterable[Any], symbol: str) -> dict[str, float] | N
     return None
 
 
+def _placed_before_seed(order: OrderView, seeded_at: object) -> bool:
+    """True for an order placed before the row's seed snapshot (or with no
+    known placement time): its fills may straddle the seed."""
+    seeded = _instant(seeded_at) if seeded_at else None
+    if seeded is None:
+        return False
+    submitted = order.time_of("submitted")
+    return submitted is None or submitted < seeded
+
+
 def _apply_fill(
     entries: dict[str, dict[str, Any]],
     event: TradeEvent,
@@ -504,9 +514,7 @@ def _apply_fill(
         if current is not None:
             entries[symbol] = row(current, read_at)
         elif order.filled_avg_price and order.filled_qty:
-            seeded = _instant(stamp) if stamp else None
-            submitted = order.time_of("submitted")
-            if seeded is not None and (submitted is None or submitted < seeded):
+            if _placed_before_seed(order, stamp):
                 # Placed before the seed snapshot but filled after it: some of
                 # its shares may be in the seeded row — averaging in could
                 # count them twice.
@@ -525,6 +533,11 @@ def _apply_fill(
             entries.pop(symbol, None)
         else:
             entries[symbol] = row({"avg": avg or current["avg"], "qty": current["qty"]}, read_at)
+    elif held and not held.get("unknown") and _placed_before_seed(order, stamp):
+        # A leg placed before the seed snapshot may have partly filled before
+        # it — the seed already excludes that slice: subtracting the order's
+        # total would count it twice.
+        entries[symbol] = row({"unknown": True}, when)
     elif held and not held.get("unknown"):
         remaining = held["qty"] - (order.filled_qty or 0)
         if remaining > 1e-9:

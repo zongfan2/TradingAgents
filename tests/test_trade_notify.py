@@ -956,3 +956,19 @@ def test_first_run_seed_and_cutoff_use_the_snapshot_time(tmp_path):
     assert tn.SentStore(tmp_path).first_started(NOW) == snap
     assert book(tmp_path) == {"MU": {"avg": 850.0, "qty": 10.0}}  # the add after the snapshot is booked
     assert [m.split(" @")[0] for _, m in send.sent] == ["✅ 成交 MU 买入 5 股"]  # after the cutoff: sent
+
+
+@pytest.mark.unit
+def test_a_pre_seed_sell_leg_never_subtracts_twice(tmp_path):
+    from datetime import timedelta
+
+    seed = NOW - timedelta(hours=1)
+    tn.SentStore(tmp_path).mark_initialized()
+    tn.Entries(tmp_path).save({"MU": {"avg": 850.0, "qty": 8.0, "seeded_at": seed.isoformat(),
+                                      "as_of": seed.isoformat()}})
+    leg = at(order("L-tgt", "leg-b", side="sell", status="filled", filled_qty=5, avg=980.0, limit=980.0),
+             submitted=(seed - timedelta(days=2)).isoformat(), filled=(seed + timedelta(minutes=10)).isoformat())
+    broker = Broker(positions=[{"symbol": "MU", "avg_entry_price": "850", "qty": "5"}],
+                    fills=[{"order_id": "L-tgt", "order_status": "filled"}], by_id={"L-tgt": leg})
+    tn.reconcile(broker, state_dir=tmp_path, send=Sender(), now=NOW)
+    assert book(tmp_path) == {"MU": "unknown"}  # not 8 - 5 = 3 when 2 were sold before the seed
