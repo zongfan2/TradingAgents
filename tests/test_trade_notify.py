@@ -923,3 +923,36 @@ def test_the_applied_cap_keeps_the_newest_keys(tmp_path, monkeypatch):
     applied = {"zzz:fill": 1.0, "aaa:fill": 2.0, "mmm:fill": None}  # insertion = chronological
     book_.save({}, applied)
     assert list(book_.applied()) == ["aaa:fill", "mmm:fill"]  # the two newest, in order
+
+
+@pytest.mark.unit
+def test_the_daily_report_queues_behind_a_stuck_trade_message(tmp_path):
+    tn.SentStore(tmp_path).mark_initialized()
+    stuck = Sender(fail=1)
+    tn.deliver([tn.event_from_update({"event": "new", "order": entry()})], state_dir=tmp_path, send=stuck)
+    send = Sender(fail=2)  # the hourly run: the head keeps failing, the report waits behind it
+    tn.run_hourly(state_dir=tmp_path, send=send, now=NOW, broker_factory=lambda: Broker())
+    assert send.sent == [] and [i["key"] for i in tn.SentStore(tmp_path).outbox()][-1].startswith("daily:")
+    tn.deliver([], state_dir=tmp_path, send=send)
+    assert [m.split()[0] for _, m in send.sent] == ["📝", "📊"]  # in order, the report never first
+
+
+@pytest.mark.unit
+def test_first_run_seed_and_cutoff_use_the_snapshot_time(tmp_path):
+    from datetime import timedelta
+
+    snap = NOW - timedelta(minutes=5)
+
+    class Clocked(Broker):
+        def now(self):
+            return snap
+
+    add = at(order("A1", "2026-11-03-us-MU-entry", status="filled", filled_qty=5, avg=900.0, legs=()),
+             submitted=(snap + timedelta(seconds=10)).isoformat(), filled=(snap + timedelta(seconds=20)).isoformat())
+    broker = Clocked(positions=[{"symbol": "MU", "avg_entry_price": "800", "qty": "5"}],
+                     fills=[{"order_id": "A1", "order_status": "filled"}], by_id={"A1": add})
+    send = Sender()
+    tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)  # first run
+    assert tn.SentStore(tmp_path).first_started(NOW) == snap
+    assert book(tmp_path) == {"MU": {"avg": 850.0, "qty": 10.0}}  # the add after the snapshot is booked
+    assert [m.split(" @")[0] for _, m in send.sent] == ["✅ 成交 MU 买入 5 股"]  # after the cutoff: sent

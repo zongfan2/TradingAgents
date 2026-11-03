@@ -680,10 +680,13 @@ def deliver(
     rebuild_failed = False
     with store.exclusive():
         first_run = reconcile_positions is not None and not store.initialized()
-        cutoff = (store.first_started(_broker_time(broker_now) or reconciled_at or datetime.now(timezone.utc))
+        # The snapshot's own broker time: fills after it are not in the seed,
+        # so they must be neither history nor "already in the figure".
+        cutoff = (store.first_started(snapshot_at or _broker_time(broker_now) or reconciled_at
+                                      or datetime.now(timezone.utc))
                   if first_run else None)
         if first_run:
-            book.seed(reconcile_positions(), _broker_time(broker_now))
+            book.seed(reconcile_positions(), snapshot_at or _broker_time(broker_now))
         seen = store.keys()
         seen_orders = {key.split(":", 1)[0] for key in seen}
         entries = book.load()
@@ -749,6 +752,19 @@ def deliver(
         elif reconcile_positions is not None and not rebuild_book:
             _align_book(book, reconcile_positions, snapshot_at)
     return sent
+
+
+def enqueue(state_dir: str | Path, key: str, text: str, send: Sender | None) -> int:
+    """Queue one non-trade message (the daily report) behind the trade
+    messages, once per key, and flush; returns messages sent."""
+    store = SentStore(state_dir)
+    with store.exclusive():
+        outbox, handled = store.outbox(), store.keys()
+        if key not in handled and all(item.get("key") != key for item in outbox):
+            outbox.append({"key": key, "text": text, "failures": 0})
+            store.save_outbox(outbox)
+            store.record(key, sent=True)
+        return _flush(outbox, send, persist=store.save_outbox)
 
 
 def _flush(
@@ -1014,7 +1030,8 @@ def run_hourly(
         local = now.astimezone(NY)
         marker = Path(state_dir) / STORE_DIRNAME / f"daily-{local.date().isoformat()}.sent"
         if local.time() >= DAILY_REPORT_AFTER and not marker.exists() and broker.is_trading_day(local.date()):
-            send(TITLE, daily_report(broker))
+            # Through the outbox, behind any queued trade message (never ahead).
+            enqueue(state_dir, f"daily:{local.date().isoformat()}", daily_report(broker), send)
             atomic_write(marker, local.isoformat() + "\n")
     except Exception as exc:
         skipped("daily report", exc)

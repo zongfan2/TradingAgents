@@ -85,7 +85,8 @@ the same text. On the very first run —
 decided under the store lock, so a concurrent listener and watchdog agree — (no
 `trade_notify/initialized` marker) the broker history **before the first
 start** (`trade_notify/first_started`, written once by whichever of the
-listener or a reconcile runs first) is recorded **without sending** — old
+listener or a reconcile runs first; a first-run reconcile uses its
+positions snapshot's broker time for the cutoff and the seed stamp) is recorded **without sending** — old
 events are never replayed into the new group — while later events are sent
 as usual (a listener whose startup reconcile failed loses nothing); the
 marker is written even when that history is empty. A seeded row keeps its
@@ -152,7 +153,8 @@ a failure is logged and never fails the watchdog.
 
 📊 日报: account equity and the day's change (equity − last_equity, $ and
 %), each open position (qty, average entry, last price, unrealized P&L $
-and %), and the count of open orders (the broker's open-order listing). Trading day per the broker calendar;
+and %), and the count of open orders (the broker's open-order listing). It goes
+through the T3 outbox, so it never overtakes a queued trade message. Trading day per the broker calendar;
 once per day (marker `trade_notify/daily-<date>.sent`, written only after
 the send succeeded).
 
