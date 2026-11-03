@@ -400,7 +400,7 @@ def test_fallback_never_takes_a_later_positions_cost_basis(tmp_path):
     tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)
     exit_msg = next(m for _, m in send.sent if m.startswith("🔚"))
     assert "成本 893.92" in exit_msg and "−$221.85" in exit_msg  # not against today's 950
-    assert tn.Entries(tmp_path).load() == {"MU": {"avg": 950.0, "qty": 5.0}}
+    assert tn.Entries(tmp_path).load() == {"MU": {"avg": 950.0, "qty": 5.0}}  # E2 booked from its own fill
 
 
 @pytest.mark.unit
@@ -471,3 +471,51 @@ def test_no_placement_message_after_a_later_event_of_the_order(tmp_path):
     tn.deliver([tn.event_from_update({"event": "fill", "order": filled})], state_dir=tmp_path, send=send)
     tn.reconcile(Broker(orders=[filled]), state_dir=tmp_path, send=send, now=NOW)
     assert [m.split()[0] for _, m in send.sent] == ["✅"]  # the missed "new" is not sent late
+
+
+@pytest.mark.unit
+def test_alignment_never_double_counts_a_partly_filled_add(tmp_path):
+    """5 MU @800 held; an add of 5 @900 is 4 filled at R1, filled at R2."""
+    tn.SentStore(tmp_path).mark_initialized()
+    tn.Entries(tmp_path).save({"MU": {"avg": 800.0, "qty": 5.0}})
+    add = order("A1", "2026-11-03-us-MU-entry", status="partially_filled", filled_qty=4, avg=900.0, legs=())
+    broker = Broker(orders=[add], positions=[{"symbol": "MU", "avg_entry_price": "844.44", "qty": "9"}])
+    send = Sender()
+    tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)  # R1: partial — no fill event yet
+    assert tn.Entries(tmp_path).load() == {"MU": {"avg": 800.0, "qty": 5.0}}
+    filled = {**add, "status": "filled", "filled_qty": "5"}
+    broker.orders, broker.fills, broker.by_id = [filled], [{"order_id": "A1", "order_status": "filled"}], {"A1": filled}
+    broker._positions = [{"symbol": "MU", "avg_entry_price": "850", "qty": "10"}]
+    tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)  # R2
+    assert tn.Entries(tmp_path).load() == {"MU": {"avg": 850.0, "qty": 10.0}}
+
+
+@pytest.mark.unit
+def test_listener_starts_the_stream_even_if_the_startup_reconcile_fails(tmp_path, monkeypatch):
+    from pipeline import trade_monitor
+
+    monkeypatch.setenv("TRADINGAGENTS_SKIP_DOTENV", "1")
+    monkeypatch.setenv("TRADINGAGENTS_STATE_DIR", str(tmp_path))
+    monkeypatch.setenv("ALPACA_API_KEY", "k")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "s")
+    monkeypatch.setenv("TRADINGAGENTS_LARK_TRADES_WEBHOOK_URL", "https://open.feishu.cn/hook/x")
+    send = Sender()
+    monkeypatch.setattr(trade_monitor, "make_trades_sender", lambda config: send)
+    monkeypatch.setattr(tn, "reconcile", lambda *a, **k: 1 / 0)
+    tn.SentStore(tmp_path).mark_initialized()
+    stream = []
+    code = trade_monitor.main([], stream_factory=lambda: stream.append(FakeStream([])) or stream[0],
+                              broker_factory=lambda: Broker())
+    assert code == 1 and stream  # the stream ran
+
+
+@pytest.mark.unit
+def test_orders_listing_keeps_the_newest_when_capped():
+    class Client:
+        def get_orders(self, filter):
+            assert filter.direction == "desc"
+            return ["newest", "older"]
+
+    broker = tn.AlpacaReadOnly.__new__(tn.AlpacaReadOnly)
+    broker._client = Client()
+    assert broker.orders_since(NOW) == ["older", "newest"]  # returned oldest first

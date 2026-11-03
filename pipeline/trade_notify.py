@@ -536,23 +536,19 @@ def deliver(
 
 
 def _align_book(book: Entries, positions: Callable[[], list[Any]]) -> None:
-    """After a fallback batch: add open positions the book lacks, drop
-    symbols the broker no longer holds; never rewrite a known average."""
+    """After a complete fallback batch: drop symbols the broker no longer
+    holds. Nothing is added or resized — every fill in the window reaches
+    the book as an event (an entry that ended partly filled, as its
+    terminal event), so a position read here would count an in-flight or
+    partial fill twice."""
     try:
-        held = list(positions())
+        held = {str((p.model_dump() if hasattr(p, "model_dump") else dict(p or {})).get("symbol") or "").upper()
+                for p in positions()}
     except Exception as exc:
         logger.warning("positions unavailable to align the entry book: %s", type(exc).__name__)
         return
     entries = book.load()
-    current = {}
-    for position in held:
-        data = position.model_dump() if hasattr(position, "model_dump") else dict(position or {})
-        symbol = str(data.get("symbol") or "").upper()
-        row = _position_row([data], symbol) if symbol else None
-        if row:
-            current[symbol] = row
-    aligned = {symbol: {"avg": entries[symbol]["avg"], "qty": row["qty"]} if symbol in entries else row
-               for symbol, row in current.items()}
+    aligned = {symbol: row for symbol, row in entries.items() if symbol in held}
     if aligned != entries:
         book.save(aligned)
 
@@ -589,9 +585,11 @@ class AlpacaReadOnly:
         from alpaca.trading.enums import QueryOrderStatus
         from alpaca.trading.requests import GetOrdersRequest
 
+        # Newest first, so a cap drops the oldest, never the recent orders the
+        # fallback exists for; returned oldest first.
         request = GetOrdersRequest(status=QueryOrderStatus.ALL, after=after, nested=True,
-                                   limit=500, direction="asc")
-        return list(self._client.get_orders(filter=request))
+                                   limit=500, direction="desc")
+        return list(reversed(self._client.get_orders(filter=request)))
 
     def fills_since(self, after: datetime) -> list[dict]:
         """Account FILL activities by fill time (``/v2/account/activities``;

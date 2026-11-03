@@ -82,8 +82,11 @@ def main(argv: list[str] | None = None, *, stream_factory: Any = None, broker_fa
     state_dir = config.state_dir
     # Events missed while no listener ran (first run: history recorded only).
     ledger_dir = config.ledger_dir
-    trade_notify.reconcile(broker, state_dir=state_dir, send=send, now=datetime.now(timezone.utc),
-                           ledger_dir=ledger_dir)
+    try:  # a failing snapshot read must not keep the real-time stream down
+        trade_notify.reconcile(broker, state_dir=state_dir, send=send, now=datetime.now(timezone.utc),
+                               ledger_dir=ledger_dir)
+    except Exception as exc:
+        logger.warning("startup reconcile failed (%s); the stream starts anyway", type(exc).__name__)
 
     async def on_update(data: Any) -> None:
         try:

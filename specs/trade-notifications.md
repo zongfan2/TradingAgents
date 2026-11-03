@@ -40,8 +40,10 @@ partly filled — (`trade_notify/entries.json`). The listener, at the moment
 of the fill, takes it from the broker's position (adds average in exactly);
 the fallback, replaying events that may be hours old, uses the orders' own
 totals (today's position is not the position then) and afterwards only
-aligns the book with today's positions (adds missing symbols, drops closed
-ones, never rewrites a known average) — and only after a complete batch.
+drops symbols the broker no longer holds — never adds or resizes (every
+fill in the window reaches the book as an event, so a position read would
+count an in-flight or partial fill twice) — and only after a complete
+batch.
 Seeded on the first run from open positions; unknown → the message omits
 P&L rather than guess. A failed send stops the batch (no alignment), so an
 exit is never reported before its entry is booked.
@@ -77,7 +79,8 @@ and the marker is written even when that history is empty.
 - Single instance: an exclusive lock on `<state_dir>/locks/trade_monitor.lock`;
   a second start exits 0 at once.
 - It runs the T5 reconcile at start and every 15 minutes, so events missed
-  while it was down or disconnected are still sent.
+  while it was down or disconnected are still sent; a failing reconcile is
+  logged and never keeps the stream from starting.
 - It honours `notifications_enabled` (off: not started), as the watchdog
   hook does.
 - Scheduled as an always-on Windows task like the webui (re-fired every
@@ -86,7 +89,8 @@ and the marker is written even when that history is empty.
 
 ### T5 — Fallback reconcile (hourly, in the watchdog)
 
-`reconcile`: (a) entry/close orders submitted in the last 30 days map to
+`reconcile`: (a) entry/close orders submitted in the last 30 days (the
+newest 500 if more) map to
 the `new` / `canceled` / `expired` / `rejected` events their *current*
 state implies; (b) fills come from the account's FILL activities by **fill
 time** (last 3 days, `/v2/account/activities/FILL`, all pages) — an order
