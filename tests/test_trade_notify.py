@@ -972,3 +972,33 @@ def test_a_pre_seed_sell_leg_never_subtracts_twice(tmp_path):
                     fills=[{"order_id": "L-tgt", "order_status": "filled"}], by_id={"L-tgt": leg})
     tn.reconcile(broker, state_dir=tmp_path, send=Sender(), now=NOW)
     assert book(tmp_path) == {"MU": "unknown"}  # not 8 - 5 = 3 when 2 were sold before the seed
+
+
+@pytest.mark.unit
+def test_a_fill_during_the_seed_read_makes_the_cost_basis_unknown(tmp_path):
+    from datetime import timedelta
+
+    t0 = NOW - timedelta(minutes=5)
+    clock = iter([t0, t0 + timedelta(seconds=2)])  # before / after the positions read
+
+    class Clocked(Broker):
+        def now(self):
+            return next(clock)
+
+    add = at(order("A1", "2026-11-03-us-MU-entry", status="filled", filled_qty=5, avg=900.0, legs=()),
+             submitted=(t0 + timedelta(seconds=0.5)).isoformat(), filled=(t0 + timedelta(seconds=1)).isoformat())
+    broker = Clocked(positions=[{"symbol": "MU", "avg_entry_price": "850", "qty": "10"}],  # maybe includes A1
+                     fills=[{"order_id": "A1", "order_status": "filled"}], by_id={"A1": add})
+    tn.reconcile(broker, state_dir=tmp_path, send=Sender(), now=NOW)  # first run
+    assert book(tmp_path) == {"MU": "unknown"}  # neither 10 @ 850 nor 15 @ 866.67
+
+
+@pytest.mark.unit
+def test_a_failing_broker_clock_skips_the_reconcile(tmp_path, caplog):
+    class NoClock(Broker):
+        def now(self):
+            raise RuntimeError("clock endpoint down")
+
+    send = Sender()
+    tn.run_hourly(state_dir=tmp_path, send=send, now=NOW, broker_factory=lambda: NoClock())
+    assert not tn.SentStore(tmp_path).initialized() and "reconcile skipped" in caplog.text

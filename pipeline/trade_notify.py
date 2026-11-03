@@ -392,7 +392,7 @@ class Entries:
             avg, qty = _num(row.get("avg")), _num(row.get("qty"))
             if avg is not None and qty is not None and avg > 0 and qty > 0:
                 out[str(symbol)] = {"avg": avg, "qty": qty}
-                for stamp in ("seeded_at", "as_of"):
+                for stamp in ("seeded_at", "as_of", "seed_from"):
                     if _instant(row.get(stamp)) is not None:
                         out[str(symbol)][stamp] = str(row[stamp])
         return out
@@ -419,7 +419,8 @@ class Entries:
         return {pair[0]: _num(pair[1]) for pair in pairs
                 if isinstance(pair, list) and len(pair) == 2 and isinstance(pair[0], str)}  # oldest first
 
-    def seed(self, positions: Iterable[Any], at: datetime | None = None) -> None:
+    def seed(self, positions: Iterable[Any], at: datetime | None = None,
+             window_from: datetime | None = None) -> None:
         """Fill in symbols the store does not know from the broker's open
         long positions (never overwrites what fills recorded)."""
         entries = self.load()
@@ -433,6 +434,8 @@ class Entries:
                 # already be inside it (a partial) — see _apply_fill.
                 seeded = (at or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
                 entries[symbol] = {"avg": avg, "qty": qty, "seeded_at": seeded, "as_of": seeded}
+                if window_from is not None:  # the read's start: fills inside the read are ambiguous
+                    entries[symbol]["seed_from"] = window_from.astimezone(timezone.utc).isoformat()
                 changed = True
         if changed:
             self.save(entries)
@@ -480,6 +483,13 @@ def _apply_fill(
         return None
     when = event.time
     held = entries.get(symbol)
+    window = (_instant((held or {}).get("seed_from")), _instant((held or {}).get("seeded_at")))
+    if held and window[0] and window[1] and when is not None and window[0] <= when <= window[1]:
+        # Filled while the seed's positions were being read: maybe inside the
+        # seeded figure, maybe not — unknown rather than counted 0 or 2 times.
+        entries[symbol] = {"unknown": True, "as_of": when.isoformat(),
+                           "seeded_at": held["seeded_at"], "seed_from": held["seed_from"]}
+        return None
     as_of = _instant(held.get("as_of")) if held else None
     if as_of is not None and when is not None and when < as_of:
         return None  # the book is ahead of this event: already in the figure
@@ -497,12 +507,17 @@ def _apply_fill(
             # lower bound). Host clock only when the broker clock is unknown.
             read_at = _broker_time(broker_now) or datetime.now(timezone.utc)
     stamp = (held or {}).get("seeded_at")
+    seed_from = (held or {}).get("seed_from")
 
     def row(figure: dict[str, Any], valid_at: datetime | None) -> dict[str, Any]:
         out = {**figure, "as_of": (valid_at or read_at or datetime.now(timezone.utc)).isoformat()}
         if stamp:  # a seeded row stays seeded: a pre-seed order's fill may still come
             out["seeded_at"] = stamp
+            if seed_from:
+                out["seed_from"] = seed_from
         return out
+
+
 
     if (held or {}).get("unknown") and current is None:
         # Unknown stays unknown until the broker's own figure replaces it
@@ -668,6 +683,7 @@ def deliver(
     reconciled_at: datetime | None = None,
     broker_now: Callable[[], datetime | None] | None = None,
     snapshot_at: datetime | None = None,
+    snapshot_from: datetime | None = None,
 ) -> int:
     """Handle each new event once, in order, through a persistent outbox
     (T3); returns the messages sent.
@@ -695,11 +711,11 @@ def deliver(
         first_run = reconcile_positions is not None and not store.initialized()
         # The snapshot's own broker time: fills after it are not in the seed,
         # so they must be neither history nor "already in the figure".
-        cutoff = (store.first_started(snapshot_at or _broker_time(broker_now) or reconciled_at
+        cutoff = (store.first_started(snapshot_from or snapshot_at or _broker_time(broker_now) or reconciled_at
                                       or datetime.now(timezone.utc))
                   if first_run else None)
         if first_run:
-            book.seed(reconcile_positions(), snapshot_at or _broker_time(broker_now))
+            book.seed(reconcile_positions(), snapshot_at or _broker_time(broker_now), snapshot_from)
         seen = store.keys()
         seen_orders = {key.split(":", 1)[0] for key in seen}
         entries = book.load()
@@ -756,7 +772,7 @@ def deliver(
             else:
                 # Rows booked after the snapshot are newer than it: kept.
                 book.save({sym: row for sym, row in book.load().items() if _newer(row, snapshot_at)}, applied)
-                book.seed(held, snapshot_at or _broker_time(broker_now))  # the broker's cost basis then
+                book.seed(held, snapshot_at or _broker_time(broker_now), snapshot_from)  # the broker's figure
         if reconciled_at is not None and not rebuild_failed:
             store.mark_reconciled(reconciled_at)
             store.prune(reconciled_at, SENT_KEEP)
@@ -963,11 +979,17 @@ def reconcile(broker: ReadOnlyBroker, *, state_dir: str | Path, send: Sender | N
     # Positions first, before the events: alignment and rebuild then only
     # reflect fills the snapshot below includes — a stop filling during the
     # sends can never drop its row before its own event is booked.
-    snapshot_at = _broker_time(getattr(broker, "now", None))  # broker clock, before the read
+    clock = getattr(broker, "now", None)
+    snapshot_from = _broker_time(clock)  # broker clock around the read: [from, at]
     try:
         snapshot, snapshot_error = list(broker.positions()), None
     except Exception as exc:
         snapshot, snapshot_error = None, exc
+    snapshot_at = _broker_time(clock)
+    if clock is not None and (snapshot_from is None or snapshot_at is None):
+        # Book stamps must be on the broker's clock: without it, skip this
+        # reconcile (logged); the next one retries.
+        raise RuntimeError("broker clock unavailable")
 
     def positions_snapshot() -> list[Any]:
         if snapshot is None:
@@ -987,7 +1009,7 @@ def reconcile(broker: ReadOnlyBroker, *, state_dir: str | Path, send: Sender | N
     hole = last is not None and now - last > FILL_LOOKBACK
     return deliver(events, state_dir=state_dir, send=send, reconcile_positions=positions_snapshot,
                    ledger_dir=ledger_dir, rebuild_book=hole, reconciled_at=now,
-                   broker_now=getattr(broker, "now", None), snapshot_at=snapshot_at)
+                   broker_now=clock, snapshot_at=snapshot_at, snapshot_from=snapshot_from)
 
 
 def daily_report(broker: ReadOnlyBroker) -> str:

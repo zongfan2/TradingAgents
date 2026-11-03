@@ -140,8 +140,11 @@ listener reads the broker's own position or the position is closed.
 Every book row carries `as_of` — the time its figure is valid for, always
 on the **broker's clock** (an event's broker time; a listener position read
 is stamped with the broker clock read *after* the position read — the
-event time is only a lower bound; seeds take the broker clock), never the
-host's (WSL drifts after sleep). A fallback event
+event time is only a lower bound; a seed is stamped with the broker clock
+after its read and remembers the clock before it: a fill inside that read
+window may or may not be in the seeded figure, so it makes the symbol's
+cost basis unknown), never the host's (WSL drifts after sleep): when the
+broker clock cannot be read, the reconcile is skipped and retried. A fallback event
 older than its symbol's `as_of` is already reflected in the row (the
 listener moved the book ahead while this one was missed): it changes
 nothing, and its exit carries no P&L. A filled order's placement older than the fill window is not
