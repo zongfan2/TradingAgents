@@ -42,7 +42,9 @@ the fallback, replaying events that may be hours old, uses the orders' own
 totals (today's position is not the position then) and afterwards only
 drops symbols the broker no longer held in a positions snapshot taken
 **before** the events were read (a stop filling during the sends never
-drops its row before its own event is booked) — never adds or resizes (every
+drops its row before its own event is booked) — and never a row booked
+after that snapshot (its `as_of` is later than the snapshot's broker time:
+an entry the listener or the batch booked meanwhile) — never adds or resizes (every
 fill in the window reaches the book as an event, so a position read would
 count an in-flight or partial fill twice) — and only after a complete
 batch.
@@ -62,7 +64,8 @@ no placement. The plan line reads the configured `ledger_dir`.
 
 A persistent store `<state_dir>/trade_notify/sent.jsonl` holds one key per
 delivered message: `<order_id>:new`, `<order_id>:fill`,
-`<order_id>:<canceled|expired|rejected>`. A send that times out without
+`<order_id>:<canceled|expired|rejected>`; keys older than 45 days (past
+both lookbacks) are pruned. A send that times out without
 an answer is treated as not sent and retried, so in that one ambiguous case
 a message can arrive twice (a duplicate is preferred over a missed trade).
 Under an exclusive file lock shared by the listener and the fallback (T5),
@@ -70,7 +73,9 @@ each new event is booked at once and its message — P&L computed then, with
 the right cost basis — appended to a persistent **outbox**
 (`trade_notify/outbox.jsonl`) and its key recorded; the outbox is sent head
 first. Writes go in a kill-safe order, each idempotent on a rerun: the
-book with the keys of the events it booked (`_applied`) → the outbox
+book with the events it booked and the entry average each was measured
+against (`_applied`, reused on a rerun, so a kill never loses an exit's
+P&L) → the outbox
 (deduplicated by key) → the handled keys; each sent or dropped message is
 removed from the outbox at once. A kill at any point can at worst resend
 one message, never lose one, and never books an event twice. A failed send keeps the

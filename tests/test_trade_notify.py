@@ -867,3 +867,50 @@ def test_a_kill_after_booking_never_books_twice_nor_loses_the_message(tmp_path, 
     tn.deliver([event], state_dir=tmp_path, send=send)  # the rerun (the fallback replays it)
     assert book(tmp_path) == {"MU": {"avg": 850.0, "qty": 10.0}}  # booked once
     assert [m.split(" @")[0] for _, m in send.sent] == ["✅ 成交 MU 买入 5 股"]  # not lost, not doubled
+
+
+@pytest.mark.unit
+def test_an_entry_booked_after_the_snapshot_survives_the_alignment(tmp_path):
+    from datetime import timedelta
+
+    tn.SentStore(tmp_path).mark_initialized()
+    snapshot_time = NOW - timedelta(minutes=2)
+    fill = at(entry("filled", filled_qty=5, avg=893.92), filled=(snapshot_time + timedelta(seconds=30)).isoformat())
+
+    class Late(Broker):  # MU's entry fills between the snapshot and the fills read
+        def now(self):
+            return snapshot_time
+
+    broker = Late(positions=[], fills=[{"order_id": "E1", "order_status": "filled"}], by_id={"E1": fill})
+    tn.reconcile(broker, state_dir=tmp_path, send=Sender(), now=NOW)
+    assert book(tmp_path) == {"MU": {"avg": 893.92, "qty": 5.0}}  # newer than the snapshot: kept
+
+
+@pytest.mark.unit
+def test_a_kill_after_booking_an_exit_keeps_its_pnl(tmp_path, monkeypatch):
+    tn.SentStore(tmp_path).mark_initialized()
+    tn.Entries(tmp_path).save({"MU": {"avg": 893.92, "qty": 5.0}})
+    stop = order("L-stop", "leg-a", side="sell", type_="stop", status="filled", filled_qty=5, avg=849.55,
+                 limit=None, stop=850.0)
+    event = tn.event_from_update({"event": "fill", "order": stop})
+    real = tn.SentStore.save_outbox
+    monkeypatch.setattr(tn.SentStore, "save_outbox", lambda self, items: (_ for _ in ()).throw(SystemExit("x")))
+    with pytest.raises(SystemExit):
+        tn.deliver([event], state_dir=tmp_path, send=Sender())
+    monkeypatch.setattr(tn.SentStore, "save_outbox", real)
+    send = Sender()
+    tn.deliver([event], state_dir=tmp_path, send=send)
+    assert "盈亏 −$221.85" in send.sent[0][1]  # the killed run's computed P&L is reused
+
+
+@pytest.mark.unit
+def test_sent_keys_older_than_the_lookbacks_are_pruned(tmp_path):
+    from datetime import timedelta
+
+    store = tn.SentStore(tmp_path)
+    store.dir.mkdir(parents=True)
+    old = (NOW - tn.SENT_KEEP - timedelta(days=1)).isoformat()
+    store.path.write_text(json.dumps({"key": "OLD:fill", "sent": True, "at": old}) + "\n"
+                          + json.dumps({"key": "NEW:fill", "sent": True, "at": NOW.isoformat()}) + "\n")
+    store.prune(NOW, tn.SENT_KEEP)
+    assert store.keys() == {"NEW:fill"}
