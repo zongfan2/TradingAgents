@@ -53,10 +53,12 @@ def acquire_single_instance(state_dir: Path) -> Any | None:
     return handle
 
 
-def _reconcile_loop(broker: Any, state_dir: Path, send: trade_notify.Sender, stop: threading.Event) -> None:
+def _reconcile_loop(broker: Any, state_dir: Path, send: trade_notify.Sender, stop: threading.Event,
+                    ledger_dir: Path | None = None) -> None:
     while not stop.wait(RECONCILE_EVERY_SECONDS):
         try:
-            trade_notify.reconcile(broker, state_dir=state_dir, send=send, now=datetime.now(timezone.utc))
+            trade_notify.reconcile(broker, state_dir=state_dir, send=send, now=datetime.now(timezone.utc),
+                                   ledger_dir=ledger_dir)
         except Exception as exc:  # the stream keeps running
             logger.warning("periodic reconcile failed: %s", type(exc).__name__)
 
@@ -79,14 +81,16 @@ def main(argv: list[str] | None = None, *, stream_factory: Any = None, broker_fa
     broker = (broker_factory or (lambda: trade_notify.AlpacaReadOnly(api_key, secret)))()
     state_dir = config.state_dir
     # Events missed while no listener ran (first run: history recorded only).
-    trade_notify.reconcile(broker, state_dir=state_dir, send=send, now=datetime.now(timezone.utc))
+    ledger_dir = config.ledger_dir
+    trade_notify.reconcile(broker, state_dir=state_dir, send=send, now=datetime.now(timezone.utc),
+                           ledger_dir=ledger_dir)
 
     async def on_update(data: Any) -> None:
         try:
             event = trade_notify.event_from_update(data)
             if event is not None:
                 await asyncio.to_thread(trade_notify.deliver, [event], state_dir=state_dir,
-                                        send=send, positions=broker.positions)
+                                        send=send, positions=broker.positions, ledger_dir=ledger_dir)
         except Exception as exc:  # one bad message never stops the stream
             logger.warning("trade update not handled: %s", type(exc).__name__)
 
@@ -100,7 +104,7 @@ def main(argv: list[str] | None = None, *, stream_factory: Any = None, broker_fa
                                  url_override=BaseURL.TRADING_STREAM_PAPER.value)
 
     stop = threading.Event()
-    threading.Thread(target=_reconcile_loop, args=(broker, state_dir, send, stop),
+    threading.Thread(target=_reconcile_loop, args=(broker, state_dir, send, stop, ledger_dir),
                      name="trade-reconcile", daemon=True).start()
     stream = stream_factory()
     stream.subscribe_trade_updates(on_update)

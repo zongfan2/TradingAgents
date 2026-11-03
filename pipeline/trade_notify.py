@@ -176,8 +176,8 @@ def events_from_orders(orders: Iterable[Any]) -> list[TradeEvent]:
     for order in _flatten(order_view(o) for o in orders):
         if not order.id or order.kind not in ("entry", "close"):
             continue
-        if order.status in ("new", "accepted", "partially_filled", "filled", *TERMINAL_EVENTS):
-            events.append(TradeEvent("new", order))
+        if order.status in ("new", "accepted", "partially_filled", "filled", "canceled", "expired"):
+            events.append(TradeEvent("new", order))  # a rejected order never was "new"
         if order.status in TERMINAL_EVENTS:
             events.append(TradeEvent(order.status, order))
     return events
@@ -390,7 +390,7 @@ def _jsonl(path: Path) -> Iterator[dict]:
             yield row
 
 
-def plan_line(state_dir: str | Path, client_order_id: str) -> str | None:
+def plan_line(ledger_dir: str | Path, client_order_id: str) -> str | None:
     """For an entry order: the executed run's plan in one line (conviction,
     catalyst score, invalidation). The run is the one the execution adapter
     submitted it for (``orders.jsonl`` client_order_id → run_id); without
@@ -398,7 +398,7 @@ def plan_line(state_dir: str | Path, client_order_id: str) -> str | None:
     id's date/session/ticker — never a feeds-arm or invalid plan."""
     if not client_order_id.endswith("-entry"):
         return None
-    ledger = Path(state_dir) / "ledger"
+    ledger = Path(ledger_dir)
     # The live attempt that reached the broker: an id is shared by every
     # attempt that day, and skip / dry-run rows name runs never executed.
     live = [row for row in _jsonl(ledger / "orders.jsonl")
@@ -471,6 +471,7 @@ def deliver(
     send: Sender | None,
     positions: Callable[[], list[Any]] | None = None,
     reconcile_positions: Callable[[], list[Any]] | None = None,
+    ledger_dir: str | Path | None = None,
 ) -> int:
     """Send each not-yet-delivered event once, in order (T3); returns the
     messages sent.
@@ -488,7 +489,7 @@ def deliver(
     resumes there, so an exit is never measured before its entry is booked.
     """
     store, book = SentStore(state_dir), Entries(state_dir)
-    sent = 0
+    sent, stopped = 0, False
     with store.exclusive():
         first_run = reconcile_positions is not None and not store.initialized()
         if first_run:
@@ -498,19 +499,28 @@ def deliver(
         for event in events:
             if event.key in seen:
                 continue
+            if event.event == "new" and any(key.startswith(f"{event.order.id}:") for key in seen):
+                # A later event of this order was already reported: a
+                # placement message now would arrive out of order.
+                store.record(event.key, sent=False)
+                seen.add(event.key)
+                continue
             # First run: the book was seeded from the broker's positions —
             # replaying history into it would count those fills twice.
             entry_avg = None if first_run else _apply_fill(entries, event, positions)
             if not first_run:
                 if send is None:
+                    stopped = True
                     break
-                plan = plan_line(state_dir, event.order.client_order_id) if event.event == "new" else None
+                plan = (plan_line(ledger_dir or Path(state_dir) / "ledger", event.order.client_order_id)
+                        if event.event == "new" else None)
                 try:
                     send(TITLE, format_event(event, entry_avg=entry_avg, plan=plan))
                 except Exception as exc:  # never the URL: LarkError text is scrubbed
                     logger.warning("trade notification %s not sent (%s); the next reconcile resumes there",
                                    event.key, exc if exc.__class__.__name__ == "LarkError" else type(exc).__name__)
                     entries = book.load()  # drop the unsent fill's book change
+                    stopped = True
                     break
                 sent += 1
             store.record(event.key, sent=not first_run)
@@ -518,7 +528,9 @@ def deliver(
             book.save(entries)
         if first_run:
             store.mark_initialized()
-        elif reconcile_positions is not None:
+        elif reconcile_positions is not None and not stopped:
+            # Only after a complete batch: aligning before an unsent fill is
+            # retried would let it average into today's position.
             _align_book(book, reconcile_positions)
     return sent
 
@@ -634,14 +646,15 @@ def alpaca_keys() -> tuple[str, str]:
 
 
 def reconcile(broker: ReadOnlyBroker, *, state_dir: str | Path, send: Sender | None,
-              now: datetime) -> int:
+              now: datetime, ledger_dir: str | Path | None = None) -> int:
     """T5: report anything the listener missed — placements and cancels by
     submission time, fills by fill time. The first run (decided under the
     store lock) records history without sending and marks the store
     initialized, even when empty."""
     events = events_from_orders(broker.orders_since(now - ORDER_LOOKBACK))
     events += events_from_fills(broker.fills_since(now - FILL_LOOKBACK), broker.order)
-    return deliver(events, state_dir=state_dir, send=send, reconcile_positions=broker.positions)
+    return deliver(events, state_dir=state_dir, send=send, reconcile_positions=broker.positions,
+                   ledger_dir=ledger_dir)
 
 
 def daily_report(broker: ReadOnlyBroker) -> str:
@@ -673,18 +686,31 @@ def run_hourly(
     send: Sender | None,
     now: datetime,
     broker_factory: Callable[[], ReadOnlyBroker] | None = None,
+    ledger_dir: str | Path | None = None,
 ) -> None:
-    """The watchdog's share (T5 + T6); best-effort, never raises."""
+    """The watchdog's share (T5 + T6); best-effort, never raises. The
+    reconcile and the daily report fail independently."""
     if send is None:
         return
+
+    def skipped(what: str, exc: Exception) -> None:
+        reason = str(exc) if exc.__class__.__name__ == "LarkError" else type(exc).__name__
+        logger.warning("trade notifications: %s skipped: %s", what, reason)
+
     try:
         broker = (broker_factory or (lambda: AlpacaReadOnly(*alpaca_keys())))()
-        reconcile(broker, state_dir=state_dir, send=send, now=now)
+    except Exception as exc:
+        skipped("broker", exc)
+        return
+    try:
+        reconcile(broker, state_dir=state_dir, send=send, now=now, ledger_dir=ledger_dir)
+    except Exception as exc:
+        skipped("reconcile", exc)
+    try:
         local = now.astimezone(NY)
         marker = Path(state_dir) / STORE_DIRNAME / f"daily-{local.date().isoformat()}.sent"
         if local.time() >= DAILY_REPORT_AFTER and not marker.exists() and broker.is_trading_day(local.date()):
             send(TITLE, daily_report(broker))
             atomic_write(marker, local.isoformat() + "\n")
     except Exception as exc:
-        reason = str(exc) if exc.__class__.__name__ == "LarkError" else type(exc).__name__
-        logger.warning("trade notifications (hourly) skipped: %s", reason)
+        skipped("daily report", exc)

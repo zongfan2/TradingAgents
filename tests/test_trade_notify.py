@@ -99,7 +99,7 @@ def test_snapshot_events_match_the_stream_keys():
                      stop_status="canceled")
     assert [e.key for e in tn.events_from_orders([snapshot])] == ["E1:new"]  # fills come from activities
     rejected = tn.events_from_orders([order("E2", "2026-11-02-us-AMD-entry", status="rejected", symbol="AMD")])
-    assert [e.key for e in rejected] == ["E2:new", "E2:rejected"]
+    assert [e.key for e in rejected] == ["E2:rejected"]  # a rejected order never was "new"
     activities = [  # as /v2/account/activities/FILL returns them (measured)
         {"order_id": "E1", "type": "partial_fill", "order_status": "partially_filled", "qty": "4"},
         {"order_id": "E1", "type": "fill", "order_status": "filled", "qty": "1"},
@@ -208,7 +208,7 @@ def test_entry_message_carries_the_executed_runs_plan(tmp_path):
     ]))
     rows.append(row("2026-10-30-us-MU-brief-3", "brief", "0.9"))  # a later run that was not executed
     (ledger / "decisions.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
-    assert tn.plan_line(tmp_path, "2026-10-30-us-MU-entry").startswith("信心 0.7；")  # the linked run
+    assert tn.plan_line(ledger, "2026-10-30-us-MU-entry").startswith("信心 0.7；")  # the linked run
 
 
 @pytest.mark.unit
@@ -416,3 +416,58 @@ def test_a_failed_send_stops_the_batch_so_order_is_kept(tmp_path):
     assert tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW) == 0  # entry failed: exit not sent yet
     assert tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW) == 2
     assert "成本 893.92" in send.sent[1][1]
+
+
+@pytest.mark.unit
+def test_a_failed_send_does_not_align_the_book_before_the_retry(tmp_path):
+    """E1 893.92 → stop 849.55 → E2 re-entry 950 held now; E1's message fails once."""
+    tn.SentStore(tmp_path).mark_initialized()
+    e1 = entry("filled", filled_qty=5, avg=893.92, stop_status="filled", stop_filled=5, stop_avg=849.55,
+               tgt_status="canceled")
+    stop_leg = next(leg for leg in e1["legs"] if leg["id"] == "L-stop")
+    e2 = order("E2", "2026-11-03-us-MU-entry", status="filled", filled_qty=5, avg=950.0, legs=())
+    broker = Broker(positions=[{"symbol": "MU", "avg_entry_price": "950", "qty": "5"}],
+                    fills=[{"order_id": "E1", "order_status": "filled"}, {"order_id": "L-stop", "order_status": "filled"},
+                           {"order_id": "E2", "order_status": "filled"}],
+                    by_id={"E1": e1, "L-stop": stop_leg, "E2": e2})
+    send = Sender(fail=1)
+    tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)
+    assert tn.Entries(tmp_path).load() == {}  # not aligned to today's 950 before the retry
+    tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)
+    exit_msg = next(m for _, m in send.sent if m.startswith("🔚"))
+    assert "成本 893.92" in exit_msg and "−$221.85" in exit_msg
+
+
+@pytest.mark.unit
+def test_plan_line_follows_the_configured_ledger_dir(tmp_path):
+    ledger = tmp_path / "elsewhere"
+    ledger.mkdir()
+    (ledger / "decisions.jsonl").write_text(json.dumps(
+        {"date": "2026-10-30", "session": "us", "ticker": "MU", "decision": "BUY", "arm": "brief",
+         "plan_valid": True, "plan": {"conviction": "0.6"}}) + "\n")
+    send = Sender()
+    tn.deliver([tn.event_from_update({"event": "new", "order": entry()})], state_dir=tmp_path / "state",
+               send=send, ledger_dir=ledger)
+    assert send.sent[0][1].splitlines()[1] == "信心 0.6"
+
+
+@pytest.mark.unit
+def test_daily_report_survives_a_failing_reconcile(tmp_path):
+    class Broken(Broker):
+        def fills_since(self, after):
+            raise RuntimeError("activities endpoint down")
+
+    tn.SentStore(tmp_path).mark_initialized()
+    send = Sender()
+    tn.run_hourly(state_dir=tmp_path, send=send, now=NOW, broker_factory=lambda: Broken())
+    assert [m.split()[0] for _, m in send.sent] == ["📊"]
+
+
+@pytest.mark.unit
+def test_no_placement_message_after_a_later_event_of_the_order(tmp_path):
+    tn.SentStore(tmp_path).mark_initialized()
+    send = Sender()
+    filled = entry("filled", filled_qty=5, avg=893.92)
+    tn.deliver([tn.event_from_update({"event": "fill", "order": filled})], state_dir=tmp_path, send=send)
+    tn.reconcile(Broker(orders=[filled]), state_dir=tmp_path, send=send, now=NOW)
+    assert [m.split()[0] for _, m in send.sent] == ["✅"]  # the missed "new" is not sent late

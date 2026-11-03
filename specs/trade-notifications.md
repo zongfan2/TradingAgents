@@ -41,9 +41,14 @@ of the fill, takes it from the broker's position (adds average in exactly);
 the fallback, replaying events that may be hours old, uses the orders' own
 totals (today's position is not the position then) and afterwards only
 aligns the book with today's positions (adds missing symbols, drops closed
-ones, never rewrites a known average). Seeded on the first run from open
-positions; unknown → the message omits P&L rather than guess. A failed send
-stops the batch, so an exit is never reported before its entry is booked.
+ones, never rewrites a known average) — and only after a complete batch.
+Seeded on the first run from open positions; unknown → the message omits
+P&L rather than guess. A failed send stops the batch (no alignment), so an
+exit is never reported before its entry is booked.
+
+A placement (`new`) is never sent after a later event of the same order was
+already reported (it would arrive out of order), and a rejected order has
+no placement. The plan line reads the configured `ledger_dir`.
 
 ### T3 — Exactly-once delivery
 
@@ -88,7 +93,8 @@ time** (last 3 days, `/v2/account/activities/FILL`, all pages) — an order
 filter by submission time would miss the stop/target exit of a bracket
 entered weeks earlier — one `fill` per order that reached `filled`, with
 the order's totals. Both go through T3, so anything the listener missed
-arrives within an hour. Best-effort:
+arrives within an hour. The reconcile and the daily report fail
+independently. Best-effort:
 a failure is logged and never fails the watchdog.
 
 ### T6 — Daily report (watchdog, once per US trading day after 16:15 ET)

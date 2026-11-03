@@ -1959,7 +1959,8 @@ def _hourly_trade_notifications(config: PipelineConfig, now: datetime) -> None:
     from pipeline import trade_notify
     from pipeline.trade_monitor import make_trades_sender
 
-    trade_notify.run_hourly(state_dir=config.state_dir, send=make_trades_sender(config), now=now)
+    trade_notify.run_hourly(state_dir=config.state_dir, send=make_trades_sender(config), now=now,
+                            ledger_dir=config.ledger_dir)
 
 
 def _alertable_days(session: str, at_time: str, now: datetime) -> list[date]:
