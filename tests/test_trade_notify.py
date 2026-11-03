@@ -723,7 +723,10 @@ def test_listener_position_read_is_stamped_with_the_broker_clock_after_the_read(
 
 
 @pytest.mark.unit
-def test_a_message_that_never_sends_is_dropped_after_max_tries(tmp_path, caplog):
+def test_a_message_that_never_sends_is_dropped_after_max_tries_and_time(tmp_path, caplog, monkeypatch):
+    from datetime import timedelta
+
+    monkeypatch.setattr(tn, "DROP_AFTER", timedelta(0))  # time elapsed: attempts decide
     tn.SentStore(tmp_path).mark_initialized()
     first = order("E1", "2026-11-03-us-MU-entry", status="new", legs=())
     second = order("E2", "2026-11-03-us-AMD-entry", status="new", symbol="AMD", legs=())
@@ -744,8 +747,54 @@ def test_a_message_that_never_sends_is_dropped_after_max_tries(tmp_path, caplog)
 
 
 @pytest.mark.unit
+def test_many_quick_failures_never_drop_a_message_before_drop_after(tmp_path):
+    tn.SentStore(tmp_path).mark_initialized()
+    send = Sender(fail=50)
+    event = tn.event_from_update({"event": "new", "order": entry()})
+    for _ in range(3 * tn.MAX_SEND_FAILURES):  # a busy outage: many listener tries in minutes
+        tn.deliver([event], state_dir=tmp_path, send=send)
+    assert [item["key"] for item in tn.SentStore(tmp_path).outbox()] == ["E1:new"]  # still queued
+
+
+@pytest.mark.unit
+def test_the_outbox_is_durable_before_sending(tmp_path):
+    tn.SentStore(tmp_path).mark_initialized()
+
+    def killed(title, message):  # the process dies mid-send
+        assert [item["key"] for item in tn.SentStore(tmp_path).outbox()] == ["E1:new"]
+        raise SystemExit("killed")
+
+    with pytest.raises(SystemExit):
+        tn.deliver([tn.event_from_update({"event": "new", "order": entry()})], state_dir=tmp_path, send=killed)
+    send = Sender()
+    tn.deliver([], state_dir=tmp_path, send=send)  # a later run delivers it
+    assert [m.split(" @")[0] for _, m in send.sent] == ["📝 下单 MU 买入 5 股"]
+
+
+@pytest.mark.unit
+def test_fill_activities_are_read_from_v2_with_pagination():
+    calls = []
+
+    class Client:
+        def get(self, path, params):
+            calls.append((path, dict(params)))
+            if "page_token" not in params:
+                return [{"id": f"a{i}", "order_status": "filled"} for i in range(100)]
+            return [{"id": "last", "order_status": "filled"}]
+
+    broker = tn.AlpacaReadOnly.__new__(tn.AlpacaReadOnly)
+    broker._client = Client()
+    rows = broker.fills_since(NOW)
+    assert len(rows) == 101 and calls[0][0] == "/account/activities/FILL"  # the client adds /v2
+    assert calls[0][1]["direction"] == "asc" and calls[1][1]["page_token"] == "a99"
+
+
+@pytest.mark.unit
 def test_a_dropped_fill_message_keeps_its_book_change(tmp_path, monkeypatch):
+    from datetime import timedelta
+
     monkeypatch.setattr(tn, "MAX_SEND_FAILURES", 1)
+    monkeypatch.setattr(tn, "DROP_AFTER", timedelta(0))
     tn.SentStore(tmp_path).mark_initialized()
     tn.Entries(tmp_path).save({"MU": {"avg": 800.0, "qty": 5.0}})
     stop = order("L-stop", "leg-a", side="sell", type_="stop", status="filled", filled_qty=5, avg=849.0,

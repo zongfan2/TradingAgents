@@ -43,10 +43,11 @@ DAILY_REPORT_AFTER = time(16, 15)
 #: cancels by submission time over a longer window (stale-entry cancels).
 FILL_LOOKBACK = timedelta(days=3)
 ORDER_LOOKBACK = timedelta(days=30)
-#: Failed sends of one message before it is dropped (logged) so it never
-#: blocks the later ones; tries come from the listener and every reconcile
-#: (~4-5 an hour), so this rides out a Lark outage of about two hours.
+#: A queued message is dropped (logged) only after this many failed sends
+#: AND this long since its first failure, so it never blocks later ones
+#: forever yet survives a Lark outage during busy trading.
 MAX_SEND_FAILURES = 10
+DROP_AFTER = timedelta(hours=2)
 #: Order lifecycle events that are reported (T2); the rest are noise.
 TERMINAL_EVENTS = ("canceled", "expired", "rejected")
 _EVENT_LABEL = {"canceled": "⚠️ 撤单", "expired": "⚠️ 过期", "rejected": "⚠️ 拒单"}
@@ -638,6 +639,7 @@ def deliver(
         seen = store.keys()
         entries = book.load()
         outbox = store.outbox()
+        queued: list[str] = []
         for event in events:
             if event.key in seen:
                 continue
@@ -660,11 +662,15 @@ def deliver(
                     if event.event == "new" else None)
             outbox.append({"key": event.key, "text": format_event(event, entry_avg=entry_avg, plan=plan),
                            "failures": 0})
-            store.record(event.key, sent=True)  # handled: queued for sending
+            queued.append(event.key)
             seen.add(event.key)
-        book.save(entries)
-        sent = _flush(outbox, send)
+        # Durable before anything is marked handled or sent: a kill at any
+        # point after this can at worst resend one message, never lose one.
         store.save_outbox(outbox)
+        for key in queued:
+            store.record(key, sent=True)  # handled: queued in the outbox
+        book.save(entries)
+        sent = _flush(outbox, send, persist=store.save_outbox)
         if rebuild_book and not first_run and reconcile_positions is not None:
             try:  # read first: a failed read leaves the book and the window as they were
                 held = reconcile_positions()
@@ -683,10 +689,18 @@ def deliver(
     return sent
 
 
-def _flush(outbox: list[dict[str, Any]], send: Sender | None) -> int:
-    """Send the outbox head first, removing what went out; stop at the
-    first failure unless that message has failed MAX_SEND_FAILURES times
-    (then it is dropped — the trade is booked; only the message is lost)."""
+def _flush(
+    outbox: list[dict[str, Any]],
+    send: Sender | None,
+    persist: Callable[[list[dict[str, Any]]], None] | None = None,
+    now: Callable[[], datetime] | None = None,
+) -> int:
+    """Send the outbox head first; each sent or dropped message is persisted
+    off the outbox at once. Stop at the first failure — unless that message
+    has failed MAX_SEND_FAILURES times *and* for DROP_AFTER since its first
+    failure (attempts alone would drop it within minutes of a busy trading
+    outage): then only the message is dropped (logged); the trade is booked."""
+    clock = now or (lambda: datetime.now(timezone.utc))
     sent = 0
     while outbox and send is not None:
         item = outbox[0]
@@ -695,16 +709,22 @@ def _flush(outbox: list[dict[str, Any]], send: Sender | None) -> int:
         except Exception as exc:  # never the URL: LarkError text is scrubbed
             reason = exc if exc.__class__.__name__ == "LarkError" else type(exc).__name__
             item["failures"] = int(item.get("failures") or 0) + 1
-            if item["failures"] < MAX_SEND_FAILURES:
+            first = _instant(item.get("first_failed_at")) or clock()
+            item["first_failed_at"] = first.isoformat()
+            if item["failures"] < MAX_SEND_FAILURES or clock() - first < DROP_AFTER:
                 logger.warning("trade notification %s not sent (%s, attempt %d); %d queued behind it",
                                item.get("key"), reason, item["failures"], len(outbox) - 1)
+                if persist is not None:
+                    persist(outbox)
                 return sent
-            logger.error("trade notification %s dropped after %d failed sends (%s)",
-                          item.get("key"), item["failures"], reason)
+            logger.error("trade notification %s dropped after %d failed sends over %s (%s)",
+                          item.get("key"), item["failures"], clock() - first, reason)
             outbox.pop(0)
-            continue
-        outbox.pop(0)
-        sent += 1
+        else:
+            outbox.pop(0)
+            sent += 1
+        if persist is not None:
+            persist(outbox)
     return sent
 
 

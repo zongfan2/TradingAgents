@@ -45,12 +45,12 @@ fill in the window reaches the book as an event, so a position read would
 count an in-flight or partial fill twice) — and only after a complete
 batch.
 Seeded on the first run from open positions; unknown → the message omits
-P&L rather than guess. A failed send stops the batch (no alignment), so an
-exit is never reported before its entry is booked — after 10 failed sends of
-one queued message (tries come from the listener and every reconcile, about
-two hours of Lark outage) the *message* is dropped with an error log — its
-book change stands, the trade happened — so a message that never goes
-through cannot hold back every later one.
+P&L rather than guess. Messages leave through the T3 outbox, so an exit is
+never reported before its entry; a queued message is dropped (error log;
+its book change stands, the trade happened) only after 10 failed sends
+**and** 2 hours since its first failure — a message that never goes
+through cannot hold back every later one, yet a short outage during busy
+trading loses nothing.
 
 A placement (`new`) is never sent after a later event of the same order was
 already reported (it would arrive out of order), and a rejected order has
@@ -67,9 +67,12 @@ Under an exclusive file lock shared by the listener and the fallback (T5),
 each new event is booked at once and its message — P&L computed then, with
 the right cost basis — appended to a persistent **outbox**
 (`trade_notify/outbox.jsonl`) and its key recorded; the outbox is sent head
-first. A failed send keeps the message at the head, so later ones (same
-batch, the listener, the next reconcile) queue behind it: nothing goes out
-of order and a retry resends the same text. On the very first run —
+first. The outbox is written before any key is marked handled, and each
+sent or dropped message is removed from it at once, so a kill at any point
+can at worst resend one message, never lose one. A failed send keeps the
+message at the head, so later ones (same batch, the listener, the next
+reconcile) queue behind it: nothing goes out of order and a retry resends
+the same text. On the very first run —
 decided under the store lock, so a concurrent listener and watchdog agree — (no
 `trade_notify/initialized` marker) the broker history **before the first
 start** (`trade_notify/first_started`, written once by whichever of the
