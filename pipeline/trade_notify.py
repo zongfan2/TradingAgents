@@ -418,13 +418,13 @@ def _apply_fill(
                 entries[symbol] = {"avg": order.filled_avg_price, "qty": order.filled_qty}
         return None
     held = entries.get(symbol)
-    avg = held["avg"] if held else None
+    avg = held["avg"] if held and not held.get("unknown") else None  # unknown: no P&L
     if positions is not None:
         if current is None:
             entries.pop(symbol, None)
         else:
             entries[symbol] = keep_stamp({"avg": avg or current["avg"], "qty": current["qty"]})
-    elif held:
+    elif held and not held.get("unknown"):
         remaining = held["qty"] - (order.filled_qty or 0)
         if remaining > 1e-9:
             entries[symbol] = keep_stamp({"avg": held["avg"], "qty": remaining})

@@ -650,3 +650,15 @@ def test_events_after_the_first_start_are_sent_even_by_a_late_first_run(tmp_path
     send = Sender()
     tn.reconcile(Broker(orders=[old, missed]), state_dir=tmp_path, send=send, now=NOW)  # still the first run
     assert [m.split(" @")[0] for _, m in send.sent] == ["📝 下单 MU 买入 5 股"]  # history recorded, MU sent
+
+
+@pytest.mark.unit
+def test_listener_partial_exit_of_an_unknown_cost_basis(tmp_path):
+    tn.SentStore(tmp_path).mark_initialized()
+    tn.Entries(tmp_path).save({"MU": {"unknown": True}})
+    target = order("L-tgt", "leg-b", side="sell", status="filled", filled_qty=5, avg=980.0, limit=980.0)
+    send = Sender()
+    sent = tn.deliver([tn.event_from_update({"event": "fill", "order": target})], state_dir=tmp_path, send=send,
+                      positions=lambda: [{"symbol": "MU", "avg_entry_price": "850", "qty": "4"}])
+    assert sent == 1 and "盈亏" not in send.sent[0][1]  # real time, no guessed P&L
+    assert book(tmp_path) == {"MU": {"avg": 850.0, "qty": 4.0}}  # the broker's figure ends "unknown"
