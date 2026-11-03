@@ -705,3 +705,38 @@ def test_seed_and_listener_stamps_use_broker_time(tmp_path):
     tn.deliver([tn.event_from_update({"event": "fill", "order": stop})], state_dir=tmp_path, send=send,
                positions=lambda: [])
     assert "盈亏 −$221.85" in send.sent[0][1]
+
+
+@pytest.mark.unit
+def test_listener_position_read_is_stamped_with_the_broker_clock_after_the_read(tmp_path):
+    from datetime import timedelta
+
+    tn.SentStore(tmp_path).mark_initialized()
+    event_time = NOW - timedelta(minutes=3)
+    read_time = NOW - timedelta(minutes=1)  # a second fill may land in between
+    fill = at(entry("filled", filled_qty=5, avg=893.92), filled=event_time.isoformat())
+    tn.deliver([tn.event_from_update({"event": "fill", "order": fill})], state_dir=tmp_path, send=Sender(),
+               positions=lambda: [{"symbol": "MU", "avg_entry_price": "893.92", "qty": "5"}],
+               broker_now=lambda: read_time)
+    assert tn.Entries(tmp_path).load()["MU"]["as_of"] == read_time.isoformat()
+
+
+@pytest.mark.unit
+def test_a_message_that_never_sends_is_dropped_after_three_tries(tmp_path, caplog):
+    tn.SentStore(tmp_path).mark_initialized()
+    first = order("E1", "2026-11-03-us-MU-entry", status="new", legs=())
+    second = order("E2", "2026-11-03-us-AMD-entry", status="new", symbol="AMD", legs=())
+
+    class Poison(Sender):
+        def __call__(self, title, message):
+            if "MU" in message:
+                raise RuntimeError("keyword rejected")
+            self.sent.append((title, message))
+
+    send, broker = Poison(), Broker(orders=[first, second])
+    for _ in range(2):
+        tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)
+    assert send.sent == []  # still retried in order
+    tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)
+    assert [m.split(" @")[0] for _, m in send.sent] == ["📝 下单 AMD 买入 5 股"]
+    assert "dropped after 3 failed sends" in caplog.text

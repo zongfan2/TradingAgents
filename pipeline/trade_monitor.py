@@ -97,7 +97,8 @@ def main(argv: list[str] | None = None, *, stream_factory: Any = None, broker_fa
             event = trade_notify.event_from_update(data)
             if event is not None:
                 await asyncio.to_thread(trade_notify.deliver, [event], state_dir=state_dir,
-                                        send=send, positions=broker.positions, ledger_dir=ledger_dir)
+                                        send=send, positions=broker.positions, ledger_dir=ledger_dir,
+                                        broker_now=getattr(broker, "now", None))
         except Exception as exc:  # one bad message never stops the stream
             logger.warning("trade update not handled: %s", type(exc).__name__)
 

@@ -43,6 +43,9 @@ DAILY_REPORT_AFTER = time(16, 15)
 #: cancels by submission time over a longer window (stale-entry cancels).
 FILL_LOOKBACK = timedelta(days=3)
 ORDER_LOOKBACK = timedelta(days=30)
+#: Failed sends of one message before it is dropped (logged) so it never
+#: blocks the later ones.
+MAX_SEND_FAILURES = 3
 #: Order lifecycle events that are reported (T2); the rest are noise.
 TERMINAL_EVENTS = ("canceled", "expired", "rejected")
 _EVENT_LABEL = {"canceled": "⚠️ 撤单", "expired": "⚠️ 过期", "rejected": "⚠️ 拒单"}
@@ -274,6 +277,18 @@ class SentStore:
             atomic_write(path, stamp.isoformat() + "\n")
         return stamp
 
+    def fail(self, key: str) -> int:
+        """Count one failed send of ``key``; returns its failures so far."""
+        path = self.dir / "failures.json"
+        try:
+            counts = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            counts = {}
+        counts = counts if isinstance(counts, dict) else {}
+        counts[key] = int(counts.get(key, 0) or 0) + 1
+        atomic_write(path, json.dumps(counts, sort_keys=True) + "\n")
+        return counts[key]
+
     def initialized(self) -> bool:
         """False until the first reconcile recorded the history (T3)."""
         return (self.dir / "initialized").exists()
@@ -380,6 +395,7 @@ def _apply_fill(
     entries: dict[str, dict[str, Any]],
     event: TradeEvent,
     positions: Callable[[], list[Any]] | None,
+    broker_now: Callable[[], datetime | None] | None = None,
 ) -> float | None:
     """Update the entry book for a fill — or an entry that ended partly
     filled — and return the entry average an exit is measured against (None
@@ -401,17 +417,22 @@ def _apply_fill(
     if as_of is not None and when is not None and when < as_of:
         return None  # the book is ahead of this event: already in the figure
     current = None
-    read_at = datetime.now(timezone.utc)
+    read_at = None
     if positions is not None:
         try:
             current = _position_row(positions(), symbol)
         except Exception as exc:  # P&L is a courtesy; never block the message
             logger.warning("positions unavailable for %s: %s", symbol, type(exc).__name__)
             positions = None
+        else:
+            # An upper bound on the broker's clock, taken after the read: the
+            # figure may include any fill up to here (the event time is only a
+            # lower bound). Host clock only when the broker clock is unknown.
+            read_at = _broker_time(broker_now) or datetime.now(timezone.utc)
     stamp = (held or {}).get("seeded_at")
 
     def row(figure: dict[str, Any], valid_at: datetime | None) -> dict[str, Any]:
-        out = {**figure, "as_of": (valid_at or read_at).isoformat()}
+        out = {**figure, "as_of": (valid_at or read_at or datetime.now(timezone.utc)).isoformat()}
         if stamp:  # a seeded row stays seeded: a pre-seed order's fill may still come
             out["seeded_at"] = stamp
         return out
@@ -424,9 +445,7 @@ def _apply_fill(
         return None
     if order.side == "buy":
         if current is not None:
-            # The read follows the event: its broker time bounds the figure
-            # without trusting the host clock (WSL drifts after sleep).
-            entries[symbol] = row(current, when or read_at)
+            entries[symbol] = row(current, read_at)
         elif order.filled_avg_price and order.filled_qty:
             seeded = _instant(stamp) if stamp else None
             submitted = order.time_of("submitted")
@@ -448,7 +467,7 @@ def _apply_fill(
         if current is None:
             entries.pop(symbol, None)
         else:
-            entries[symbol] = row({"avg": avg or current["avg"], "qty": current["qty"]}, when or read_at)
+            entries[symbol] = row({"avg": avg or current["avg"], "qty": current["qty"]}, read_at)
     elif held and not held.get("unknown"):
         remaining = held["qty"] - (order.filled_qty or 0)
         if remaining > 1e-9:
@@ -615,7 +634,7 @@ def deliver(
             # First run: history before the first start is recorded, not sent
             # (and not booked — the book was seeded from today's positions).
             history = first_run and cutoff is not None and event.at < cutoff
-            entry_avg = None if history else _apply_fill(entries, event, positions)
+            entry_avg = None if history else _apply_fill(entries, event, positions, broker_now)
             if rebuild_book:
                 entry_avg = None  # the book may miss exits from the hole: no guessed P&L
             if not history:
@@ -627,11 +646,21 @@ def deliver(
                 try:
                     send(TITLE, format_event(event, entry_avg=entry_avg, plan=plan))
                 except Exception as exc:  # never the URL: LarkError text is scrubbed
-                    logger.warning("trade notification %s not sent (%s); the next reconcile resumes there",
-                                   event.key, exc if exc.__class__.__name__ == "LarkError" else type(exc).__name__)
+                    reason = exc if exc.__class__.__name__ == "LarkError" else type(exc).__name__
+                    failures = store.fail(event.key)
                     entries = book.load()  # drop the unsent fill's book change
-                    stopped = True
-                    break
+                    if failures < MAX_SEND_FAILURES:
+                        logger.warning("trade notification %s not sent (%s, attempt %d); the next "
+                                       "reconcile resumes there", event.key, reason, failures)
+                        stopped = True
+                        break
+                    # A message that never goes through must not hold back
+                    # every later one: give up on it, loudly, and go on.
+                    logger.error("trade notification %s dropped after %d failed sends (%s)",
+                                  event.key, failures, reason)
+                    store.record(event.key, sent=False)
+                    seen.add(event.key)
+                    continue
                 sent += 1
             store.record(event.key, sent=not history)
             seen.add(event.key)

@@ -46,7 +46,9 @@ count an in-flight or partial fill twice) — and only after a complete
 batch.
 Seeded on the first run from open positions; unknown → the message omits
 P&L rather than guess. A failed send stops the batch (no alignment), so an
-exit is never reported before its entry is booked.
+exit is never reported before its entry is booked — up to 3 failed sends of
+one message; then it is dropped with an error log, so a message that never
+goes through cannot hold back every later one.
 
 A placement (`new`) is never sent after a later event of the same order was
 already reported (it would arrive out of order), and a rejected order has
@@ -117,7 +119,8 @@ listener reads the broker's own position or the position is closed.
 
 Every book row carries `as_of` — the time its figure is valid for, always
 on the **broker's clock** (an event's broker time; a listener position read
-takes its triggering event's time; seeds take the broker clock), never the
+is stamped with the broker clock read *after* the position read — the
+event time is only a lower bound; seeds take the broker clock), never the
 host's (WSL drifts after sleep). A fallback event
 older than its symbol's `as_of` is already reflected in the row (the
 listener moved the book ahead while this one was missed): it changes
