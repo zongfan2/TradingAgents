@@ -687,3 +687,21 @@ def test_a_missed_fill_older_than_the_book_never_uses_a_later_cost_basis(tmp_pat
     exit_msg = send.sent[-1][1]
     assert exit_msg.startswith("🔚 止损平仓 MU") and "盈亏" not in exit_msg  # not measured against 950
     assert book(tmp_path) == {"MU": {"avg": 950.0, "qty": 5.0}}  # the newer figure is untouched
+
+
+@pytest.mark.unit
+def test_seed_and_listener_stamps_use_broker_time(tmp_path):
+    from datetime import timedelta
+
+    broker_clock = NOW - timedelta(minutes=7)  # the host runs ahead of the broker
+    broker = Broker(positions=[{"symbol": "MU", "avg_entry_price": "893.92", "qty": "5"}])
+    broker.now = lambda: broker_clock
+    tn.reconcile(broker, state_dir=tmp_path, send=Sender(), now=NOW)  # first run seeds
+    assert tn.Entries(tmp_path).load()["MU"]["as_of"] == broker_clock.isoformat()
+    # A stop that fills after the broker-time seed is applied with P&L.
+    stop = at(order("L-stop", "leg-a", side="sell", type_="stop", status="filled", filled_qty=5, avg=849.55,
+                    limit=None, stop=850.0), filled=(broker_clock + timedelta(minutes=1)).isoformat())
+    send = Sender()
+    tn.deliver([tn.event_from_update({"event": "fill", "order": stop})], state_dir=tmp_path, send=send,
+               positions=lambda: [])
+    assert "盈亏 −$221.85" in send.sent[0][1]

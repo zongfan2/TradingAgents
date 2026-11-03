@@ -347,7 +347,7 @@ class Entries:
     def save(self, entries: Mapping[str, Mapping[str, float]]) -> None:
         atomic_write(self.path, json.dumps(entries, sort_keys=True) + "\n")
 
-    def seed(self, positions: Iterable[Any]) -> None:
+    def seed(self, positions: Iterable[Any], at: datetime | None = None) -> None:
         """Fill in symbols the store does not know from the broker's open
         long positions (never overwrites what fills recorded)."""
         entries = self.load()
@@ -359,7 +359,7 @@ class Entries:
             if symbol and symbol not in entries and avg and qty and qty > 0:
                 # seeded_at: a fill of an order placed before this snapshot may
                 # already be inside it (a partial) — see _apply_fill.
-                seeded = datetime.now(timezone.utc).isoformat()
+                seeded = (at or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
                 entries[symbol] = {"avg": avg, "qty": qty, "seeded_at": seeded, "as_of": seeded}
                 changed = True
         if changed:
@@ -424,7 +424,9 @@ def _apply_fill(
         return None
     if order.side == "buy":
         if current is not None:
-            entries[symbol] = row(current, read_at)
+            # The read follows the event: its broker time bounds the figure
+            # without trusting the host clock (WSL drifts after sleep).
+            entries[symbol] = row(current, when or read_at)
         elif order.filled_avg_price and order.filled_qty:
             seeded = _instant(stamp) if stamp else None
             submitted = order.time_of("submitted")
@@ -446,7 +448,7 @@ def _apply_fill(
         if current is None:
             entries.pop(symbol, None)
         else:
-            entries[symbol] = row({"avg": avg or current["avg"], "qty": current["qty"]}, read_at)
+            entries[symbol] = row({"avg": avg or current["avg"], "qty": current["qty"]}, when or read_at)
     elif held and not held.get("unknown"):
         remaining = held["qty"] - (order.filled_qty or 0)
         if remaining > 1e-9:
@@ -575,6 +577,7 @@ def deliver(
     ledger_dir: str | Path | None = None,
     rebuild_book: bool = False,
     reconciled_at: datetime | None = None,
+    broker_now: Callable[[], datetime | None] | None = None,
 ) -> int:
     """Send each not-yet-delivered event once, in order (T3); returns the
     messages sent.
@@ -597,7 +600,7 @@ def deliver(
         first_run = reconcile_positions is not None and not store.initialized()
         cutoff = store.first_started(reconciled_at or datetime.now(timezone.utc)) if first_run else None
         if first_run:
-            book.seed(reconcile_positions())
+            book.seed(reconcile_positions(), _broker_time(broker_now))
         seen = store.keys()
         entries = book.load()
         for event in events:
@@ -641,7 +644,7 @@ def deliver(
                 stopped = True
             else:
                 book.save({})
-                book.seed(held)  # the broker's own cost basis of what is held now
+                book.seed(held, _broker_time(broker_now))  # the broker's own cost basis now
         if reconciled_at is not None and not stopped:
             store.mark_reconciled(reconciled_at)  # only a complete batch closes the window
         if first_run:
@@ -651,6 +654,18 @@ def deliver(
             # retried would let it average into today's position.
             _align_book(book, reconcile_positions)
     return sent
+
+
+def _broker_time(broker_now: Callable[[], datetime | None] | None) -> datetime | None:
+    """The broker's clock for seed stamps (compared with broker event times);
+    None → the host clock."""
+    if broker_now is None:
+        return None
+    try:
+        return broker_now()
+    except Exception as exc:
+        logger.warning("broker clock unavailable: %s", type(exc).__name__)
+        return None
 
 
 def _align_book(book: Entries, positions: Callable[[], list[Any]]) -> None:
@@ -726,6 +741,11 @@ class AlpacaReadOnly:
     def order(self, order_id: str) -> Any:
         return self._client.get_order_by_id(order_id)
 
+    def now(self) -> datetime | None:
+        """The broker's clock (seed stamps are compared with broker times)."""
+        stamp = getattr(self._client.get_clock(), "timestamp", None)
+        return _instant(stamp)
+
     def open_orders(self) -> list[Any]:
         from alpaca.trading.enums import QueryOrderStatus
         from alpaca.trading.requests import GetOrdersRequest
@@ -781,7 +801,8 @@ def reconcile(broker: ReadOnlyBroker, *, state_dir: str | Path, send: Sender | N
     # P&L is not guessed, and the book is rebuilt from today's positions.
     hole = last is not None and now - last > FILL_LOOKBACK
     return deliver(events, state_dir=state_dir, send=send, reconcile_positions=broker.positions,
-                   ledger_dir=ledger_dir, rebuild_book=hole, reconciled_at=now)
+                   ledger_dir=ledger_dir, rebuild_book=hole, reconciled_at=now,
+                   broker_now=getattr(broker, "now", None))
 
 
 def daily_report(broker: ReadOnlyBroker) -> str:

@@ -115,8 +115,10 @@ averaging in twice. Unknown is a state, not a deletion: later buys do not
 restart the book as if they were the whole position; it ends when the
 listener reads the broker's own position or the position is closed.
 
-Every book row carries `as_of` — the time its figure is valid for (an
-event's time; for a broker position read, the read time). A fallback event
+Every book row carries `as_of` — the time its figure is valid for, always
+on the **broker's clock** (an event's broker time; a listener position read
+takes its triggering event's time; seeds take the broker clock), never the
+host's (WSL drifts after sleep). A fallback event
 older than its symbol's `as_of` is already reflected in the row (the
 listener moved the book ahead while this one was missed): it changes
 nothing, and its exit carries no P&L. A filled order's placement older than the fill window is not

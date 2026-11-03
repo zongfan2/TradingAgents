@@ -83,7 +83,9 @@ def main(argv: list[str] | None = None, *, stream_factory: Any = None, broker_fa
     # Events missed while no listener ran (first run: history recorded only).
     ledger_dir = config.ledger_dir
     # The first-run cutoff: events from now on are this listener's to report.
-    trade_notify.SentStore(state_dir).first_started(datetime.now(timezone.utc))
+    store = trade_notify.SentStore(state_dir)
+    with store.exclusive():  # the same lock deliver decides the first run under
+        store.first_started(datetime.now(timezone.utc))
     try:  # a failing snapshot read must not keep the real-time stream down
         trade_notify.reconcile(broker, state_dir=state_dir, send=send, now=datetime.now(timezone.utc),
                                ledger_dir=ledger_dir)
