@@ -425,7 +425,7 @@ def test_a_failed_send_stops_the_batch_so_order_is_kept(tmp_path):
 
 
 @pytest.mark.unit
-def test_a_failed_send_does_not_align_the_book_before_the_retry(tmp_path):
+def test_a_failed_send_keeps_the_messages_queued_and_the_book_in_order(tmp_path):
     """E1 893.92 → stop 849.55 → E2 re-entry 950 held now; E1's message fails once."""
     tn.SentStore(tmp_path).mark_initialized()
     e1 = entry("filled", filled_qty=5, avg=893.92, stop_status="filled", stop_filled=5, stop_avg=849.55,
@@ -438,7 +438,8 @@ def test_a_failed_send_does_not_align_the_book_before_the_retry(tmp_path):
                     by_id={"E1": e1, "L-stop": stop_leg, "E2": e2})
     send = Sender(fail=1)
     tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)
-    assert book(tmp_path) == {}  # not aligned to today's 950 before the retry
+    assert send.sent == [] and len(tn.SentStore(tmp_path).outbox()) == 3  # queued behind the failure
+    assert book(tmp_path) == {"MU": {"avg": 950.0, "qty": 5.0}}  # booked in order, E2 from its own fill
     tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)
     exit_msg = next(m for _, m in send.sent if m.startswith("🔚"))
     assert "成本 893.92" in exit_msg and "−$221.85" in exit_msg
@@ -722,7 +723,7 @@ def test_listener_position_read_is_stamped_with_the_broker_clock_after_the_read(
 
 
 @pytest.mark.unit
-def test_a_message_that_never_sends_is_dropped_after_three_tries(tmp_path, caplog):
+def test_a_message_that_never_sends_is_dropped_after_max_tries(tmp_path, caplog):
     tn.SentStore(tmp_path).mark_initialized()
     first = order("E1", "2026-11-03-us-MU-entry", status="new", legs=())
     second = order("E2", "2026-11-03-us-AMD-entry", status="new", symbol="AMD", legs=())
@@ -754,3 +755,22 @@ def test_a_dropped_fill_message_keeps_its_book_change(tmp_path, monkeypatch):
     reentry = order("E2", "2026-11-04-us-MU-entry", status="filled", filled_qty=5, avg=950.0, legs=())
     tn.deliver([tn.event_from_update({"event": "fill", "order": reentry})], state_dir=tmp_path, send=Sender())
     assert book(tmp_path) == {"MU": {"avg": 950.0, "qty": 5.0}}  # not averaged with the stale 800
+
+
+@pytest.mark.unit
+def test_listener_exit_queues_behind_a_failed_entry_message_with_its_pnl(tmp_path):
+    tn.SentStore(tmp_path).mark_initialized()
+    send = Sender(fail=1)
+    held = {"now": [{"symbol": "MU", "avg_entry_price": "893.92", "qty": "5"}]}
+
+    def stream(update):
+        tn.deliver([tn.event_from_update(update)], state_dir=tmp_path, send=send, positions=lambda: held["now"])
+
+    stream({"event": "fill", "order": entry("filled", filled_qty=5, avg=893.92)})  # Lark times out
+    held["now"] = []
+    stream({"event": "fill", "order": order("L-stop", "leg-a", side="sell", type_="stop", status="filled",
+                                            filled_qty=5, avg=849.55, limit=None, stop=850.0)})
+    messages = [m for _, m in send.sent]
+    assert messages[0].startswith("✅ 成交 MU") and messages[1].startswith("🔚 止损平仓 MU")  # in order
+    assert "盈亏 −$221.85（−4.96%，成本 893.92）" in messages[1]
+    assert tn.SentStore(tmp_path).outbox() == []

@@ -46,10 +46,10 @@ count an in-flight or partial fill twice) — and only after a complete
 batch.
 Seeded on the first run from open positions; unknown → the message omits
 P&L rather than guess. A failed send stops the batch (no alignment), so an
-exit is never reported before its entry is booked — up to 10 failed sends
-of one message (tries come from the listener and every reconcile, about two
-hours of Lark outage); then the *message* is dropped with an error log — its
-book change is kept, the trade happened — so a message that never goes
+exit is never reported before its entry is booked — after 10 failed sends of
+one queued message (tries come from the listener and every reconcile, about
+two hours of Lark outage) the *message* is dropped with an error log — its
+book change stands, the trade happened — so a message that never goes
 through cannot hold back every later one.
 
 A placement (`new`) is never sent after a later event of the same order was
@@ -63,9 +63,13 @@ delivered message: `<order_id>:new`, `<order_id>:fill`,
 `<order_id>:<canceled|expired|rejected>`. A send that times out without
 an answer is treated as not sent and retried, so in that one ambiguous case
 a message can arrive twice (a duplicate is preferred over a missed trade).
-Check-send-record runs under an exclusive file lock, so the listener and
-the fallback (T5) never both send one event; a failed send is not
-recorded (the next fallback resumes there). On the very first run —
+Under an exclusive file lock shared by the listener and the fallback (T5),
+each new event is booked at once and its message — P&L computed then, with
+the right cost basis — appended to a persistent **outbox**
+(`trade_notify/outbox.jsonl`) and its key recorded; the outbox is sent head
+first. A failed send keeps the message at the head, so later ones (same
+batch, the listener, the next reconcile) queue behind it: nothing goes out
+of order and a retry resends the same text. On the very first run —
 decided under the store lock, so a concurrent listener and watchdog agree — (no
 `trade_notify/initialized` marker) the broker history **before the first
 start** (`trade_notify/first_started`, written once by whichever of the

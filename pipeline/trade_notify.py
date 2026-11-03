@@ -278,17 +278,25 @@ class SentStore:
             atomic_write(path, stamp.isoformat() + "\n")
         return stamp
 
-    def fail(self, key: str) -> int:
-        """Count one failed send of ``key``; returns its failures so far."""
-        path = self.dir / "failures.json"
+    def outbox(self) -> list[dict[str, Any]]:
+        """Queued messages, oldest first (see :func:`deliver`)."""
         try:
-            counts = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            counts = {}
-        counts = counts if isinstance(counts, dict) else {}
-        counts[key] = int(counts.get(key, 0) or 0) + 1
-        atomic_write(path, json.dumps(counts, sort_keys=True) + "\n")
-        return counts[key]
+            text = (self.dir / "outbox.jsonl").read_text(encoding="utf-8")
+        except OSError:
+            return []
+        items = []
+        for raw in text.splitlines():
+            try:
+                item = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(item, dict) and isinstance(item.get("text"), str):
+                items.append(item)
+        return items
+
+    def save_outbox(self, items: list[dict[str, Any]]) -> None:
+        atomic_write(self.dir / "outbox.jsonl",
+                     "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in items))
 
     def initialized(self) -> bool:
         """False until the first reconcile recorded the history (T3)."""
@@ -599,92 +607,104 @@ def deliver(
     reconciled_at: datetime | None = None,
     broker_now: Callable[[], datetime | None] | None = None,
 ) -> int:
-    """Send each not-yet-delivered event once, in order (T3); returns the
-    messages sent.
+    """Handle each new event once, in order, through a persistent outbox
+    (T3); returns the messages sent.
+
+    Each event is booked at once (the book changes in the order things
+    happened) and its message — P&L computed now, with the right cost
+    basis — appended to ``outbox.jsonl``; the outbox is then sent head
+    first. A failed send leaves its message at the head, so later ones —
+    from this batch, the listener or the next reconcile — queue behind it
+    and nothing goes out of order; after MAX_SEND_FAILURES the message (not
+    the trade) is dropped with an error log.
 
     ``positions`` (the listener, at the moment of the fill) lets a fill take
     its cost basis from the broker's position. ``reconcile_positions`` (the
     fallback, events possibly hours old) never does — the position *now* is
     not the position *then* — fills use the orders' own totals, and after
-    a complete batch symbols the broker no longer holds are dropped (never
-    added or resized). It also decides the first run under
-    the lock: no ``initialized`` marker → the book is seeded from today's
-    positions and the history recorded without sending.
-
-    A failed send stops the batch (logged, unrecorded): the next reconcile
-    resumes there, so an exit is never measured before its entry is booked.
+    the batch symbols the broker no longer holds are dropped (never added
+    or resized). It also decides the first run under the lock: no
+    ``initialized`` marker → the book is seeded from today's positions and
+    the history before the first start recorded without a message.
     """
     store, book = SentStore(state_dir), Entries(state_dir)
-    sent, stopped = 0, False
+    rebuild_failed = False
     with store.exclusive():
         first_run = reconcile_positions is not None and not store.initialized()
-        cutoff = store.first_started(reconciled_at or datetime.now(timezone.utc)) if first_run else None
+        cutoff = (store.first_started(_broker_time(broker_now) or reconciled_at or datetime.now(timezone.utc))
+                  if first_run else None)
         if first_run:
             book.seed(reconcile_positions(), _broker_time(broker_now))
         seen = store.keys()
         entries = book.load()
+        outbox = store.outbox()
         for event in events:
             if event.key in seen:
                 continue
             if event.event == "new" and any(key.startswith(f"{event.order.id}:") for key in seen):
-                # A later event of this order was already reported: a
+                # A later event of this order was already handled: a
                 # placement message now would arrive out of order.
                 store.record(event.key, sent=False)
                 seen.add(event.key)
                 continue
             # First run: history before the first start is recorded, not sent
             # (and not booked — the book was seeded from today's positions).
-            history = first_run and cutoff is not None and event.at < cutoff
-            entry_avg = None if history else _apply_fill(entries, event, positions, broker_now)
+            if first_run and cutoff is not None and event.at < cutoff:
+                store.record(event.key, sent=False)
+                seen.add(event.key)
+                continue
+            entry_avg = _apply_fill(entries, event, positions, broker_now)
             if rebuild_book:
                 entry_avg = None  # the book may miss exits from the hole: no guessed P&L
-            if not history:
-                if send is None:
-                    stopped = True
-                    break
-                plan = (plan_line(ledger_dir or Path(state_dir) / "ledger", event.order.client_order_id)
-                        if event.event == "new" else None)
-                try:
-                    send(TITLE, format_event(event, entry_avg=entry_avg, plan=plan))
-                except Exception as exc:  # never the URL: LarkError text is scrubbed
-                    reason = exc if exc.__class__.__name__ == "LarkError" else type(exc).__name__
-                    failures = store.fail(event.key)
-                    if failures < MAX_SEND_FAILURES:
-                        entries = book.load()  # undo the unsent fill's book change: it is retried
-                        logger.warning("trade notification %s not sent (%s, attempt %d); the next "
-                                       "reconcile resumes there", event.key, reason, failures)
-                        stopped = True
-                        break
-                    # A message that never goes through must not hold back
-                    # every later one: give up on the *message*, loudly — the
-                    # trade happened, so its book change is kept.
-                    logger.error("trade notification %s dropped after %d failed sends (%s)",
-                                  event.key, failures, reason)
-                    store.record(event.key, sent=False)
-                    seen.add(event.key)
-                    book.save(entries)
-                    continue
-                sent += 1
-            store.record(event.key, sent=not history)
+            plan = (plan_line(ledger_dir or Path(state_dir) / "ledger", event.order.client_order_id)
+                    if event.event == "new" else None)
+            outbox.append({"key": event.key, "text": format_event(event, entry_avg=entry_avg, plan=plan),
+                           "failures": 0})
+            store.record(event.key, sent=True)  # handled: queued for sending
             seen.add(event.key)
-            book.save(entries)
-        if rebuild_book and not first_run and reconcile_positions is not None and not stopped:
+        book.save(entries)
+        sent = _flush(outbox, send)
+        store.save_outbox(outbox)
+        if rebuild_book and not first_run and reconcile_positions is not None:
             try:  # read first: a failed read leaves the book and the window as they were
                 held = reconcile_positions()
             except Exception as exc:
                 logger.warning("positions unavailable to rebuild the entry book: %s", type(exc).__name__)
-                stopped = True
+                rebuild_failed = True
             else:
                 book.save({})
                 book.seed(held, _broker_time(broker_now))  # the broker's own cost basis now
-        if reconciled_at is not None and not stopped:
-            store.mark_reconciled(reconciled_at)  # only a complete batch closes the window
+        if reconciled_at is not None and not rebuild_failed:
+            store.mark_reconciled(reconciled_at)
         if first_run:
             store.mark_initialized()
-        elif reconcile_positions is not None and not stopped and not rebuild_book:
-            # Only after a complete batch: aligning before an unsent fill is
-            # retried would let it average into today's position.
+        elif reconcile_positions is not None and not rebuild_book:
             _align_book(book, reconcile_positions)
+    return sent
+
+
+def _flush(outbox: list[dict[str, Any]], send: Sender | None) -> int:
+    """Send the outbox head first, removing what went out; stop at the
+    first failure unless that message has failed MAX_SEND_FAILURES times
+    (then it is dropped — the trade is booked; only the message is lost)."""
+    sent = 0
+    while outbox and send is not None:
+        item = outbox[0]
+        try:
+            send(TITLE, str(item.get("text") or ""))
+        except Exception as exc:  # never the URL: LarkError text is scrubbed
+            reason = exc if exc.__class__.__name__ == "LarkError" else type(exc).__name__
+            item["failures"] = int(item.get("failures") or 0) + 1
+            if item["failures"] < MAX_SEND_FAILURES:
+                logger.warning("trade notification %s not sent (%s, attempt %d); %d queued behind it",
+                               item.get("key"), reason, item["failures"], len(outbox) - 1)
+                return sent
+            logger.error("trade notification %s dropped after %d failed sends (%s)",
+                          item.get("key"), item["failures"], reason)
+            outbox.pop(0)
+            continue
+        outbox.pop(0)
+        sent += 1
     return sent
 
 
