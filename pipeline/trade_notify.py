@@ -1,8 +1,9 @@
 """Trade notifications to a separate Lark trades group (specs/trade-notifications.md).
 
-- :func:`event_from_update` / :func:`events_from_orders` — broker trade
-  updates (the listener's stream) and order snapshots (the fallback
-  reconcile) mapped to the same :class:`TradeEvent`s (T2/T5).
+- :func:`event_from_update` / :func:`events_from_orders` /
+  :func:`events_from_fills` — broker trade updates (the listener's stream),
+  order snapshots and fill activities (the fallback reconcile) mapped to the
+  same :class:`TradeEvent`s (T2/T5).
 - :class:`SentStore` — exactly-once delivery: check-send-record under an
   exclusive file lock shared by the listener and the hourly fallback (T3).
 - :func:`deliver` — format and send one event; exits carry realized P&L
@@ -37,8 +38,11 @@ TITLE = "TradingAgents 交易"
 NY = ZoneInfo("America/New_York")
 #: T6: the daily report goes out at the first watchdog fire after this.
 DAILY_REPORT_AFTER = time(16, 15)
-#: T5: how far back the fallback reconcile looks.
-RECONCILE_LOOKBACK = timedelta(days=3)
+#: T5: fills are looked up by *fill* time (account FILL activities), so an
+#: exit of a bracket submitted weeks ago is still found; order placements and
+#: cancels by submission time over a longer window (stale-entry cancels).
+FILL_LOOKBACK = timedelta(days=3)
+ORDER_LOOKBACK = timedelta(days=30)
 #: Order lifecycle events that are reported (T2); the rest are noise.
 TERMINAL_EVENTS = ("canceled", "expired", "rejected")
 _EVENT_LABEL = {"canceled": "⚠️ 撤单", "expired": "⚠️ 过期", "rejected": "⚠️ 拒单"}
@@ -123,22 +127,19 @@ def order_view(raw: Any) -> OrderView:
 class TradeEvent:
     """One reportable order lifecycle event (T2)."""
 
-    event: str                 # new | fill | partial_fill | canceled | expired | rejected
-    order: OrderView
-    price: float | None = None  # this execution's price (fills)
-    qty: float | None = None    # this execution's qty (fills)
-    position_qty: float | None = None
+    event: str                 # new | fill | canceled | expired | rejected
+    order: OrderView           # the order's state; fills report its totals
 
     @property
     def key(self) -> str:
         """The T3 dedup key — the same whether the stream or a snapshot saw it."""
-        if self.event == "partial_fill":
-            return f"{self.order.id}:partial:{self.order.filled_qty:g}"
         return f"{self.order.id}:{self.event}"
 
 
 def _reportable(event: str, order: OrderView) -> bool:
-    if event in ("fill", "partial_fill"):
+    # Partial fills are not messages: orders fill in several executions
+    # (measured: AAPL 4, MU 2), and the final fill reports the totals.
+    if event == "fill":
         return order.kind != "other"
     if event == "new" or event in TERMINAL_EVENTS:
         # A bracket leg canceled because its sibling filled is not news.
@@ -156,8 +157,7 @@ def event_from_update(update: Any) -> TradeEvent | None:
     order = order_view(data.get("order") or {})
     if not order.id or not _reportable(event, order):
         return None
-    return TradeEvent(event, order, _num(data.get("price")), _num(data.get("qty")),
-                      _num(data.get("position_qty")))
+    return TradeEvent(event, order)
 
 
 def _flatten(orders: Iterable[OrderView]) -> Iterator[OrderView]:
@@ -167,20 +167,36 @@ def _flatten(orders: Iterable[OrderView]) -> Iterator[OrderView]:
 
 
 def events_from_orders(orders: Iterable[Any]) -> list[TradeEvent]:
-    """T5: the events each order's *current* state implies, oldest first by
-    the broker's listing (entries before their legs' exits)."""
+    """T5: placements and terminal states of entry/close orders implied by
+    their *current* state (fills come from :func:`events_from_fills`)."""
     events: list[TradeEvent] = []
     for order in _flatten(order_view(o) for o in orders):
-        if not order.id:
+        if not order.id or order.kind not in ("entry", "close"):
             continue
-        if order.kind in ("entry", "close") and order.status in (
-            "new", "accepted", "partially_filled", "filled", *TERMINAL_EVENTS
-        ):
+        if order.status in ("new", "accepted", "partially_filled", "filled", *TERMINAL_EVENTS):
             events.append(TradeEvent("new", order))
-        if order.status == "filled" and _reportable("fill", order):
-            events.append(TradeEvent("fill", order, order.filled_avg_price, order.filled_qty))
-        elif order.status in TERMINAL_EVENTS and _reportable(order.status, order):
+        if order.status in TERMINAL_EVENTS:
             events.append(TradeEvent(order.status, order))
+    return events
+
+
+def events_from_fills(activities: Iterable[Any], get_order: Callable[[str], Any]) -> list[TradeEvent]:
+    """T5: one ``fill`` per order whose FILL activities (by fill time, any
+    order age) reached ``order_status: filled``, with the order's totals,
+    in fill-time order. An order the broker cannot return is skipped (the
+    next reconcile retries)."""
+    events: list[TradeEvent] = []
+    for activity in activities:
+        data = activity if isinstance(activity, dict) else {}
+        if _text(data.get("order_status")) != "filled" or not data.get("order_id"):
+            continue
+        try:
+            order = order_view(get_order(str(data["order_id"])))
+        except Exception as exc:
+            logger.warning("order of a fill not readable: %s", type(exc).__name__)
+            continue
+        if order.id and _reportable("fill", order):
+            events.append(TradeEvent("fill", order))
     return events
 
 
@@ -198,8 +214,12 @@ class SentStore:
         self.path = self.dir / "sent.jsonl"
         self._lock_path = self.dir / "sent.lock"
 
-    def exists(self) -> bool:
-        return self.path.exists()
+    def initialized(self) -> bool:
+        """False until the first reconcile recorded the history (T3)."""
+        return (self.dir / "initialized").exists()
+
+    def mark_initialized(self) -> None:
+        atomic_write(self.dir / "initialized", datetime.now(timezone.utc).isoformat() + "\n")
 
     def keys(self) -> set[str]:
         try:
@@ -289,12 +309,14 @@ def _apply_fill(
     event: TradeEvent,
     positions: Callable[[], list[Any]] | None,
 ) -> float | None:
-    """Update the entry book for a (final) fill; return the entry average an
-    exit is measured against, None when unknown. The broker's position is
-    the truth (adds average in exactly); without it, the order's own fill."""
+    """Update the entry book for a fill — or an entry that ended partly
+    filled — and return the entry average an exit is measured against (None
+    when unknown). The broker's position is the truth (adds average in
+    exactly); without it, the order's own totals."""
     order, symbol = event.order, event.order.symbol
-    if event.event != "fill":
-        return None  # partial fills: the final fill settles the book
+    filled = (order.filled_qty or 0) > 0
+    if not (event.event == "fill" or (event.event in TERMINAL_EVENTS and filled)):
+        return None
     current = None
     if positions is not None:
         try:
@@ -306,7 +328,13 @@ def _apply_fill(
         if current is not None:
             entries[symbol] = current
         elif order.filled_avg_price and order.filled_qty:
-            entries[symbol] = {"avg": order.filled_avg_price, "qty": order.filled_qty}
+            held = entries.get(symbol)
+            if held:  # an add: average in
+                total = held["qty"] + order.filled_qty
+                entries[symbol] = {"avg": (held["avg"] * held["qty"] + order.filled_avg_price * order.filled_qty)
+                                   / total, "qty": total}
+            else:
+                entries[symbol] = {"avg": order.filled_avg_price, "qty": order.filled_qty}
         return None
     held = entries.get(symbol)
     avg = held["avg"] if held else None
@@ -316,7 +344,7 @@ def _apply_fill(
         else:
             entries[symbol] = {"avg": avg or current["avg"], "qty": current["qty"]}
     elif held:
-        remaining = event.position_qty if event.position_qty is not None else held["qty"] - (event.qty or 0)
+        remaining = held["qty"] - (order.filled_qty or 0)
         if remaining > 1e-9:
             entries[symbol] = {"avg": held["avg"], "qty": remaining}
         else:
@@ -394,22 +422,22 @@ def format_event(event: TradeEvent, *, entry_avg: float | None = None, plan: str
         if order.kind == "close":
             line = line.replace("📝 下单", "📝 平仓下单", 1)
         return line + (f"\n{plan}" if plan else "")
-    if event.event == "partial_fill":
-        return (f"◐ 部分成交 {order.symbol} {side} {_qty(event.qty)} 股 @ {_px(event.price)}"
-                f"（累计 {_qty(order.filled_qty)}/{_qty(order.qty)}）")
+    qty, price = order.filled_qty, order.filled_avg_price  # the order's totals
     if event.event == "fill":
         if order.side == "buy":
             limit = f"（限价 {_px(order.limit_price)}）" if order.limit_price is not None else ""
-            return f"✅ 成交 {order.symbol} 买入 {_qty(event.qty)} 股 @ {_px(event.price)}{limit}"
-        label = _EXIT_LABEL.get(order.kind, "🔚 平仓")
-        line = f"{label} {order.symbol} 卖出 {_qty(event.qty)} 股 @ {_px(event.price)}"
-        if entry_avg and event.price is not None and event.qty:
-            pnl = (event.price - entry_avg) * event.qty
-            pct = (event.price / entry_avg - 1) * 100
-            line += f"\n盈亏 {'+' if pnl >= 0 else '−'}${abs(pnl):,.2f}（{_signed_pct(pct)}，成本 {_px(entry_avg)}）"
+            return f"✅ 成交 {order.symbol} 买入 {_qty(qty)} 股 @ 均价 {_px(price)}{limit}"
+        line = f"{_EXIT_LABEL.get(order.kind, '🔚 平仓')} {order.symbol} 卖出 {_qty(qty)} 股 @ 均价 {_px(price)}"
+        if entry_avg and price is not None and qty:
+            pnl = (price - entry_avg) * qty
+            line += (f"\n盈亏 {'+' if pnl >= 0 else '−'}${abs(pnl):,.2f}"
+                     f"（{_signed_pct((price / entry_avg - 1) * 100)}，成本 {_px(entry_avg)}）")
         return line
-    label = _EVENT_LABEL.get(event.event, event.event)
-    return f"{label} {order.symbol} {side} {_qty(order.qty)} 股 @ 限价 {_px(order.limit_price)}（{order.client_order_id}）"
+    line = (f"{_EVENT_LABEL.get(event.event, event.event)} {order.symbol} {side} {_qty(order.qty)} 股 "
+            f"@ 限价 {_px(order.limit_price)}")
+    if qty:
+        line += f"（已成交 {_qty(qty)} 股，均价 {_px(price)}）"
+    return f"{line}\n{order.client_order_id}"
 
 
 def deliver(
@@ -431,7 +459,9 @@ def deliver(
         for event in events:
             if event.key in seen:
                 continue
-            entry_avg = _apply_fill(entries, event, None if record_only else positions)
+            # First run: the book was seeded from the broker's positions —
+            # replaying history into it would count those fills twice.
+            entry_avg = None if record_only else _apply_fill(entries, event, positions)
             if not record_only:
                 if send is None:
                     return sent
@@ -457,6 +487,9 @@ def deliver(
 
 class ReadOnlyBroker(Protocol):
     def orders_since(self, after: datetime) -> list[Any]: ...
+    def fills_since(self, after: datetime) -> list[dict]: ...
+    def order(self, order_id: str) -> Any: ...
+    def open_orders(self) -> list[Any]: ...
     def positions(self) -> list[Any]: ...
     def account(self) -> Any: ...
     def is_trading_day(self, day: Any) -> bool: ...
@@ -483,6 +516,29 @@ class AlpacaReadOnly:
                                    limit=500, direction="asc")
         return list(self._client.get_orders(filter=request))
 
+    def fills_since(self, after: datetime) -> list[dict]:
+        """Account FILL activities by fill time (``/v2/account/activities``;
+        not wrapped by alpaca-py 0.43), oldest first, all pages."""
+        rows: list[dict] = []
+        params: dict[str, Any] = {"after": after.astimezone(timezone.utc).isoformat(),
+                                  "direction": "asc", "page_size": 100}
+        for _ in range(50):
+            page = self._client.get("/account/activities/FILL", params) or []
+            rows.extend(row for row in page if isinstance(row, dict))
+            if len(page) < 100:
+                break
+            params["page_token"] = page[-1].get("id")
+        return rows
+
+    def order(self, order_id: str) -> Any:
+        return self._client.get_order_by_id(order_id)
+
+    def open_orders(self) -> list[Any]:
+        from alpaca.trading.enums import QueryOrderStatus
+        from alpaca.trading.requests import GetOrdersRequest
+
+        return list(self._client.get_orders(filter=GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=500)))
+
     def positions(self) -> list[Any]:
         return list(self._client.get_all_positions())
 
@@ -507,14 +563,20 @@ def alpaca_keys() -> tuple[str, str]:
 
 def reconcile(broker: ReadOnlyBroker, *, state_dir: str | Path, send: Sender | None,
               now: datetime) -> int:
-    """T5: report anything the listener missed (first run: record only)."""
+    """T5: report anything the listener missed — placements and cancels by
+    submission time, fills by fill time. The first run records history
+    without sending and marks the store initialized, even when empty."""
     store = SentStore(state_dir)
-    first_run = not store.exists()
+    first_run = not store.initialized()
     if first_run:
         Entries(state_dir).seed(broker.positions())
-    events = events_from_orders(broker.orders_since(now - RECONCILE_LOOKBACK))
-    return deliver(events, state_dir=state_dir, send=send, record_only=first_run,
+    events = events_from_orders(broker.orders_since(now - ORDER_LOOKBACK))
+    events += events_from_fills(broker.fills_since(now - FILL_LOOKBACK), broker.order)
+    sent = deliver(events, state_dir=state_dir, send=send, record_only=first_run,
                    positions=broker.positions)
+    if first_run:
+        store.mark_initialized()
+    return sent
 
 
 def daily_report(broker: ReadOnlyBroker) -> str:
@@ -535,12 +597,8 @@ def daily_report(broker: ReadOnlyBroker) -> str:
         pl += "" if uplpc is None else f"（{_signed_pct(uplpc * 100)}）"
         lines.append(f"• {str(p.get('symbol') or '').upper()} {_qty(_num(p.get('qty')))} 股，成本 "
                      f"{_px(_num(p.get('avg_entry_price')))}，现价 {_px(_num(p.get('current_price')))}{pl}")
-    try:
-        open_orders = sum(1 for o in broker.orders_since(datetime.now(timezone.utc) - RECONCILE_LOOKBACK)
-                          if order_view(o).status in ("new", "accepted", "held", "partially_filled"))
-        lines.append(f"挂单 {open_orders} 笔")
-    except Exception:  # the count is a courtesy line
-        pass
+    with contextlib.suppress(Exception):  # the count is a courtesy line
+        lines.append(f"挂单 {len(broker.open_orders())} 笔")
     return "\n".join(lines)
 
 

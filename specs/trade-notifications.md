@@ -31,25 +31,26 @@ error text, never logged).
 | Broker event (order) | Message |
 |---|---|
 | `new`/`accepted` of an entry (`…-entry`) or signal close (`…-close-N`) | 📝 下单 — side, qty, limit, bracket stop/target; for an entry the plan's conviction, catalyst score and invalidation (one line, from `decisions.jsonl` by run id) |
-| `fill` | ✅ 成交 (entry) / 🔚 平仓 (exit: 止损 stop leg, 止盈 target leg, 信号平仓 close order) — qty, fill price; exits add realized P&L $ and % vs the entry average |
-| `partial_fill` | ◐ 部分成交 — filled so far / total |
-| `canceled` / `expired` / `rejected` of an entry or close order | ⚠️ 撤单 / 过期 / 拒单 with the order's reason when given (a bracket leg canceled because its sibling filled is not reported) |
-| others (`replaced`, `pending_*`, `done_for_day`…) | not reported |
+| `fill` | ✅ 成交 (entry) / 🔚 平仓 (exit: 止损 stop leg, 止盈 target leg, 信号平仓 close order) — the **order's totals** (filled qty, average price); exits add realized P&L $ and % on those totals vs the entry average |
+| `canceled` / `expired` / `rejected` of an entry or close order | ⚠️ 撤单 / 过期 / 拒单 with the client order id and, when it partly filled, the filled qty and average (a bracket leg canceled because its sibling filled is not reported) |
+| `partial_fill`, `replaced`, `pending_*`, `done_for_day`… | not reported — orders fill in several executions (measured 10-26..11-02: AAPL 4, SNDK 2, MU 2), the final `fill` reports the totals |
 
-Exit P&L uses the entry average recorded when the entry filled
-(`trade_notify/entries.json`, seeded at monitor start from the broker's
-open positions); unknown → the message omits P&L rather than guess.
+Exit P&L uses the entry average recorded when the entry filled — or ended
+partly filled — (`trade_notify/entries.json`: the broker's position after
+the fill, else the order's totals; seeded on the first run from open
+positions); unknown → the message omits P&L rather than guess.
 
 ### T3 — Exactly-once delivery
 
 A persistent store `<state_dir>/trade_notify/sent.jsonl` holds one key per
 delivered message: `<order_id>:new`, `<order_id>:fill`,
-`<order_id>:partial:<filled_qty>`, `<order_id>:<canceled|expired|rejected>`.
+`<order_id>:<canceled|expired|rejected>`.
 Check-send-record runs under an exclusive file lock, so the listener and
 the fallback (T5) never both send one event; a failed send is not
-recorded (the next fallback retries it). On the very first run (no store)
-the current broker history is recorded **without sending** — old events
-are never replayed into the new group.
+recorded (the next fallback retries it). On the very first run (no
+`trade_notify/initialized` marker) the current broker history is recorded
+**without sending** — old events are never replayed into the new group —
+and the marker is written even when that history is empty.
 
 ### T4 — Listener (`python -m pipeline.trade_monitor`)
 
@@ -69,17 +70,21 @@ are never replayed into the new group.
 
 ### T5 — Fallback reconcile (hourly, in the watchdog)
 
-`reconcile(since=now-3d)`: the broker's orders (all statuses, nested legs)
-are mapped to the T2 events their *current* state implies (`new` for an
-open entry/close, `fill`, `canceled`/`expired`/`rejected`) and sent through
-T3, so anything the listener missed arrives within an hour. Best-effort:
+`reconcile`: (a) entry/close orders submitted in the last 30 days map to
+the `new` / `canceled` / `expired` / `rejected` events their *current*
+state implies; (b) fills come from the account's FILL activities by **fill
+time** (last 3 days, `/v2/account/activities/FILL`, all pages) — an order
+filter by submission time would miss the stop/target exit of a bracket
+entered weeks earlier — one `fill` per order that reached `filled`, with
+the order's totals. Both go through T3, so anything the listener missed
+arrives within an hour. Best-effort:
 a failure is logged and never fails the watchdog.
 
 ### T6 — Daily report (watchdog, once per US trading day after 16:15 ET)
 
 📊 日报: account equity and the day's change (equity − last_equity, $ and
 %), each open position (qty, average entry, last price, unrealized P&L $
-and %), and the count of open orders. Trading day per the broker calendar;
+and %), and the count of open orders (the broker's open-order listing). Trading day per the broker calendar;
 once per day (marker `trade_notify/daily-<date>.sent`, written only after
 the send succeeded).
 

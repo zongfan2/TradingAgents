@@ -38,12 +38,23 @@ class Sender:
 
 
 class Broker:
-    def __init__(self, orders=(), positions=(), trading_day=True, equity=10_100.0, last=10_000.0):
+    def __init__(self, orders=(), positions=(), trading_day=True, equity=10_100.0, last=10_000.0,
+                 fills=(), by_id=None):
         self.orders, self._positions, self.trading_day = list(orders), list(positions), trading_day
         self.acct = {"equity": str(equity), "last_equity": str(last), "account_number": "PA123"}
+        self.fills, self.by_id = list(fills), dict(by_id or {})
 
     def orders_since(self, after):
         return self.orders
+
+    def fills_since(self, after):
+        return self.fills
+
+    def order(self, order_id):
+        return self.by_id[order_id]
+
+    def open_orders(self):
+        return [o for o in self.orders if o["status"] in ("new", "accepted", "held")]
 
     def positions(self):
         return self._positions
@@ -68,11 +79,11 @@ def test_kinds_and_stream_events():
     new = tn.event_from_update({"event": "accepted", "order": entry()})
     assert (new.event, new.key) == ("new", "E1:new")
     fill = tn.event_from_update({"event": "fill", "order": entry("filled", filled_qty=5, avg=893.92),
-                                 "price": "893.92", "qty": "5", "position_qty": "5"})
-    assert (fill.event, fill.price, fill.qty, fill.key) == ("fill", 893.92, 5.0, "E1:fill")
-    part = tn.event_from_update({"event": "partial_fill", "order": entry("partially_filled", filled_qty=2),
-                                 "price": "900", "qty": "2"})
-    assert part.key == "E1:partial:2"
+                                 "price": "893.92", "qty": "1", "position_qty": "5"})
+    assert (fill.event, fill.key, fill.order.filled_qty) == ("fill", "E1:fill", 5.0)
+    # Partial fills are not messages (orders fill in several executions).
+    assert tn.event_from_update({"event": "partial_fill", "order": entry("partially_filled", filled_qty=4),
+                                 "price": "893.92", "qty": "4"}) is None
     leg_cancel = {"event": "canceled", "order": order("L-stop", "leg-a", side="sell", type_="stop", status="canceled")}
     assert tn.event_from_update(leg_cancel) is None  # sibling filled: not news
     assert tn.event_from_update({"event": "replaced", "order": entry()}) is None
@@ -83,12 +94,22 @@ def test_kinds_and_stream_events():
 def test_snapshot_events_match_the_stream_keys():
     snapshot = entry("filled", filled_qty=5, avg=893.92, tgt_status="filled", tgt_filled=5, tgt_avg=980.5,
                      stop_status="canceled")
-    events = tn.events_from_orders([snapshot])
-    assert [e.key for e in events] == ["E1:new", "E1:fill", "L-tgt:fill"]  # stop-leg cancel skipped
+    assert [e.key for e in tn.events_from_orders([snapshot])] == ["E1:new"]  # fills come from activities
     rejected = tn.events_from_orders([order("E2", "2026-11-02-us-AMD-entry", status="rejected", symbol="AMD")])
     assert [e.key for e in rejected] == ["E2:new", "E2:rejected"]
+    activities = [  # as /v2/account/activities/FILL returns them (measured)
+        {"order_id": "E1", "type": "partial_fill", "order_status": "partially_filled", "qty": "4"},
+        {"order_id": "E1", "type": "fill", "order_status": "filled", "qty": "1"},
+        {"order_id": "L-tgt", "type": "fill", "order_status": "filled", "qty": "5"},
+        {"order_id": "gone", "type": "fill", "order_status": "filled"},
+    ]
+    legs = {leg["id"]: leg for leg in snapshot["legs"]}
+    by_id = {"E1": snapshot, **legs}
+    events = tn.events_from_fills(activities, lambda oid: by_id[oid])
+    assert [(e.key, e.order.filled_qty) for e in events] == [("E1:fill", 5.0), ("L-tgt:fill", 5.0)]
 
 
+@pytest.mark.unit
 # ---------------------------------------------------------------------------
 # T3 — exactly once; T2 — messages and P&L
 # ---------------------------------------------------------------------------
@@ -100,25 +121,31 @@ def test_stream_then_snapshot_sends_each_event_once_with_pnl(tmp_path):
     held = [{"symbol": "MU", "avg_entry_price": "893.92", "qty": "5"}]
     positions = {"now": held}
 
-    def stream(event_dict):
-        tn.deliver([tn.event_from_update(event_dict)], state_dir=tmp_path, send=send,
-                   positions=lambda: positions["now"])
+    def stream(event_dict):  # as the listener's handler: None (not reportable) is dropped
+        event = tn.event_from_update(event_dict)
+        if event is not None:
+            tn.deliver([event], state_dir=tmp_path, send=send, positions=lambda: positions["now"])
 
     stream({"event": "new", "order": entry()})
+    stream({"event": "partial_fill", "order": entry("partially_filled", filled_qty=4, avg=893.92),
+            "price": "893.92", "qty": "4"})
     stream({"event": "fill", "order": entry("filled", filled_qty=5, avg=893.92),
-            "price": "893.92", "qty": "5", "position_qty": "5"})
+            "price": "893.92", "qty": "1", "position_qty": "5"})  # the last execution: 1 share
     positions["now"] = []  # the target leg closed the position
-    stream({"event": "fill", "order": order("L-tgt", "leg-b", side="sell", status="filled", filled_qty=5,
-                                            avg=980.5, limit=980.38, order_class="bracket"),
-            "price": "980.5", "qty": "5", "position_qty": "0"})
+    target = order("L-tgt", "leg-b", side="sell", status="filled", filled_qty=5, avg=980.5, limit=980.38)
+    stream({"event": "fill", "order": target, "price": "980.5", "qty": "2", "position_qty": "0"})
     snapshot = entry("filled", filled_qty=5, avg=893.92, tgt_status="filled", tgt_filled=5, tgt_avg=980.5,
                      stop_status="canceled")
-    assert tn.deliver(tn.events_from_orders([snapshot]), state_dir=tmp_path, send=send) == 0  # all seen
+    broker = Broker(orders=[snapshot], fills=[{"order_id": "E1", "order_status": "filled"},
+                                              {"order_id": "L-tgt", "order_status": "filled"}],
+                    by_id={"E1": snapshot, "L-tgt": target})
+    tn.SentStore(tmp_path).mark_initialized()
+    assert tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW) == 0  # all seen
     messages = [m for _, m in send.sent]
     assert len(messages) == 3
     assert messages[0].startswith("📝 下单 MU 买入 5 股 @ 限价 940.00（止损 850.00 / 止盈 980.38）")
-    assert messages[1] == "✅ 成交 MU 买入 5 股 @ 893.92（限价 940.00）"
-    assert messages[2].startswith("🔚 止盈平仓 MU 卖出 5 股 @ 980.50")
+    assert messages[1] == "✅ 成交 MU 买入 5 股 @ 均价 893.92（限价 940.00）"  # totals, not the last slice
+    assert messages[2].startswith("🔚 止盈平仓 MU 卖出 5 股 @ 均价 980.50")
     assert "盈亏 +$432.90（+9.69%，成本 893.92）" in messages[2]
     assert tn.Entries(tmp_path).load() == {}
 
@@ -130,7 +157,17 @@ def test_an_exit_without_a_known_entry_has_no_guessed_pnl(tmp_path):
                                                                   status="filled", filled_qty=5, avg=849.0, limit=None,
                                                                   stop=850.0), "price": "849", "qty": "5"})
     tn.deliver([event], state_dir=tmp_path, send=send)
-    assert send.sent[0][1] == "🔚 止损平仓 MU 卖出 5 股 @ 849.00"
+    assert send.sent[0][1] == "🔚 止损平仓 MU 卖出 5 股 @ 均价 849.00"
+
+
+@pytest.mark.unit
+def test_a_partly_filled_entry_that_expires_says_so_and_books_the_entry(tmp_path):
+    send = Sender()
+    expired = entry("expired", filled_qty=4, avg=893.92)
+    tn.deliver([tn.event_from_update({"event": "expired", "order": expired})], state_dir=tmp_path, send=send,
+               positions=lambda: [{"symbol": "MU", "avg_entry_price": "893.92", "qty": "4"}])
+    assert send.sent[0][1].splitlines()[0] == "⚠️ 过期 MU 买入 5 股 @ 限价 940.00（已成交 4 股，均价 893.92）"
+    assert tn.Entries(tmp_path).load() == {"MU": {"avg": 893.92, "qty": 4.0}}
 
 
 @pytest.mark.unit
@@ -163,13 +200,23 @@ def test_entry_message_carries_the_plan_line(tmp_path):
 @pytest.mark.unit
 def test_first_reconcile_records_history_without_sending(tmp_path):
     send = Sender()
-    broker = Broker(orders=[entry("filled", filled_qty=5, avg=893.92)],
-                    positions=[{"symbol": "MU", "avg_entry_price": "893.92", "qty": "5"}])
+    filled = entry("filled", filled_qty=5, avg=893.92)
+    broker = Broker(orders=[filled], positions=[{"symbol": "MU", "avg_entry_price": "893.92", "qty": "5"}],
+                    fills=[{"order_id": "E1", "order_status": "filled"}], by_id={"E1": filled})
     assert tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW) == 0
     assert send.sent == [] and tn.Entries(tmp_path).load() == {"MU": {"avg": 893.92, "qty": 5.0}}
     broker.orders.append(order("E2", "2026-11-02-us-AMD-entry", status="new", symbol="AMD", legs=()))
     assert tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW) == 1
     assert send.sent[0][1].startswith("📝 下单 AMD")
+
+
+@pytest.mark.unit
+def test_an_empty_first_run_still_ends_the_first_run(tmp_path):
+    send = Sender()
+    broker = Broker()
+    assert tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW) == 0  # nothing to record
+    broker.orders.append(order("E2", "2026-11-02-us-AMD-entry", status="new", symbol="AMD", legs=()))
+    assert tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW) == 1  # sent, not swallowed
 
 
 @pytest.mark.unit
@@ -180,7 +227,7 @@ def test_first_reconcile_records_history_without_sending(tmp_path):
 ])
 def test_daily_report_once_after_the_close(tmp_path, now, trading, sent):
     send = Sender()
-    tn.SentStore(tmp_path).record("bootstrap", sent=False)  # not a first run
+    tn.SentStore(tmp_path).mark_initialized()  # not a first run
     broker = Broker(positions=[{"symbol": "MU", "qty": "5", "avg_entry_price": "893.92", "current_price": "920",
                                 "unrealized_pl": "130.4", "unrealized_plpc": "0.02917"}], trading_day=trading)
     for _ in range(2):
@@ -190,6 +237,7 @@ def test_daily_report_once_after_the_close(tmp_path, now, trading, sent):
     if sent:
         assert reports[0].splitlines()[0] == "📊 日报 权益 $10,100.00（今日 +$100.00，+1.00%）"
         assert reports[0].splitlines()[1] == "• MU 5 股，成本 893.92，现价 920.00，浮动 +$130.40（+2.92%）"
+        assert reports[0].splitlines()[2] == "挂单 0 笔"
 
 
 @pytest.mark.unit
@@ -246,7 +294,7 @@ def test_listener_sends_stream_events_and_runs_single_instance(tmp_path, monkeyp
     send = Sender()
     monkeypatch.setattr(trade_monitor, "make_trades_sender", lambda config: send)
     broker = Broker(positions=[])
-    tn.SentStore(tmp_path).record("bootstrap", sent=False)
+    tn.SentStore(tmp_path).mark_initialized()
     updates = [{"event": "new", "order": entry()}, {"event": "new", "order": entry()}]  # duplicate delivery
     code = trade_monitor.main([], stream_factory=lambda: FakeStream(updates), broker_factory=lambda: broker)
     assert code == 1 and [m.split(" @")[0] for _, m in send.sent] == ["📝 下单 MU 买入 5 股"]
