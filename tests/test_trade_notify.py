@@ -76,6 +76,9 @@ def test_kinds_and_stream_events():
     view = tn.order_view(entry())
     assert (view.kind, [leg.kind for leg in view.legs]) == ("entry", ["stop", "target"])
     assert tn.order_view(order("C", "2026-11-02-us-MU-close-1", side="sell")).kind == "close"
+    manual = order("M", "manual-sell", side="sell", type_="limit", order_class="simple")
+    assert tn.order_view(manual).kind == "other"  # never a bracket target
+    assert tn.event_from_update({"event": "fill", "order": {**manual, "status": "filled"}}) is None
     new = tn.event_from_update({"event": "accepted", "order": entry()})
     assert (new.event, new.key) == ("new", "E1:new")
     fill = tn.event_from_update({"event": "fill", "order": entry("filled", filled_qty=5, avg=893.92),
@@ -197,8 +200,13 @@ def test_entry_message_carries_the_executed_runs_plan(tmp_path):
     tn.deliver([tn.event_from_update({"event": "new", "order": entry()})], state_dir=tmp_path, send=send)
     # No order link: the last executable row (brief arm, valid) — never feeds or invalid.
     assert send.sent[0][1].splitlines()[1] == "信心 0.7；催化剂 7.5；失效条件：Close below the 856.49 October low."
-    (ledger / "orders.jsonl").write_text(json.dumps(
-        {"run_id": "2026-10-30-us-MU-brief-1", "client_order_id": "2026-10-30-us-MU-entry", "kind": "intent"}) + "\n")
+    cid = "2026-10-30-us-MU-entry"
+    (ledger / "orders.jsonl").write_text("".join(json.dumps(r) + "\n" for r in [
+        {"run_id": "2026-10-30-us-MU-brief-2", "client_order_id": cid, "kind": "skip", "dry_run": False},
+        {"run_id": "2026-10-30-us-MU-feeds-1", "client_order_id": cid, "kind": "intent", "dry_run": True},
+        {"run_id": "2026-10-30-us-MU-brief-1", "client_order_id": cid, "kind": "intent", "dry_run": False},
+        {"run_id": "2026-10-30-us-MU-brief-1", "client_order_id": cid, "kind": "submitted", "dry_run": False},
+    ]))
     rows.append(row("2026-10-30-us-MU-brief-3", "brief", "0.9"))  # a later run that was not executed
     (ledger / "decisions.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
     assert tn.plan_line(tmp_path, "2026-10-30-us-MU-entry").startswith("信心 0.7；")  # the linked run

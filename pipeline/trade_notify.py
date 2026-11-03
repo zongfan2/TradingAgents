@@ -95,10 +95,13 @@ class OrderView:
             return "entry"
         if "-close-" in cid:
             return "close"
-        if self.side == "sell" and self.order_type in ("stop", "stop_limit", "trailing_stop"):
-            return "stop"
-        if self.side == "sell" and self.order_type == "limit":
-            return "target"
+        # Bracket legs carry order_class "bracket" (measured on MU/SNDK legs):
+        # a manual sell is never mistaken for a pipeline stop or target.
+        if self.order_class == "bracket" and self.side == "sell":
+            if self.order_type in ("stop", "stop_limit", "trailing_stop"):
+                return "stop"
+            if self.order_type == "limit":
+                return "target"
         return "other"
 
 
@@ -396,8 +399,13 @@ def plan_line(state_dir: str | Path, client_order_id: str) -> str | None:
     if not client_order_id.endswith("-entry"):
         return None
     ledger = Path(state_dir) / "ledger"
-    run_id = next((row.get("run_id") for row in _jsonl(ledger / "orders.jsonl")
-                   if row.get("client_order_id") == client_order_id and row.get("run_id")), None)
+    # The live attempt that reached the broker: an id is shared by every
+    # attempt that day, and skip / dry-run rows name runs never executed.
+    live = [row for row in _jsonl(ledger / "orders.jsonl")
+            if row.get("client_order_id") == client_order_id and row.get("run_id")
+            and row.get("dry_run") is False and row.get("kind") in ("submitted", "intent")]
+    run_id = next((row["run_id"] for row in reversed(live) if row.get("kind") == "submitted"),
+                  live[-1]["run_id"] if live else None)
     parts = client_order_id[: -len("-entry")].split("-")
     if run_id is None and len(parts) < 5:
         return None
