@@ -103,8 +103,9 @@ reconcile hole longer than the 3-day fill window (both listener and
 watchdog down, e.g. the host off over a long weekend) may have hidden
 exits: that batch carries no P&L and the book is rebuilt from the broker's
 current positions; the "last reconcile" time advances only on a complete
-batch. Both go through T3, so anything the listener missed arrives within
-an hour. The reconcile and the daily report fail
+batch. A filled order's placement older than the fill window is not
+announced (its fill is out of view, so it would read as a pending order).
+Both go through T3, so anything the listener missed arrives within an hour. The reconcile and the daily report fail
 independently. Best-effort:
 a failure is logged and never fails the watchdog.
 

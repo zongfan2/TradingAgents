@@ -561,3 +561,15 @@ def test_a_hole_longer_than_the_fill_window_never_guesses_pnl(tmp_path):
     assert tn.Entries(tmp_path).load() == {"AMD": {"avg": 150.0, "qty": 10.0}}  # rebuilt from the broker
     assert store.last_reconcile() == NOW
     tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)  # no hole any more
+
+
+@pytest.mark.unit
+def test_no_stale_placement_for_an_order_filled_outside_the_fill_window(tmp_path):
+    tn.SentStore(tmp_path).mark_initialized()
+    old_filled = at(order("E9", "2026-10-20-us-AMD-entry", status="filled", filled_qty=5, avg=150.0, symbol="AMD",
+                          legs=()), submitted="2026-10-20T13:45:00Z", filled="2026-10-20T13:46:00Z")
+    still_open = at(order("E8", "2026-10-29-us-AMD-entry", status="new", symbol="AMD", legs=()),
+                    submitted="2026-10-29T13:45:00Z")
+    send = Sender()
+    tn.reconcile(Broker(orders=[old_filled, still_open]), state_dir=tmp_path, send=send, now=NOW)
+    assert [m.splitlines()[0].startswith("📝 下单 AMD 买入 5 股") for _, m in send.sent] == [True]  # only the open one

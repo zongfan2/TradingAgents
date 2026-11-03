@@ -697,7 +697,12 @@ def reconcile(broker: ReadOnlyBroker, *, state_dir: str | Path, send: Sender | N
     initialized, even when empty."""
     store = SentStore(state_dir)
     last = store.last_reconcile()
-    events = events_from_orders(broker.orders_since(now - ORDER_LOOKBACK))
+    # A filled order's placement older than the fill window has no fill
+    # message to follow (its fill is out of view): announcing it now would
+    # read as a live pending order.
+    events = [event for event in events_from_orders(broker.orders_since(now - ORDER_LOOKBACK))
+              if not (event.event == "new" and event.order.status == "filled"
+                      and event.at < now - FILL_LOOKBACK)]
     events += events_from_fills(broker.fills_since(now - FILL_LOOKBACK), broker.order)
     events.sort(key=lambda event: event.at)  # one timeline: book changes in the order they happened
     # A hole longer than the fill window may have hidden exits: this batch's
