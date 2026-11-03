@@ -137,6 +137,10 @@ class PipelineConfig:
     #: notification channel. Credentials: kept out of the repr.
     lark_webhook_url: str | None = field(default=None, repr=False)
     lark_webhook_secret: str | None = field(default=None, repr=False)
+    #: The separate Lark trades group's bot (specs/trade-notifications.md
+    #: T1); unset = no trade notifications. Credentials: kept out of the repr.
+    lark_trades_webhook_url: str | None = field(default=None, repr=False)
+    lark_trades_webhook_secret: str | None = field(default=None, repr=False)
     pool_max_staleness_days: int = 3
     #: Web UI port for the installer's always-on webui task (bound to
     #: 127.0.0.1 only — reach it over an SSH tunnel). ``None``: no task.
@@ -186,6 +190,9 @@ class PipelineConfig:
         lark_error = lark_settings_error(self.lark_webhook_url, self.lark_webhook_secret)
         if lark_error is not None:
             raise ValueError(lark_error)
+        trades_error = lark_settings_error(self.lark_trades_webhook_url, self.lark_trades_webhook_secret)
+        if trades_error is not None:
+            raise ValueError(f"trades channel: {trades_error}")
         if self.webui_port is not None and not 1024 <= self.webui_port <= 65535:
             raise ValueError(f"webui_port {self.webui_port} — expected 1024..65535")
         if self.sessions["cn"].execution_time is not None:
@@ -218,6 +225,12 @@ def load_config(env: Mapping[str, str] | None = None) -> PipelineConfig:
     if lark_error is not None:
         logger.warning("Lark notifications disabled: %s", lark_error)
         lark_url = lark_secret = None
+    trades_url = (env.get("TRADINGAGENTS_LARK_TRADES_WEBHOOK_URL") or "").strip() or None
+    trades_secret = (env.get("TRADINGAGENTS_LARK_TRADES_WEBHOOK_SECRET") or "").strip() or None
+    trades_error = lark_settings_error(trades_url, trades_secret)
+    if trades_error is not None:
+        logger.warning("Lark trade notifications disabled: %s", trades_error)
+        trades_url = trades_secret = None
 
     # The webui port matters to the installer only: a bad value must never
     # stop every scheduled job at config load either.
@@ -268,6 +281,8 @@ def load_config(env: Mapping[str, str] | None = None) -> PipelineConfig:
         notifications_enabled=_env_bool(env.get("TRADINGAGENTS_NOTIFICATIONS_ENABLED"), True),
         lark_webhook_url=lark_url,
         lark_webhook_secret=lark_secret,
+        lark_trades_webhook_url=trades_url,
+        lark_trades_webhook_secret=trades_secret,
         pool_max_staleness_days=int(env.get("TRADINGAGENTS_POOL_MAX_STALENESS_DAYS") or 3),
         webui_port=webui_port,
         python_executable=Path(env.get("TRADINGAGENTS_PIPELINE_PYTHON") or sys.executable),

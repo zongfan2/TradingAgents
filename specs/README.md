@@ -40,6 +40,7 @@ specifies Flash for every model-assisted backup role without activating it.
 | [webui-pages.md](webui-pages.md) | Status banner, pool/briefs views, A/B aggregates, halt toggle | Claude Code | **Implemented** |
 | [decision-funnel.md](decision-funnel.md) | Per-slot exclusion record (event log, snapshot, webui page) | Claude Code | **Implemented** (P1–P3) |
 | [llm-cost.md](llm-cost.md) | LLM usage ledger, Claude-first routing with a monthly budget, run-volume cuts | Claude Code | **Implemented** (R1–R4, R6–R11; R5 deferred) |
+| [trade-notifications.md](trade-notifications.md) | Separate Lark trades group: real-time order/fill/exit messages (Alpaca paper stream, read-only) + hourly reconcile + daily report | Claude Code | **Implemented** |
 | [llm-provider-ladder.md](llm-provider-ladder.md) | Claude → OpenAI (GPT, hermetic codex) → DeepSeek routing; monthly OpenAI balance confirmation (`pipeline.llm_budget`) | Claude Code | **Implemented** |
 | [ticker-brief-dossier.md](ticker-brief-dossier.md) | Ticker brief dossier + daily delta (cross-day research dedup) | Claude Code | **Draft** |
 
@@ -62,7 +63,8 @@ specifies Flash for every model-assisted backup role without activating it.
 2. Components communicate **only through files named in the contracts** — the
    collectors never read pipeline state; the pipeline never writes to brief or
    pool directories; the evaluator writes only `*.eval.json`; only the
-   execution adapter talks to the broker.
+   execution adapter acts on the broker (orders); trade notifications
+   ([trade-notifications.md](trade-notifications.md)) may only read it.
 3. Each spec lists acceptance criteria; a component is done when they all pass.
 4. Secrets (Alpaca keys, LLM keys) live in `.env` only — never in specs, code,
    pool files, the ledger, logs, or status files.

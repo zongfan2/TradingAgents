@@ -425,6 +425,26 @@ Anthropic key and count toward the same monthly budget; once it is spent
 they run on DeepSeek Flash through DeepSeek's Anthropic-compatible endpoint
 (R7). `claude_usage.jsonl` lines carry `billing` and `billed_usd`.
 
+## 7a. Trade notifications (separate Lark group)
+
+Trades go to their own Lark group (specs/trade-notifications.md); the
+existing bot keeps the ops messages. Setup, once:
+
+1. In Lark create a group, add a **custom bot** with signature verification,
+   and put its webhook and secret in `.env`:
+   `TRADINGAGENTS_LARK_TRADES_WEBHOOK_URL=…` and
+   `TRADINGAGENTS_LARK_TRADES_WEBHOOK_SECRET=…`.
+2. Re-run the schedule installer, which now also generates
+   `pipeline.trade-monitor.xml` (always-on listener), and register that one
+   task from an **elevated** Windows PowerShell (re-registering tasks from
+   WSL is refused: "Access is denied"):
+   `schtasks /Create /TN "\TradingAgents\pipeline.trade-monitor" /XML <path> /F`.
+
+The listener sends each order placed, fill, stop/target exit (with P&L) and
+cancel/expiry/reject within seconds; the hourly watchdog re-sends anything
+it missed and, after 16:15 ET on trading days, the daily report. It only
+reads the paper account. Check it: `~/.tradingagents/scheduler.trade-monitor.err.log`.
+
 ## 7b. LLM provider ladder (Claude → OpenAI → DeepSeek)
 
 With `TRADINGAGENTS_LLM_ROUTING=ladder` (specs/llm-provider-ladder.md) the
