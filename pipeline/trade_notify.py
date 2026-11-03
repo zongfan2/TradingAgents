@@ -43,6 +43,8 @@ DAILY_REPORT_AFTER = time(16, 15)
 #: cancels by submission time over a longer window (stale-entry cancels).
 FILL_LOOKBACK = timedelta(days=3)
 ORDER_LOOKBACK = timedelta(days=30)
+#: Event keys remembered as booked in ``entries.json`` (kill safety).
+APPLIED_KEEP = 2000
 #: A queued message is dropped (logged) only after this many failed sends
 #: AND this long since its first failure, so it never blocks later ones
 #: forever yet survives a Lark outage during busy trading.
@@ -355,6 +357,8 @@ class Entries:
             return {}
         out: dict[str, dict[str, Any]] = {}
         for symbol, row in (data.items() if isinstance(data, dict) else ()):
+            if str(symbol).startswith("_"):
+                continue  # bookkeeping (``_applied``), not a symbol
             row = row if isinstance(row, dict) else {}
             if row.get("unknown") is True:  # held, but no trustworthy cost basis
                 out[str(symbol)] = {"unknown": True}
@@ -369,8 +373,19 @@ class Entries:
                         out[str(symbol)][stamp] = str(row[stamp])
         return out
 
-    def save(self, entries: Mapping[str, Mapping[str, float]]) -> None:
-        atomic_write(self.path, json.dumps(entries, sort_keys=True) + "\n")
+    def save(self, entries: Mapping[str, Mapping[str, Any]], applied: list[str] | None = None) -> None:
+        """Rows plus ``_applied``: the keys of the events already booked, so
+        a run killed before it recorded them never books one twice."""
+        keep = self.applied() if applied is None else applied
+        atomic_write(self.path, json.dumps({**entries, "_applied": keep[-APPLIED_KEEP:]}, sort_keys=True) + "\n")
+
+    def applied(self) -> list[str]:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        keys = data.get("_applied") if isinstance(data, dict) else None
+        return [key for key in keys if isinstance(key, str)] if isinstance(keys, list) else []
 
     def seed(self, positions: Iterable[Any], at: datetime | None = None) -> None:
         """Fill in symbols the store does not know from the broker's open
@@ -638,7 +653,9 @@ def deliver(
             book.seed(reconcile_positions(), _broker_time(broker_now))
         seen = store.keys()
         entries = book.load()
+        applied = book.applied()
         outbox = store.outbox()
+        in_outbox = {item.get("key") for item in outbox}
         queued: list[str] = []
         for event in events:
             if event.key in seen:
@@ -655,21 +672,29 @@ def deliver(
                 store.record(event.key, sent=False)
                 seen.add(event.key)
                 continue
-            entry_avg = _apply_fill(entries, event, positions, broker_now)
+            if event.key in applied:
+                entry_avg = None  # booked by a run killed before it recorded the key
+            else:
+                entry_avg = _apply_fill(entries, event, positions, broker_now)
+                applied.append(event.key)
             if rebuild_book:
                 entry_avg = None  # the book may miss exits from the hole: no guessed P&L
             plan = (plan_line(ledger_dir or Path(state_dir) / "ledger", event.order.client_order_id)
                     if event.event == "new" else None)
-            outbox.append({"key": event.key, "text": format_event(event, entry_avg=entry_avg, plan=plan),
-                           "failures": 0})
+            if event.key not in in_outbox:  # already queued by a run killed before recording it
+                outbox.append({"key": event.key, "text": format_event(event, entry_avg=entry_avg, plan=plan),
+                               "failures": 0})
+                in_outbox.add(event.key)
             queued.append(event.key)
             seen.add(event.key)
-        # Durable before anything is marked handled or sent: a kill at any
-        # point after this can at worst resend one message, never lose one.
+        # Kill-safe order, each step idempotent on a rerun: the book (with
+        # the applied keys) → the outbox (deduplicated by key) → the handled
+        # keys. A kill can at worst resend one message, never lose one, and
+        # never book an event twice.
+        book.save(entries, applied)
         store.save_outbox(outbox)
         for key in queued:
             store.record(key, sent=True)  # handled: queued in the outbox
-        book.save(entries)
         sent = _flush(outbox, send, persist=store.save_outbox)
         if rebuild_book and not first_run and reconcile_positions is not None:
             try:  # read first: a failed read leaves the book and the window as they were
@@ -678,7 +703,7 @@ def deliver(
                 logger.warning("positions unavailable to rebuild the entry book: %s", type(exc).__name__)
                 rebuild_failed = True
             else:
-                book.save({})
+                book.save({}, applied)
                 book.seed(held, _broker_time(broker_now))  # the broker's own cost basis now
         if reconciled_at is not None and not rebuild_failed:
             store.mark_reconciled(reconciled_at)
@@ -861,6 +886,19 @@ def reconcile(broker: ReadOnlyBroker, *, state_dir: str | Path, send: Sender | N
     initialized, even when empty."""
     store = SentStore(state_dir)
     last = store.last_reconcile()
+    # Positions first, before the events: alignment and rebuild then only
+    # reflect fills the snapshot below includes — a stop filling during the
+    # sends can never drop its row before its own event is booked.
+    try:
+        snapshot, snapshot_error = list(broker.positions()), None
+    except Exception as exc:
+        snapshot, snapshot_error = None, exc
+
+    def positions_snapshot() -> list[Any]:
+        if snapshot is None:
+            raise snapshot_error
+        return snapshot
+
     # A filled order's placement older than the fill window has no fill
     # message to follow (its fill is out of view): announcing it now would
     # read as a live pending order.
@@ -872,7 +910,7 @@ def reconcile(broker: ReadOnlyBroker, *, state_dir: str | Path, send: Sender | N
     # A hole longer than the fill window may have hidden exits: this batch's
     # P&L is not guessed, and the book is rebuilt from today's positions.
     hole = last is not None and now - last > FILL_LOOKBACK
-    return deliver(events, state_dir=state_dir, send=send, reconcile_positions=broker.positions,
+    return deliver(events, state_dir=state_dir, send=send, reconcile_positions=positions_snapshot,
                    ledger_dir=ledger_dir, rebuild_book=hole, reconciled_at=now,
                    broker_now=getattr(broker, "now", None))
 

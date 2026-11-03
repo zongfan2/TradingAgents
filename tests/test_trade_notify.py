@@ -823,3 +823,47 @@ def test_listener_exit_queues_behind_a_failed_entry_message_with_its_pnl(tmp_pat
     assert messages[0].startswith("✅ 成交 MU") and messages[1].startswith("🔚 止损平仓 MU")  # in order
     assert "盈亏 −$221.85（−4.96%，成本 893.92）" in messages[1]
     assert tn.SentStore(tmp_path).outbox() == []
+
+
+@pytest.mark.unit
+def test_alignment_uses_the_positions_snapshot_taken_before_the_events(tmp_path):
+    tn.SentStore(tmp_path).mark_initialized()
+    tn.Entries(tmp_path).save({"MU": {"avg": 893.92, "qty": 5.0}})
+
+    class Racing(Broker):
+        calls = 0
+
+        def positions(self):  # MU's stop fills right after the snapshot, during the sends
+            Racing.calls += 1
+            return [{"symbol": "MU", "avg_entry_price": "893.92", "qty": "5"}] if Racing.calls == 1 else []
+
+    broker = Racing(orders=[order("E2", "2026-11-03-us-AMD-entry", status="new", symbol="AMD", legs=())])
+    tn.reconcile(broker, state_dir=tmp_path, send=Sender(), now=NOW)
+    assert book(tmp_path) == {"MU": {"avg": 893.92, "qty": 5.0}}  # kept for the listener's exit event
+    send = Sender()
+    stop = order("L-stop", "leg-a", side="sell", type_="stop", status="filled", filled_qty=5, avg=849.55,
+                 limit=None, stop=850.0)
+    tn.deliver([tn.event_from_update({"event": "fill", "order": stop})], state_dir=tmp_path, send=send,
+               positions=lambda: [])
+    assert "盈亏 −$221.85" in send.sent[0][1]
+
+
+@pytest.mark.unit
+def test_a_kill_after_booking_never_books_twice_nor_loses_the_message(tmp_path, monkeypatch):
+    tn.SentStore(tmp_path).mark_initialized()
+    tn.Entries(tmp_path).save({"MU": {"avg": 800.0, "qty": 5.0}})
+    add = order("A1", "2026-11-03-us-MU-entry", status="filled", filled_qty=5, avg=900.0, legs=())
+    event = tn.event_from_update({"event": "fill", "order": add})
+    real = tn.SentStore.save_outbox
+
+    def killed(self, items):
+        raise SystemExit("killed between the book and the outbox")
+
+    monkeypatch.setattr(tn.SentStore, "save_outbox", killed)
+    with pytest.raises(SystemExit):
+        tn.deliver([event], state_dir=tmp_path, send=Sender())
+    monkeypatch.setattr(tn.SentStore, "save_outbox", real)
+    send = Sender()
+    tn.deliver([event], state_dir=tmp_path, send=send)  # the rerun (the fallback replays it)
+    assert book(tmp_path) == {"MU": {"avg": 850.0, "qty": 10.0}}  # booked once
+    assert [m.split(" @")[0] for _, m in send.sent] == ["✅ 成交 MU 买入 5 股"]  # not lost, not doubled

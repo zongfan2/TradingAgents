@@ -40,7 +40,9 @@ partly filled — (`trade_notify/entries.json`). The listener, at the moment
 of the fill, takes it from the broker's position (adds average in exactly);
 the fallback, replaying events that may be hours old, uses the orders' own
 totals (today's position is not the position then) and afterwards only
-drops symbols the broker no longer holds — never adds or resizes (every
+drops symbols the broker no longer held in a positions snapshot taken
+**before** the events were read (a stop filling during the sends never
+drops its row before its own event is booked) — never adds or resizes (every
 fill in the window reaches the book as an event, so a position read would
 count an in-flight or partial fill twice) — and only after a complete
 batch.
@@ -67,9 +69,11 @@ Under an exclusive file lock shared by the listener and the fallback (T5),
 each new event is booked at once and its message — P&L computed then, with
 the right cost basis — appended to a persistent **outbox**
 (`trade_notify/outbox.jsonl`) and its key recorded; the outbox is sent head
-first. The outbox is written before any key is marked handled, and each
-sent or dropped message is removed from it at once, so a kill at any point
-can at worst resend one message, never lose one. A failed send keeps the
+first. Writes go in a kill-safe order, each idempotent on a rerun: the
+book with the keys of the events it booked (`_applied`) → the outbox
+(deduplicated by key) → the handled keys; each sent or dropped message is
+removed from the outbox at once. A kill at any point can at worst resend
+one message, never lose one, and never books an event twice. A failed send keeps the
 message at the head, so later ones (same batch, the listener, the next
 reconcile) queue behind it: nothing goes out of order and a retry resends
 the same text. On the very first run —
