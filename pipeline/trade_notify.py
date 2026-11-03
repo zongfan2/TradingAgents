@@ -403,7 +403,9 @@ class Entries:
         measured against, for the events already booked — a run killed
         before it recorded them neither books one twice nor loses its P&L."""
         keep = self.applied() if applied is None else applied
-        recent = dict(list(keep.items())[-APPLIED_KEEP:])
+        # A list of [key, avg] pairs: sort_keys would reorder a mapping, and
+        # the cap must keep the newest, not the alphabetically last.
+        recent = [[key, avg] for key, avg in list(keep.items())[-APPLIED_KEEP:]]
         atomic_write(self.path, json.dumps({**entries, "_applied": recent}, sort_keys=True) + "\n")
 
     def applied(self) -> dict[str, float | None]:
@@ -411,10 +413,11 @@ class Entries:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return {}
-        keys = data.get("_applied") if isinstance(data, dict) else None
-        if not isinstance(keys, dict):
+        pairs = data.get("_applied") if isinstance(data, dict) else None
+        if not isinstance(pairs, list):
             return {}
-        return {key: _num(avg) for key, avg in keys.items() if isinstance(key, str)}
+        return {pair[0]: _num(pair[1]) for pair in pairs
+                if isinstance(pair, list) and len(pair) == 2 and isinstance(pair[0], str)}  # oldest first
 
     def seed(self, positions: Iterable[Any], at: datetime | None = None) -> None:
         """Fill in symbols the store does not know from the broker's open

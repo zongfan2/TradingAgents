@@ -914,3 +914,12 @@ def test_sent_keys_older_than_the_lookbacks_are_pruned(tmp_path):
                           + json.dumps({"key": "NEW:fill", "sent": True, "at": NOW.isoformat()}) + "\n")
     store.prune(NOW, tn.SENT_KEEP)
     assert store.keys() == {"NEW:fill"}
+
+
+@pytest.mark.unit
+def test_the_applied_cap_keeps_the_newest_keys(tmp_path, monkeypatch):
+    monkeypatch.setattr(tn, "APPLIED_KEEP", 2)
+    book_ = tn.Entries(tmp_path)
+    applied = {"zzz:fill": 1.0, "aaa:fill": 2.0, "mmm:fill": None}  # insertion = chronological
+    book_.save({}, applied)
+    assert list(book_.applied()) == ["aaa:fill", "mmm:fill"]  # the two newest, in order
