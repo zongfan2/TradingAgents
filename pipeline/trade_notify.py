@@ -85,6 +85,12 @@ class OrderView:
     limit_price: float | None
     stop_price: float | None
     legs: tuple[OrderView, ...] = ()
+    #: Broker timestamps (submitted / filled / canceled / expired / failed).
+    times: tuple[tuple[str, datetime], ...] = ()
+
+    def time_of(self, *names: str) -> datetime | None:
+        stamps = dict(self.times)
+        return next((stamps[name] for name in names if name in stamps), None)
 
     @property
     def kind(self) -> str:
@@ -123,7 +129,22 @@ def order_view(raw: Any) -> OrderView:
         limit_price=_num(data.get("limit_price")),
         stop_price=_num(data.get("stop_price")),
         legs=tuple(order_view(leg) for leg in legs if leg),
+        times=tuple((name, stamp) for name in _TIME_FIELDS
+                    if (stamp := _instant(data.get(f"{name}_at"))) is not None),
     )
+
+
+_TIME_FIELDS = ("submitted", "filled", "canceled", "expired", "failed", "updated")
+
+
+def _instant(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -132,6 +153,13 @@ class TradeEvent:
 
     event: str                 # new | fill | canceled | expired | rejected
     order: OrderView           # the order's state; fills report its totals
+
+    @property
+    def at(self) -> datetime:
+        """When it happened, for ordering a reconcile batch."""
+        names = {"new": ("submitted",), "fill": ("filled", "updated"), "canceled": ("canceled", "updated"),
+                 "expired": ("expired", "updated"), "rejected": ("failed", "updated")}.get(self.event, ("updated",))
+        return self.order.time_of(*names, "updated", "submitted") or datetime.min.replace(tzinfo=timezone.utc)
 
     @property
     def key(self) -> str:
@@ -216,6 +244,15 @@ class SentStore:
         self.dir = Path(state_dir) / STORE_DIRNAME
         self.path = self.dir / "sent.jsonl"
         self._lock_path = self.dir / "sent.lock"
+
+    def last_reconcile(self) -> datetime | None:
+        try:
+            return _instant((self.dir / "last_reconcile").read_text(encoding="utf-8").strip())
+        except OSError:
+            return None
+
+    def mark_reconciled(self, now: datetime) -> None:
+        atomic_write(self.dir / "last_reconcile", now.astimezone(timezone.utc).isoformat() + "\n")
 
     def initialized(self) -> bool:
         """False until the first reconcile recorded the history (T3)."""
@@ -472,6 +509,8 @@ def deliver(
     positions: Callable[[], list[Any]] | None = None,
     reconcile_positions: Callable[[], list[Any]] | None = None,
     ledger_dir: str | Path | None = None,
+    rebuild_book: bool = False,
+    reconciled_at: datetime | None = None,
 ) -> int:
     """Send each not-yet-delivered event once, in order (T3); returns the
     messages sent.
@@ -508,6 +547,8 @@ def deliver(
             # First run: the book was seeded from the broker's positions —
             # replaying history into it would count those fills twice.
             entry_avg = None if first_run else _apply_fill(entries, event, positions)
+            if rebuild_book:
+                entry_avg = None  # the book may miss exits from the hole: no guessed P&L
             if not first_run:
                 if send is None:
                     stopped = True
@@ -526,8 +567,13 @@ def deliver(
             store.record(event.key, sent=not first_run)
             seen.add(event.key)
             book.save(entries)
+        if reconciled_at is not None and not stopped:
+            store.mark_reconciled(reconciled_at)  # only a complete batch closes the window
         if first_run:
             store.mark_initialized()
+        elif rebuild_book and reconcile_positions is not None and not stopped:
+            book.save({})
+            book.seed(reconcile_positions())  # the broker's own cost basis of what is held now
         elif reconcile_positions is not None and not stopped:
             # Only after a complete batch: aligning before an unsent fill is
             # retried would let it average into today's position.
@@ -649,10 +695,16 @@ def reconcile(broker: ReadOnlyBroker, *, state_dir: str | Path, send: Sender | N
     submission time, fills by fill time. The first run (decided under the
     store lock) records history without sending and marks the store
     initialized, even when empty."""
+    store = SentStore(state_dir)
+    last = store.last_reconcile()
     events = events_from_orders(broker.orders_since(now - ORDER_LOOKBACK))
     events += events_from_fills(broker.fills_since(now - FILL_LOOKBACK), broker.order)
+    events.sort(key=lambda event: event.at)  # one timeline: book changes in the order they happened
+    # A hole longer than the fill window may have hidden exits: this batch's
+    # P&L is not guessed, and the book is rebuilt from today's positions.
+    hole = last is not None and now - last > FILL_LOOKBACK
     return deliver(events, state_dir=state_dir, send=send, reconcile_positions=broker.positions,
-                   ledger_dir=ledger_dir)
+                   ledger_dir=ledger_dir, rebuild_book=hole, reconciled_at=now)
 
 
 def daily_report(broker: ReadOnlyBroker) -> str:

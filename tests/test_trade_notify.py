@@ -519,3 +519,45 @@ def test_orders_listing_keeps_the_newest_when_capped():
     broker = tn.AlpacaReadOnly.__new__(tn.AlpacaReadOnly)
     broker._client = Client()
     assert broker.orders_since(NOW) == ["older", "newest"]  # returned oldest first
+
+
+def at(order_dict, **stamps):
+    return {**order_dict, **{f"{name}_at": value for name, value in stamps.items()}}
+
+
+@pytest.mark.unit
+def test_reconcile_applies_events_in_the_order_they_happened(tmp_path):
+    """MU 5@800 held; its stop fills at 849 (10:00), later a new entry 3@900 expires (15:00)."""
+    tn.SentStore(tmp_path).mark_initialized()
+    tn.Entries(tmp_path).save({"MU": {"avg": 800.0, "qty": 5.0}})
+    stop_leg = at(order("L-stop", "leg-a", side="sell", type_="stop", status="filled", filled_qty=5, avg=849.0,
+                        limit=None, stop=850.0), filled="2026-11-03T15:00:00Z")
+    expired = at(order("E3", "2026-11-03-us-MU-entry", status="expired", filled_qty=3, avg=900.0, legs=()),
+                 submitted="2026-11-03T14:45:00Z", expired="2026-11-03T20:00:00Z")
+    broker = Broker(orders=[expired], positions=[{"symbol": "MU", "avg_entry_price": "900", "qty": "3"}],
+                    fills=[{"order_id": "L-stop", "order_status": "filled"}], by_id={"L-stop": stop_leg})
+    send = Sender()
+    tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)
+    exit_msg = next(m for _, m in send.sent if m.startswith("🔚"))
+    assert "成本 800.00" in exit_msg  # measured before the later partial entry was booked
+    assert tn.Entries(tmp_path).load() == {"MU": {"avg": 900.0, "qty": 3.0}}
+
+
+@pytest.mark.unit
+def test_a_hole_longer_than_the_fill_window_never_guesses_pnl(tmp_path):
+    from datetime import timedelta
+
+    store = tn.SentStore(tmp_path)
+    store.mark_initialized()
+    store.mark_reconciled(NOW - timedelta(days=5))  # host off over a long weekend
+    tn.Entries(tmp_path).save({"MU": {"avg": 800.0, "qty": 5.0}})  # its exit fell in the hole
+    stop_leg = order("L-stop", "leg-a", side="sell", type_="stop", status="filled", filled_qty=5, avg=849.0,
+                     limit=None, stop=850.0)
+    broker = Broker(positions=[{"symbol": "AMD", "avg_entry_price": "150", "qty": "10"}],
+                    fills=[{"order_id": "L-stop", "order_status": "filled"}], by_id={"L-stop": stop_leg})
+    send = Sender()
+    tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)
+    assert send.sent[0][1] == "🔚 止损平仓 MU 卖出 5 股 @ 均价 849.00"  # no P&L in the hole batch
+    assert tn.Entries(tmp_path).load() == {"AMD": {"avg": 150.0, "qty": 10.0}}  # rebuilt from the broker
+    assert store.last_reconcile() == NOW
+    tn.reconcile(broker, state_dir=tmp_path, send=send, now=NOW)  # no hole any more

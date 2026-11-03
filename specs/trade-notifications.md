@@ -96,8 +96,15 @@ state implies; (b) fills come from the account's FILL activities by **fill
 time** (last 3 days, `/v2/account/activities/FILL`, all pages) — an order
 filter by submission time would miss the stop/target exit of a bracket
 entered weeks earlier — one `fill` per order that reached `filled`, with
-the order's totals. Both go through T3, so anything the listener missed
-arrives within an hour. The reconcile and the daily report fail
+the order's totals. The two are merged into **one timeline** by event time
+(the order's submitted/filled/canceled/expired/failed time) before
+delivery, so the entry book changes in the order things happened. A
+reconcile hole longer than the 3-day fill window (both listener and
+watchdog down, e.g. the host off over a long weekend) may have hidden
+exits: that batch carries no P&L and the book is rebuilt from the broker's
+current positions; the "last reconcile" time advances only on a complete
+batch. Both go through T3, so anything the listener missed arrives within
+an hour. The reconcile and the daily report fail
 independently. Best-effort:
 a failure is logged and never fails the watchdog.
 
