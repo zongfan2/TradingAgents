@@ -67,9 +67,9 @@ def main(argv: list[str] | None = None, *, stream_factory: Any = None, broker_fa
 
     _load_repo_dotenv()
     config = load_config()
-    send = make_trades_sender(config)
+    send = make_trades_sender(config) if config.notifications_enabled else None
     if send is None:
-        logger.info("trades webhook not configured — trade listener not started")
+        logger.info("trades webhook not configured or notifications disabled — trade listener not started")
         return 0
     lock = acquire_single_instance(config.state_dir)
     if lock is None:

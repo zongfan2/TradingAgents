@@ -181,15 +181,54 @@ def test_a_failed_send_is_retried_and_never_leaks_the_url(tmp_path, caplog):
 
 
 @pytest.mark.unit
-def test_entry_message_carries_the_plan_line(tmp_path):
+def test_entry_message_carries_the_executed_runs_plan(tmp_path):
     ledger = tmp_path / "ledger"
     ledger.mkdir()
-    row = {"date": "2026-10-30", "session": "us", "ticker": "MU", "decision": "BUY", "catalyst_score": 7.5,
-           "plan": {"conviction": "0.7", "invalidation": "Close below the 856.49 October low."}}
-    (ledger / "decisions.jsonl").write_text(json.dumps(row) + "\n")
+
+    def row(run_id, arm, conviction, valid=True):
+        return {"run_id": run_id, "date": "2026-10-30", "session": "us", "ticker": "MU", "decision": "BUY",
+                "arm": arm, "plan_valid": valid, "catalyst_score": 7.5,
+                "plan": {"conviction": conviction, "invalidation": "Close below the 856.49 October low."}}
+
+    rows = [row("2026-10-30-us-MU-brief-1", "brief", "0.7"), row("2026-10-30-us-MU-feeds-1", "feeds", "0.2"),
+            row("2026-10-30-us-MU-brief-2", "brief", "0.3", valid=False)]
+    (ledger / "decisions.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
     send = Sender()
     tn.deliver([tn.event_from_update({"event": "new", "order": entry()})], state_dir=tmp_path, send=send)
+    # No order link: the last executable row (brief arm, valid) — never feeds or invalid.
     assert send.sent[0][1].splitlines()[1] == "信心 0.7；催化剂 7.5；失效条件：Close below the 856.49 October low."
+    (ledger / "orders.jsonl").write_text(json.dumps(
+        {"run_id": "2026-10-30-us-MU-brief-1", "client_order_id": "2026-10-30-us-MU-entry", "kind": "intent"}) + "\n")
+    rows.append(row("2026-10-30-us-MU-brief-3", "brief", "0.9"))  # a later run that was not executed
+    (ledger / "decisions.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    assert tn.plan_line(tmp_path, "2026-10-30-us-MU-entry").startswith("信心 0.7；")  # the linked run
+
+
+@pytest.mark.unit
+def test_alpaca_read_only_calendar_and_open_orders(monkeypatch):
+    from datetime import date
+
+    class Day:
+        def __init__(self, d):
+            self.date = d
+
+    class Client:
+        def __init__(self):
+            self.requests = []
+
+        def get_calendar(self, request):
+            return [Day(date(2026, 11, 27))]  # the NEXT session, as some SDKs answer for a holiday
+
+        def get_orders(self, filter):
+            self.requests.append(filter)
+            return []
+
+    broker = tn.AlpacaReadOnly.__new__(tn.AlpacaReadOnly)
+    broker._client = Client()
+    assert broker.is_trading_day(date(2026, 11, 26)) is False
+    assert broker.is_trading_day(date(2026, 11, 27)) is True
+    broker.open_orders()
+    assert broker._client.requests[0].nested is True
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +329,10 @@ def test_listener_sends_stream_events_and_runs_single_instance(tmp_path, monkeyp
     monkeypatch.setenv("ALPACA_API_KEY", "k")
     monkeypatch.setenv("ALPACA_SECRET_KEY", "s")
     assert trade_monitor.main([]) == 0  # no trades webhook: not started
+    monkeypatch.setenv("TRADINGAGENTS_LARK_TRADES_WEBHOOK_URL", "https://open.feishu.cn/hook/x")
+    monkeypatch.setenv("TRADINGAGENTS_NOTIFICATIONS_ENABLED", "false")
+    assert trade_monitor.main([], stream_factory=lambda: pytest.fail("started while muted")) == 0
+    monkeypatch.delenv("TRADINGAGENTS_NOTIFICATIONS_ENABLED")
     monkeypatch.setenv("TRADINGAGENTS_LARK_TRADES_WEBHOOK_URL", "https://open.feishu.cn/hook/x")
     send = Sender()
     monkeypatch.setattr(trade_monitor, "make_trades_sender", lambda config: send)

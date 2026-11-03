@@ -373,28 +373,44 @@ _SIDE = {"buy": "买入", "sell": "卖出"}
 _EXIT_LABEL = {"stop": "🔚 止损平仓", "target": "🔚 止盈平仓", "close": "🔚 信号平仓"}
 
 
+def _jsonl(path: Path) -> Iterator[dict]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    for raw in text.splitlines():
+        try:
+            row = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            yield row
+
+
 def plan_line(state_dir: str | Path, client_order_id: str) -> str | None:
-    """For an entry ``<date>-<session>-<TICKER>-entry``: the run's plan in one
-    line (conviction, catalyst score, invalidation) from ``decisions.jsonl``."""
+    """For an entry order: the executed run's plan in one line (conviction,
+    catalyst score, invalidation). The run is the one the execution adapter
+    submitted it for (``orders.jsonl`` client_order_id → run_id); without
+    that link, only an executable row (brief arm, valid plan, BUY) for the
+    id's date/session/ticker — never a feeds-arm or invalid plan."""
     if not client_order_id.endswith("-entry"):
         return None
+    ledger = Path(state_dir) / "ledger"
+    run_id = next((row.get("run_id") for row in _jsonl(ledger / "orders.jsonl")
+                   if row.get("client_order_id") == client_order_id and row.get("run_id")), None)
     parts = client_order_id[: -len("-entry")].split("-")
-    if len(parts) < 5:
+    if run_id is None and len(parts) < 5:
         return None
-    date_iso, session, ticker = "-".join(parts[:3]), parts[3], "-".join(parts[4:])
-    path = Path(state_dir) / "ledger" / "decisions.jsonl"
+    date_iso, session, ticker = "-".join(parts[:3]), parts[3] if len(parts) > 3 else "", "-".join(parts[4:])
     match = None
-    try:
-        for raw in path.read_text(encoding="utf-8").splitlines():
-            try:
-                row = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            if (isinstance(row, dict) and row.get("date") == date_iso and row.get("session") == session
-                    and row.get("ticker") == ticker and str(row.get("decision")).upper() == "BUY"):
+    for row in _jsonl(ledger / "decisions.jsonl"):
+        if run_id is not None:
+            if row.get("run_id") == run_id:
                 match = row
-    except OSError:
-        return None
+        elif (row.get("date") == date_iso and row.get("session") == session and row.get("ticker") == ticker
+              and str(row.get("decision")).upper() == "BUY" and row.get("arm", "brief") == "brief"
+              and row.get("plan_valid") is True):
+            match = row
     if match is None:
         return None
     plan = match.get("plan") if isinstance(match.get("plan"), dict) else {}
@@ -537,7 +553,9 @@ class AlpacaReadOnly:
         from alpaca.trading.enums import QueryOrderStatus
         from alpaca.trading.requests import GetOrdersRequest
 
-        return list(self._client.get_orders(filter=GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=500)))
+        # Nested: bracket legs count under their parent, not as orders.
+        return list(self._client.get_orders(filter=GetOrdersRequest(status=QueryOrderStatus.OPEN,
+                                                                   nested=True, limit=500)))
 
     def positions(self) -> list[Any]:
         return list(self._client.get_all_positions())
@@ -548,7 +566,12 @@ class AlpacaReadOnly:
     def is_trading_day(self, day: Any) -> bool:
         from alpaca.trading.requests import GetCalendarRequest
 
-        return bool(self._client.get_calendar(GetCalendarRequest(start=day, end=day)))
+        # Fail closed like the adapter: some SDK versions return the NEXT
+        # session for a closed day, so the entry's date must be the day.
+        from pipeline.execution_adapter import _calendar_date
+
+        days = self._client.get_calendar(GetCalendarRequest(start=day, end=day)) or ()
+        return any(_calendar_date(entry) == day for entry in days)
 
 
 def alpaca_keys() -> tuple[str, str]:
