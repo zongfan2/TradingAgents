@@ -86,8 +86,11 @@ writing):
    final `**Impact**:` line (`bullish|bearish|neutral|mixed` + one-line
    rationale).
 2. Every factual claim carries an inline markdown citation to its source URL;
-   ≥ 5 distinct cited URLs counted from the body (`sources_count` must equal
-   that count — consumers never trust the self-reported number).
+   a close or daily move taken from the prompt's verified price tape
+   (specs/price-tape.md) cites `[price tape]` instead — market data, no URL;
+   it is not counted below. ≥ 5 distinct cited URLs counted from the body
+   (`sources_count` must equal that count — consumers never trust the
+   self-reported number).
 3. Frontmatter fields all present; `as_of_date` matches the filename; `ticker`
    matches the directory name.
 4. Content covers the trailing ~48h with weekly context; no forward-dated

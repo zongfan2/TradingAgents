@@ -29,13 +29,18 @@ for them (each search is $0.01, and the collector is capped at 10).
 session-over-session change, from yfinance daily history
 (`auto_adjust=False`, the pool builder gate's source). Sessions in the last
 3 with |change| ≥ 5% are marked ⚠. Non-positive or NaN closes are ignored.
-Any failure (or fewer than 2 sessions) renders a fixed "unavailable" line;
+Any failure, fewer than 2 sessions, or a newest session more than 4
+calendar days before `as_of` (the latest sessions missing — late data or an
+outage; a tape without them would hide the most relevant move) renders a
+fixed "unavailable" line;
 it never raises and never blocks a brief or an evaluation. Tests are
 offline: an autouse fixture makes the fetch fail.
 
-The collector's block (`for_writer=True`) carries the writer's rules — a
-tape figure is cited as `[price tape]`, a valid citation without a URL —: the closes are authoritative — never
-contradict them, do not search for past closes or daily moves — and each ⚠
+The collector's block (`for_writer=True`) carries the writer's rules. A
+tape figure is cited as `[price tape]`, a valid citation without a URL (the
+ticker-brief contract, hard requirement 2, allows it; it does not count
+toward the ≥ 5 cited URLs). The closes are authoritative: never contradict
+them, do not search for past closes or daily moves. Each ⚠
 session gets the **first** searches (one targeted search per ⚠ session for
 its driver), is explained in Company Developments (48h) with a cited driver
 or written as "driver unverified" only if that search found nothing, and is

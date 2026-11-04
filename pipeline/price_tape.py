@@ -26,6 +26,9 @@ TAPE_SESSIONS = 10
 #: must be explained by the brief (or marked unverified).
 BIG_MOVE_PCT = 5.0
 BIG_MOVE_LOOKBACK = 3
+#: The newest tape session may be at most this many calendar days before
+#: ``as_of`` (a weekend plus a one-day holiday); older means data is missing.
+MAX_STALE_DAYS = 4
 
 Bar = tuple[date, float]  # (session date, close)
 Fetch = Callable[[str], Sequence[Bar]]
@@ -75,6 +78,11 @@ def render_tape(ticker: str, as_of: date, fetch: Fetch | None = None, *, for_wri
         logger.warning("price tape for %s unavailable: %s", ticker, type(exc).__name__)
         return UNAVAILABLE
     if len(rows) < 2:
+        return UNAVAILABLE
+    if (as_of - rows[-1][0]).days > MAX_STALE_DAYS:
+        # The newest session is missing (late data, outage): a tape without it
+        # would hide the most relevant move behind "authoritative" — unavailable.
+        logger.warning("price tape for %s stale: last session %s before %s", ticker, rows[-1][0], as_of)
         return UNAVAILABLE
     lines = [f"Daily closes for {ticker} before {as_of.isoformat()} (market data, authoritative):", "",
              "| session | close | change |", "|---|---|---|"]

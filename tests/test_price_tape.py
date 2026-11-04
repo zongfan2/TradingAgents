@@ -106,3 +106,14 @@ def test_an_unavailable_tape_leaves_the_evaluator_to_its_own_checks(tmp_path, ca
     assert ev.evaluate_brief(brief, runner=runner) == ev.EXIT_OK  # the offline fixture: no tape
     assert "VERIFIED PRICE TAPE" not in runner.prompts[0] and "do not\nsearch for them" not in runner.prompts[0]
     assert "price tape unavailable for NVDA" in capsys.readouterr().err
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("as_of", "available"), [
+    (date(2026, 11, 3), True),    # newest 11-02 (Mon): 1 day
+    (date(2026, 11, 6), True),    # 4 days after 11-02 (e.g. sessions missing over a holiday)
+    (date(2026, 11, 7), False),   # 5 days: the latest sessions are missing
+])
+def test_a_tape_missing_its_latest_sessions_is_unavailable(as_of, available):
+    text = pt.render_tape("INTC", as_of, fetch=lambda t: BARS[:-1])  # through 11-02
+    assert (text != pt.UNAVAILABLE) is available
