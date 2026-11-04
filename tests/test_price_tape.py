@@ -106,7 +106,9 @@ def test_an_unavailable_tape_leaves_the_evaluator_to_its_own_checks(tmp_path, ca
     brief = write_brief(tmp_path / "ticker_briefs" / "NVDA", "2026-08-03.md", ticker_text())
     runner = FakeRunner(judgment())
     assert ev.evaluate_brief(brief, runner=runner) == ev.EXIT_OK  # the offline fixture: no tape
-    assert "VERIFIED PRICE TAPE" not in runner.prompts[0] and "do not\nsearch for them" not in runner.prompts[0]
+    prompt = runner.prompts[0]
+    assert "VERIFIED PRICE TAPE" not in prompt and "do not search for them" not in prompt
+    assert "contradicts the tape" not in prompt and "'major' coverage" not in prompt
     assert "price tape unavailable for NVDA" in capsys.readouterr().err
 
 
