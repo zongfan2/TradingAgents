@@ -30,6 +30,9 @@ BIG_MOVE_LOOKBACK = 3
 Bar = tuple[date, float]  # (session date, close)
 Fetch = Callable[[str], Sequence[Bar]]
 
+#: How a brief cites a figure taken from the tape (no URL: the data itself).
+TAPE_CITATION = "[price tape]"
+
 UNAVAILABLE = (
     "Price tape unavailable (market data could not be read). Verify any close or "
     "daily move you state against a primary source."
@@ -61,9 +64,11 @@ def tape_rows(bars: Sequence[Bar], as_of: date, sessions: int = TAPE_SESSIONS) -
     return rows[-sessions:]
 
 
-def render_tape(ticker: str, as_of: date, fetch: Fetch | None = None) -> str:
-    """The tape block for a prompt: a table of closes and daily moves, the
-    big recent moves called out, and the rules that make it authoritative."""
+def render_tape(ticker: str, as_of: date, fetch: Fetch | None = None, *, for_writer: bool = True) -> str:
+    """The tape block for a prompt: a table of closes and daily moves and the
+    big recent moves called out. ``for_writer`` (the collector) adds the
+    writer's rules; the evaluator (``for_writer=False``) gets the facts only
+    and states its own rules. :data:`UNAVAILABLE` on any failure."""
     try:
         rows = tape_rows((fetch or fetch_daily_closes)(ticker), as_of)
     except Exception as exc:  # never blocks a brief or an evaluation
@@ -82,16 +87,20 @@ def render_tape(ticker: str, as_of: date, fetch: Fetch | None = None) -> str:
             big.append(f"{day.isoformat()} ({change})")
         lines.append(f"| {day.isoformat()} | {close:,.2f} | {change}{mark} |")
     lines.append("")
-    lines.append(
-        "These closes and moves are verified: never contradict them, and do not spend "
-        "searches on past closes or daily % moves."
-    )
     if big:
+        lines.append(f"⚠ Large recent moves: {', '.join(big)}.")
+    if for_writer:
         lines.append(
-            f"⚠ Large recent moves: {', '.join(big)}. Spend your FIRST searches on these: one "
-            f"targeted search per ⚠ session for its driver (e.g. \"{ticker} stock <date> why\", "
-            "or the sector/peer news of that day). Explain each in Company Developments (48h) "
-            "with a cited driver; write 'driver unverified' only if that search found nothing — "
-            "never describe a move in the opposite direction, never omit one."
+            "These closes and moves are verified: never contradict them, and do not spend "
+            "searches on past closes or daily % moves. Cite a close or move taken from this "
+            f"tape as {TAPE_CITATION} — a valid citation without a URL."
         )
+        if big:
+            lines.append(
+                "Spend your FIRST searches on the ⚠ sessions: one targeted search per ⚠ session "
+                f"for its driver (e.g. \"{ticker} stock <date> why\", or the sector/peer news of "
+                "that day). Explain each in Company Developments (48h) with a cited driver; write "
+                "'driver unverified' only if that search found nothing — never describe a move in "
+                "the opposite direction, never omit one."
+            )
     return "\n".join(lines)

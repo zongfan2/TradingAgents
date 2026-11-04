@@ -22,7 +22,10 @@ def test_render_flags_large_recent_moves_and_states_the_rules():
     text = pt.render_tape("INTC", date(2026, 11, 3), fetch=lambda t: BARS)
     assert "| 2026-11-02 | 59.97 | -8.80% ⚠ |" in text and "| 2026-10-30 | 65.76 | -28.58% ⚠ |" in text
     assert "| 2026-10-28 | 95.53 | +1.91% |" in text
-    assert "never contradict them" in text and "driver unverified" in text
+    assert "never contradict them" in text and "driver unverified" in text and "[price tape]" in text
+    judge = pt.render_tape("INTC", date(2026, 11, 3), fetch=lambda t: BARS, for_writer=False)
+    assert "-8.80% ⚠" in judge and "Large recent moves" in judge
+    assert "FIRST searches" not in judge and "never contradict" not in judge  # facts only for the judge
     quiet = pt.render_tape("X", date(2026, 11, 3), fetch=lambda t: [(date(2026, 10, d), 100 + d / 10) for d in (27, 28, 29)])
     assert "⚠" not in quiet and "Large recent moves" not in quiet
 
@@ -75,3 +78,31 @@ def test_the_evaluator_gets_the_tape_before_as_of_and_the_severity_rule(monkeypa
     assert "contradicts the tape" in prompt
     assert "VERIFIED PRICE TAPE" not in ev.build_eval_prompt("ticker", TickerBriefMeta.model_construct(
         ticker="INTC", as_of_date=date(2026, 11, 3), catalyst_score=3.0, session="us"), "BRIEF")
+
+
+@pytest.mark.unit
+def test_collect_one_builds_the_tape_for_the_jobs_ticker_and_as_of(monkeypatch, tmp_path):
+    import pipeline.ticker_collector as tc
+
+    calls, prompts = [], []
+    monkeypatch.setattr(tc.price_tape_module, "render_tape", lambda t, d: calls.append((t, d)) or f"TAPE {t} {d}")
+    monkeypatch.setattr(tc, "render_ticker_prompt",
+                        lambda *a, price_tape=None, **k: prompts.append(price_tape) or "prompt")
+    monkeypatch.setattr(tc, "_generate_validated", lambda *a, **k: (_ for _ in ()).throw(tc.CollectorError("stop")))
+    monkeypatch.setattr(tc, "resolve_jobs", lambda *a, **k: ([tc.TickerJob("INTC")], None))
+    monkeypatch.setattr(tc, "_emit_collect_funnel", lambda *a, **k: None)
+    tc.collect_all("us", "2026-11-03", backend="claude", runner=lambda *a, **k: "",
+                   brief_dir=tmp_path / "b", pool_dir=tmp_path / "p")
+    assert calls == [("INTC", date(2026, 11, 3))] and prompts == ["TAPE INTC 2026-11-03"]
+
+
+@pytest.mark.unit
+def test_an_unavailable_tape_leaves_the_evaluator_to_its_own_checks(tmp_path, capsys):
+    from pipeline import evaluator as ev
+    from tests.test_evaluator import FakeRunner, judgment, ticker_text, write_brief
+
+    brief = write_brief(tmp_path / "ticker_briefs" / "NVDA", "2026-08-03.md", ticker_text())
+    runner = FakeRunner(judgment())
+    assert ev.evaluate_brief(brief, runner=runner) == ev.EXIT_OK  # the offline fixture: no tape
+    assert "VERIFIED PRICE TAPE" not in runner.prompts[0] and "do not\nsearch for them" not in runner.prompts[0]
+    assert "price tape unavailable for NVDA" in capsys.readouterr().err

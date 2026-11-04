@@ -330,7 +330,8 @@ Use this tape for every close, daily move or price trend the brief states — do
 search for them. A brief statement that contradicts the tape (wrong close, wrong
 direction, a rebound described as a decline) is a 'major' factual_accuracy flag. A ⚠
 move the brief neither explains nor marks 'driver unverified' is a 'major' coverage
-flag.
+flag. A figure cited as {price_tape_module.TAPE_CITATION} that matches the tape is
+correctly cited.
 
 """
 
@@ -608,8 +609,14 @@ def evaluate_brief(
         )
         return EXIT_OK
 
-    tape = (price_tape_module.render_tape(meta.ticker, meta.as_of_date)
-            if kind == "ticker" and isinstance(meta, TickerBriefMeta) else None)
+    tape = None
+    if kind == "ticker" and isinstance(meta, TickerBriefMeta):
+        tape = price_tape_module.render_tape(meta.ticker, meta.as_of_date, for_writer=False)
+        if tape == price_tape_module.UNAVAILABLE:
+            # No tape: the evaluator checks prices by its own searches, as before.
+            print(f"evaluator: warning: price tape unavailable for {meta.ticker} — "
+                  "price statements checked by search only", file=sys.stderr)
+            tape = None
     prompt = build_eval_prompt(kind, meta, text, price_tape=tape)
     try:
         judgment = _run_judgment(runner, prompt)

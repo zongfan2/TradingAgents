@@ -33,7 +33,8 @@ Any failure (or fewer than 2 sessions) renders a fixed "unavailable" line;
 it never raises and never blocks a brief or an evaluation. Tests are
 offline: an autouse fixture makes the fetch fail.
 
-The block carries its rules: the closes are authoritative — never
+The collector's block (`for_writer=True`) carries the writer's rules — a
+tape figure is cited as `[price tape]`, a valid citation without a URL —: the closes are authoritative — never
 contradict them, do not search for past closes or daily moves — and each ⚠
 session gets the **first** searches (one targeted search per ⚠ session for
 its driver), is explained in Company Developments (48h) with a cited driver
@@ -48,8 +49,12 @@ brief's `as_of`.
 
 ### P3 — Evaluator
 
-Ticker evaluations get the same tape (`as_of` = the brief's) as a reference
-block. A statement that contradicts the tape (wrong close, wrong direction,
+Ticker evaluations get the same tape facts (`as_of` = the brief's,
+`for_writer=False`: the table and the ⚠ list, none of the writer's rules) as
+a reference block with the evaluator's own rules; a `[price tape]` figure
+that matches the tape is correctly cited. When the tape is unavailable the
+block is left out entirely and logged — the evaluator then checks prices by
+its own searches, as before. A statement that contradicts the tape (wrong close, wrong direction,
 a rebound described as a decline) is a **major** factual_accuracy flag; a ⚠
 move neither explained nor marked "driver unverified" is a **major**
 coverage flag; the evaluator does not search for these prices. Macro briefs
