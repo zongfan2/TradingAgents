@@ -68,14 +68,12 @@ def test_the_evaluator_gets_the_tape_before_as_of_and_the_severity_rule(monkeypa
     seen = {}
     monkeypatch.setattr(pt, "fetch_daily_closes", lambda ticker: seen.setdefault("ticker", ticker) and BARS)
 
-    class Meta:
-        ticker, as_of_date = "INTC", date(2026, 11, 3)
-
     from pipeline.contracts.briefs import TickerBriefMeta
 
     prompt = ev.build_eval_prompt("ticker", TickerBriefMeta.model_construct(
         ticker="INTC", as_of_date=date(2026, 11, 3), catalyst_score=3.0, session="us"),
         "BRIEF", price_tape=pt.render_tape("INTC", date(2026, 11, 3)))
+    assert seen == {"ticker": "INTC"}  # the brief's ticker
     assert "VERIFIED PRICE TAPE" in prompt and "-8.80% ⚠" in prompt and "2026-11-03 |" not in prompt
     assert "'minor' flag when you verified the claim itself elsewhere" in prompt
     assert "contradicts the tape" in prompt
