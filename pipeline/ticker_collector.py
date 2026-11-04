@@ -338,6 +338,7 @@ def render_ticker_prompt(
     unresolved raises (never send a partial render to the backend)."""
     path = Path(template_path) if template_path is not None else TICKER_PROMPT_TEMPLATE
     text = path.read_text(encoding="utf-8")
+    no_tape = price_tape == price_tape_module.UNAVAILABLE
     return render_template(
         text,
         {
@@ -348,10 +349,13 @@ def render_ticker_prompt(
             "SEED": seed_block,
             "SEARCH_BUDGET": render_search_budget(max_searches),
             "PRICE_TAPE": price_tape,
-            # Only a writer that has a tape may cite it (specs/price-tape.md P2).
-            "TAPE_CITATION_RULE": "" if price_tape == price_tape_module.UNAVAILABLE else (
+            # Only a writer that has a tape may cite it or take numbers from it
+            # (specs/price-tape.md P2).
+            "TAPE_CITATION_RULE": "" if no_tape else (
                 " (a close or daily move taken from the Verified price tape cites "
                 f"`{price_tape_module.TAPE_CITATION}`)"),
+            "TAPE_NUMBERS_RULE": "" if no_tape else (
+                " or, for past closes and daily moves, the Verified price tape (do not search those)"),
         },
     )
 

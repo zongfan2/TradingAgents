@@ -61,7 +61,7 @@ dated catalyst.
   from: `claim text [Source](https://...)`. No uncited numbers{{TAPE_CITATION_RULE}}.
 - Cite at least 5 distinct source URLs across the brief. Set `sources_count` in
   the frontmatter to the exact number of distinct URLs you cited in the body.
-- Numbers must come from your searches, not memory. If you could not verify
+- Numbers must come from your searches{{TAPE_NUMBERS_RULE}}, not memory. If you could not verify
   something important, say "unverified" rather than asserting it.
 - No forward-dated claims; nothing published after {{DATE}}. Listing a
   *scheduled* future event with its date in the catalyst calendar is not a

@@ -57,8 +57,10 @@ def test_the_collector_prompt_carries_the_tape(monkeypatch):
                                 price_tape=pt.render_tape("INTC", date(2026, 11, 3), fetch=lambda t: BARS))
     assert "# Verified price tape" in text and "-8.80% ⚠" in text and "{{" not in text
     assert "Verified price tape cites `[price tape]`" in text
+    assert "Numbers must come from your searches or, for past closes and daily moves, the Verified price tape" in text
     bare = render_ticker_prompt(date(2026, 11, 3), "INTC", "us", "g", "seed")
     assert pt.UNAVAILABLE in bare and "[price tape]" not in bare and "{{" not in bare  # nothing to cite
+    assert "Numbers must come from your searches, not memory" in bare
 
 
 @pytest.mark.unit

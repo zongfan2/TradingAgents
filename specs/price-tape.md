@@ -67,7 +67,9 @@ never described in the opposite direction or omitted.
 (`{{PRICE_TAPE}}`) after the seed. The collector renders it per job with the
 brief's `as_of`. The `[price tape]` citation rule (`{{TAPE_CITATION_RULE}}`) is
 rendered only when the tape is: a writer without one is never told it may
-cite it.
+cite it. Likewise the sourcing rule ("numbers must come from your searches")
+gains the tape as a source for past closes and daily moves
+(`{{TAPE_NUMBERS_RULE}}`) only when there is one.
 
 ### P3 — Evaluator
 
