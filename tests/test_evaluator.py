@@ -1277,8 +1277,10 @@ def test_ticker_evaluation_gets_the_price_tape_before_as_of(tmp_path, macro_dir,
     runner = FakeRunner(judgment())
     assert evaluate_brief(brief, runner=runner) == EXIT_OK
     prompt = runner.prompts[0]
-    assert seen[0] == "NVDA" and set(seen) <= {"NVDA", "SPY"} and "VERIFIED PRICE TAPE" in prompt
+    assert seen == ["NVDA"] and "VERIFIED PRICE TAPE" in prompt
     assert "| 2026-07-31 | 92.00 | -8.00% ⚠ |" in prompt and "2026-08-03 | 99" not in prompt  # no look-ahead
+    report = json.loads(brief.with_name("2026-08-03.eval.json").read_text())
+    assert report["price_tape_newest"] == "2026-07-31"  # the verdict's tape, auditable
     fetched = len(seen)
     macro_runner = FakeRunner(judgment())
     assert evaluate_brief(write_brief(macro_dir, "2026-08-03.us.md", macro_text()), runner=macro_runner) == EXIT_OK

@@ -34,21 +34,20 @@ makes the tape unavailable rather than show rescaled closes). Sessions in the la
 3 with |change| ≥ 5% are marked ⚠. Non-positive or NaN closes are left out,
 and the session after one shows no change (a move across the gap spans two
 sessions).
-Any failure, fewer than 2 sessions, or a tape whose newest session is older
-than its market's latest session before `as_of` (the newest bar of the
-market benchmark: SPY for US, 000001.SS for Shanghai/Shenzhen, ^HSI for Hong
-Kong, 000001.SS also for Beijing; another suffix has no benchmark and gets
-the previous-weekday rule; a session read is cached for 10 minutes, a failed read is retried), or older than a session the ticker's own history
-lists without a usable close, renders a fixed "unavailable" line. yfinance
-lists a finished session with a NaN close until its data is complete
-(measured 2026-11-05 00:28 Shanghai: 000001.SS and 600256.SS both at 11-04 =
-NaN), so such a bar counts as a session that happened; otherwise the market
-and the ticker lagging together would go unnoticed. A tape missing even one
-session (late data, an outage, a halt) would hide the most relevant move. When the benchmark cannot be read, the tape must reach the
-last weekday before `as_of` (a holiday then costs the tape: a missed tape,
-never one a weekday short whose missing session the evaluator would later
-hold the brief to). It never raises
-and never blocks a brief or an evaluation. Tests are offline: an autouse fixture makes the fetch fail.
+Any failure, fewer than 2 sessions, or a tape whose newest session is not
+the last weekday before `as_of` renders a fixed "unavailable" line: a tape
+missing even one session (late data, an outage, a halt) would hide the most
+relevant move behind "authoritative". yfinance lists a finished session with
+a NaN close until its data is complete (measured 2026-11-05 00:28 Shanghai:
+000001.SS and 600256.SS both at 11-04 = NaN), and data can lag for a ticker
+and its whole market together, with no bar listed at all — so the rule is the
+weekday calendar, not a comparison with the market's own data (a benchmark
+check, tried in review, cannot see a market-wide lag and became redundant).
+A holiday therefore costs the first tape after it (about ten days a year per
+market): a missed tape, never one a session short whose missing session the
+evaluator would later hold the brief to. It never raises and never blocks a
+brief or an evaluation. Tests are offline: an autouse fixture makes the fetch
+fail.
 
 The collector's block (`for_writer=True`) carries the writer's rules. A
 tape figure is cited as `[price tape]`, a valid citation without a URL (the
@@ -77,7 +76,9 @@ that matches the tape is correctly cited. The ticker evaluator's citation
 rules always state that `[price tape]` is a valid URL-less citation (checked
 against the tape block when there is one, else by search), so a brief
 collected with a tape is never penalised for it when the evaluator's own
-fetch fails. When the tape is unavailable the
+fetch fails. The ticker eval report records `price_tape_newest` (the
+tape's newest session, null without one), so a verdict reached with or
+without a tape can be told apart. When the tape is unavailable the
 block is left out entirely and logged — the evaluator then checks prices by
 its own searches, as before. A statement that contradicts the tape (wrong close, wrong direction,
 a rebound described as a decline) is a **major** factual_accuracy flag; a ⚠

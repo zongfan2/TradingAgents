@@ -49,7 +49,6 @@ def _offline_price_tape(monkeypatch):
         raise RuntimeError("price tape is offline in tests")
 
     monkeypatch.setattr(price_tape, "fetch_daily_closes", offline)
-    monkeypatch.setattr(price_tape, "_SESSION_CACHE", {})
 
 
 @pytest.fixture(autouse=True)

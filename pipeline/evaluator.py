@@ -458,6 +458,7 @@ def _build_report(
     brief_sha256: str,
     evaluated_at: datetime,
     evaluator_id: str,
+    price_tape: str | None = None,
 ) -> MacroEvalReport | TickerEvalReport:
     """Identity fields come from the brief meta / file content — never from the
     model; the verdict is recomputed via ``compute_verdict`` (R3/R4).
@@ -475,7 +476,8 @@ def _build_report(
     }
     if kind == "ticker":
         assert isinstance(meta, TickerBriefMeta)
-        return TickerEvalReport(ticker=meta.ticker, session=meta.session, **common)
+        return TickerEvalReport(ticker=meta.ticker, session=meta.session,
+                                price_tape_newest=price_tape_module.newest_session(price_tape or ""), **common)
     if isinstance(meta, LegacyMacroBriefMeta) and meta.session is None:
         return _LegacyMacroEvalReport(**common)
     return MacroEvalReport(session=meta.session, **common)
@@ -653,7 +655,7 @@ def evaluate_brief(
         return EXIT_BACKEND_FAILURE
 
     now = datetime.now(timezone.utc)
-    report = _build_report(kind, meta, judgment, brief_sha256, now, evaluator_id)
+    report = _build_report(kind, meta, judgment, brief_sha256, now, evaluator_id, price_tape=tape)
     payload = report.model_dump(mode="json")
     if payload.get("session") is None:
         payload.pop("session", None)  # legacy v1 briefs carry no session anywhere

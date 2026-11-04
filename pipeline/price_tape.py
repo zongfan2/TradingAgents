@@ -15,7 +15,7 @@ fall back to today's behaviour.
 from __future__ import annotations
 
 import logging
-import time
+import re
 from collections.abc import Callable, Sequence
 from datetime import date, datetime, timedelta
 
@@ -28,9 +28,11 @@ TAPE_SESSIONS = 10
 BIG_MOVE_PCT = 5.0
 BIG_MOVE_LOOKBACK = 3
 def previous_weekday(as_of: date) -> date:
-    """The last weekday before ``as_of``: without the benchmark's latest
-    session, the tape must reach it. A holiday then makes the tape
-    unavailable — a missed tape, never a tape a weekday short."""
+    """The last weekday before ``as_of``: the tape must reach it. Market data
+    can lag for a ticker and its whole market together (no bar listed at
+    all), which no comparison with the market's own data can see; a holiday
+    then makes the tape unavailable too — a missed tape (about ten days a
+    year per market), never a tape a session short."""
     day = as_of - timedelta(days=1)
     while day.weekday() >= 5:
         day -= timedelta(days=1)
@@ -74,50 +76,6 @@ def closes_from_history(ticker: str, frame) -> list[Bar]:
     return bars
 
 
-#: Benchmarks whose newest bar is the market's latest session. A ticker
-#: without a suffix is US (SPY); any other suffix has no benchmark here, so
-#: the previous-weekday rule applies rather than another exchange's calendar.
-_BENCHMARKS = ((".SS", "000001.SS"), (".SZ", "000001.SS"), (".BJ", "000001.SS"), (".HK", "^HSI"))
-#: (benchmark, as_of) -> (latest session, monotonic read time).
-_SESSION_CACHE: dict[tuple[str, date], tuple[date, float]] = {}
-#: A read session is reused this long: a long-lived process (a collection
-#: then its evaluations) re-reads the benchmark and sees a newly listed session.
-SESSION_CACHE_SECONDS = 600.0
-
-
-def benchmark_for(ticker: str) -> str | None:
-    upper = ticker.upper()
-    if "." not in upper:
-        return "SPY"
-    return next((bench for suffix, bench in _BENCHMARKS if upper.endswith(suffix)), None)
-
-
-def latest_market_session(ticker: str, as_of: date, fetch: Fetch | None = None) -> date | None:
-    """The market's latest session before ``as_of``: the newest bar of the
-    ticker's market benchmark, with or without a close — yfinance lists a
-    finished session with a NaN close until its data is complete, and that
-    session still exists. Only a session read is cached, for
-    :data:`SESSION_CACHE_SECONDS`: a failed read is retried by the next
-    ticker. None when it cannot be read — the caller then falls back to the
-    previous-weekday rule."""
-    bench = benchmark_for(ticker)
-    if bench is None or bench.upper() == ticker.upper():
-        return None
-    key = (bench, as_of)
-    cached = _SESSION_CACHE.get(key)
-    if cached is not None and time.monotonic() - cached[1] < SESSION_CACHE_SECONDS:
-        return cached[0]
-    try:
-        days = [day for day, _close in (fetch or fetch_daily_closes)(bench) if day < as_of]
-    except Exception as exc:
-        logger.warning("benchmark %s unavailable for the staleness check: %s", bench, type(exc).__name__)
-        return None
-    if not days:
-        return None
-    _SESSION_CACHE[key] = (max(days), time.monotonic())
-    return _SESSION_CACHE[key][0]
-
-
 def tape_rows(bars: Sequence[Bar], as_of: date, sessions: int = TAPE_SESSIONS) -> list[tuple[date, float, float | None]]:
     """``(date, close, % change vs previous session)`` for the last
     ``sessions`` sessions strictly before ``as_of``, oldest first. A session
@@ -147,15 +105,14 @@ def render_tape(ticker: str, as_of: date, fetch: Fetch | None = None, *, for_wri
         return UNAVAILABLE
     if len(rows) < 2:
         return UNAVAILABLE
-    # A session listed without a usable close (incomplete data) still happened.
-    listed = max(day for day, _close in bars if day < as_of)
-    market = latest_market_session(ticker, as_of, fetch)
-    expected = max(listed, market) if market else listed
     newest = rows[-1][0]
-    if newest < expected or (market is None and newest < previous_weekday(as_of)):
-        # The latest session is missing (late data, outage, a halt): a tape
-        # without it would hide the most relevant move behind "authoritative".
-        logger.warning("price tape for %s stale: last session %s, market's %s (before %s)",
+    expected = previous_weekday(as_of)
+    if newest < expected:
+        # The latest session is missing (late data, outage, a halt, or a
+        # holiday): a tape without it would hide the most relevant move
+        # behind "authoritative". yfinance lists a finished session with a NaN
+        # close until its data is complete — that session is missing too.
+        logger.warning("price tape for %s stale: last session %s, expected %s (before %s)",
                        ticker, newest, expected, as_of)
         return UNAVAILABLE
     lines = [f"Daily closes for {ticker} before {as_of.isoformat()} (market data, authoritative):", "",
@@ -186,3 +143,14 @@ def render_tape(ticker: str, as_of: date, fetch: Fetch | None = None, *, for_wri
                 "the opposite direction, never omit one."
             )
     return "\n".join(lines)
+
+
+_ROW_DATE = re.compile(r"^\| (\d{4}-\d{2}-\d{2}) \|", re.MULTILINE)
+
+
+def newest_session(tape: str) -> date | None:
+    """The newest session in a rendered tape (None for :data:`UNAVAILABLE`):
+    the eval report records it, so a verdict reached with or without a tape
+    can be told apart afterwards."""
+    days = _ROW_DATE.findall(tape)
+    return date.fromisoformat(days[-1]) if days else None

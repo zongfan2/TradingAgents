@@ -26,14 +26,15 @@ def test_render_flags_large_recent_moves_and_states_the_rules():
     judge = pt.render_tape("INTC", date(2026, 11, 3), fetch=lambda t: BARS, for_writer=False)
     assert "-8.80% ⚠" in judge and "Large recent moves" in judge
     assert "FIRST searches" not in judge and "never contradict" not in judge  # facts only for the judge
-    quiet = pt.render_tape("X", date(2026, 11, 3), fetch=lambda t: [(date(2026, 10, d), 100 + d / 10) for d in (27, 28, 29)])
-    assert "⚠" not in quiet and "Large recent moves" not in quiet
+    quiet = pt.render_tape("X", date(2026, 10, 30), fetch=lambda t: [(date(2026, 10, d), 100 + d / 10) for d in (27, 28, 29)])
+    assert quiet != pt.UNAVAILABLE and "⚠" not in quiet and "Large recent moves" not in quiet
 
 
 @pytest.mark.unit
 def test_only_the_last_three_sessions_are_flagged():
     bars = [(date(2026, 10, 1), 100.0), (date(2026, 10, 2), 110.0)] + [(date(2026, 10, d), 110.0) for d in range(5, 9)]
-    assert "⚠" not in pt.render_tape("X", date(2026, 10, 9), fetch=lambda t: bars)  # +10% is 4 sessions back
+    text = pt.render_tape("X", date(2026, 10, 9), fetch=lambda t: bars)
+    assert text != pt.UNAVAILABLE and "⚠" not in text and "+10.00%" in text  # +10% is 4 sessions back
 
 
 @pytest.mark.unit
@@ -110,33 +111,28 @@ def test_an_unavailable_tape_leaves_the_evaluator_to_its_own_checks(tmp_path, ca
     assert "VERIFIED PRICE TAPE" not in prompt and "do not search for them" not in prompt
     assert "contradicts the tape" not in prompt and "'major' coverage" not in prompt
     assert "price tape unavailable for NVDA" in capsys.readouterr().err
+    import json
+
+    assert json.loads(brief.with_name("2026-08-03.eval.json").read_text())["price_tape_newest"] is None
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize(("as_of", "available"), [
     (date(2026, 11, 3), True),    # Tue: newest 11-02 (Mon) is the previous weekday
-    (date(2026, 11, 4), False),   # Wed: Tuesday 11-03 missing (with SPY down, nothing else would tell)
+    (date(2026, 11, 4), False),   # Wed: Tuesday 11-03 missing for the ticker (and maybe its whole market)
     (date(2026, 11, 9), False),   # next Mon: Fri 11-06 missing — a holiday too costs the tape
 ])
-def test_without_a_benchmark_the_tape_must_reach_the_previous_weekday(as_of, available):
-    def fetch(t):
-        if t == "SPY":
-            raise RuntimeError("benchmark down")
-        return BARS[:-1]  # through 11-02
-
-    text = pt.render_tape("INTC", as_of, fetch=fetch)
+def test_the_tape_must_reach_the_previous_weekday(as_of, available):
+    text = pt.render_tape("INTC", as_of, fetch=lambda t: BARS[:-1])  # through 11-02
     assert (text != pt.UNAVAILABLE) is available
 
 
 @pytest.mark.unit
-def test_a_tape_one_session_behind_its_market_is_unavailable():
-    spy = BARS + [(date(2026, 11, 4), 600.0)]
-
-    def fetch(t):
-        return spy if t == "SPY" else BARS  # INTC's 11-04 bar not published yet
-
-    assert pt.render_tape("INTC", date(2026, 11, 5), fetch=fetch) == pt.UNAVAILABLE
-    assert pt.render_tape("INTC", date(2026, 11, 4), fetch=fetch) != pt.UNAVAILABLE  # up to date
+def test_weekends_are_not_missing_sessions():
+    friday = [(date(2026, 10, d), 100.0 + d) for d in (28, 29, 30)]
+    assert pt.previous_weekday(date(2026, 11, 2)) == date(2026, 10, 30)
+    assert pt.render_tape("INTC", date(2026, 11, 2), fetch=lambda t: friday) != pt.UNAVAILABLE  # Monday's brief
+    assert pt.render_tape("INTC", date(2026, 11, 1), fetch=lambda t: friday) != pt.UNAVAILABLE  # a Sunday as_of
 
 
 @pytest.mark.unit
@@ -145,8 +141,6 @@ def test_a_session_listed_without_a_close_is_still_missing_from_the_tape():
     # 11-04 with a NaN close — the market and the ticker lagging together.
     nan_last = BARS + [(date(2026, 11, 4), float("nan"))]
     assert pt.render_tape("600256.SS", date(2026, 11, 5), fetch=lambda t: nan_last) == pt.UNAVAILABLE
-    assert pt.render_tape("SPY", date(2026, 11, 5), fetch=lambda t: nan_last) == pt.UNAVAILABLE  # no benchmark of its own
-    assert pt.latest_market_session("INTC", date(2026, 11, 5), fetch=lambda t: nan_last) == date(2026, 11, 4)
 
 
 @pytest.mark.unit
@@ -156,14 +150,6 @@ def test_no_change_is_computed_across_a_gap_inside_the_window():
     text = pt.render_tape("X", date(2026, 11, 2), fetch=lambda t: bars)
     assert "| 2026-10-29 | 110.00 | — |" in text and "+10.00%" not in text and "⚠" not in text
     assert "| 2026-10-30 | 111.00 | +0.91% |" in text
-
-
-@pytest.mark.unit
-def test_benchmarks_follow_the_market():
-    assert [pt.benchmark_for(t) for t in ("AAPL", "BRK-B", "600256.SS", "300750.SZ", "830799.BJ", "0700.HK")] == [
-        "SPY", "SPY", "000001.SS", "000001.SS", "000001.SS", "^HSI"]
-    assert pt.benchmark_for("7203.T") is None  # no benchmark: the previous-weekday rule, not SPY's calendar
-    assert pt.latest_market_session("7203.T", date(2026, 11, 5), fetch=lambda t: BARS) is None
 
 
 @pytest.mark.unit
@@ -185,27 +171,6 @@ def test_macro_evaluations_keep_their_citation_rules():
         as_of_date=date(2026, 11, 3), session="us"), "BRIEF")
     assert "[price tape]" not in prompt and "PRICE TAPE" not in prompt
     assert "a URL that contradicts or does not contain the\n   claim is a 'major' flag" in prompt
-
-
-@pytest.mark.unit
-def test_a_failed_benchmark_read_is_retried_by_the_next_ticker():
-    calls = []
-    spy = [(date(2026, 10, d), 600.0 + d) for d in (27, 28, 29, 30)]
-    intc = [(date(2026, 10, d), 90.0 + d) for d in (27, 28, 29)]  # Friday 10-30 missing
-
-    def fetch(t):
-        if t == "SPY":
-            calls.append(t)
-            if len(calls) == 1:
-                raise TimeoutError("transient")
-            return spy
-        return intc
-
-    monday = date(2026, 11, 2)
-    assert pt.render_tape("INTC", monday, fetch=fetch) == pt.UNAVAILABLE  # previous-weekday fallback: Fri missing
-    assert pt.render_tape("INTC", monday, fetch=fetch) == pt.UNAVAILABLE  # benchmark re-read: Friday missing
-    pt.render_tape("INTC", monday, fetch=fetch)
-    assert len(calls) == 2  # a session read is cached
 
 
 @pytest.mark.unit
@@ -264,19 +229,6 @@ def test_the_warning_coverage_rule_binds_only_a_brief_whose_writer_had_a_tape():
 
 
 @pytest.mark.unit
-def test_a_read_session_expires_so_a_newly_listed_one_is_seen(monkeypatch):
-    clock = [1000.0]
-    monkeypatch.setattr(pt.time, "monotonic", lambda: clock[0])
-    through_03 = [(date(2026, 11, d), 600.0 + d) for d in (2, 3)]
-    through_04 = through_03 + [(date(2026, 11, 4), float("nan"))]
-    assert pt.latest_market_session("INTC", date(2026, 11, 5), fetch=lambda t: through_03) == date(2026, 11, 3)
-    clock[0] += 60
-    assert pt.latest_market_session("INTC", date(2026, 11, 5), fetch=lambda t: through_04) == date(2026, 11, 3)  # cached
-    clock[0] += pt.SESSION_CACHE_SECONDS
-    assert pt.latest_market_session("INTC", date(2026, 11, 5), fetch=lambda t: through_04) == date(2026, 11, 4)
-
-
-@pytest.mark.unit
 def test_the_tape_read_does_not_eat_the_backend_window(monkeypatch, tmp_path):
     import pipeline.ticker_collector as tc
 
@@ -298,3 +250,9 @@ def test_the_tape_read_does_not_eat_the_backend_window(monkeypatch, tmp_path):
                    runner=lambda *a, **k: "", brief_dir=tmp_path, log_path=tmp_path / "log.csv",
                    job_window=300.0, aggregate_deadline=10_000.0)
     assert seen == {"timeout": 300.0, "deadline": 150.0 + 300.0}  # measured after the read
+
+
+@pytest.mark.unit
+def test_newest_session_reads_the_rendered_tape():
+    assert pt.newest_session(pt.render_tape("INTC", date(2026, 11, 3), fetch=lambda t: BARS)) == date(2026, 11, 2)
+    assert pt.newest_session(pt.UNAVAILABLE) is None

@@ -66,6 +66,9 @@ class TickerEvalReport(_EvalReportBase):
 
     ticker: str = Field(min_length=1)
     session: Session
+    #: Newest session of the price tape in the evaluation prompt; None when
+    #: the evaluation ran without one (specs/price-tape.md P3).
+    price_tape_newest: date | None = None
 
 
 def compute_verdict(scores: EvalScores, flagged_claims: list[FlaggedClaim]) -> Verdict:

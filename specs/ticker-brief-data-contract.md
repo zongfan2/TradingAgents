@@ -27,9 +27,16 @@ evaluator (reader + `*.eval.json` writer), and the TradingAgents pipeline
                "coverage": 7.5, "timeliness": 8.0, "consistency": 9.0},
     "flagged_claims": [{"section": "Risks", "claim": "…", "issue": "…", "severity": "minor"}],
     "verdict": "pass",
-    "notes": "free text"
+    "notes": "free text",
+    "price_tape_newest": "2026-07-31"
   }
   ```
+
+  `price_tape_newest` (optional, null or absent on older evals): the newest
+  session of the verified price tape in the evaluation prompt, null when the
+  evaluation ran without one (specs/price-tape.md P3). An eval is not re-run
+  when the tape later becomes available: idempotency stays bound to
+  `brief_sha256`.
 
   The macro contract's **revision binding** rule applies identically: an eval
   is valid only when `brief_sha256` matches the brief being served; mismatch
