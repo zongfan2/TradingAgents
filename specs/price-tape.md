@@ -28,8 +28,9 @@ for them (each search is $0.01, and the collector is capped at 10).
 **strictly before** `as_of` (no partial day, no look-ahead) with the
 session-over-session change, from yfinance daily history
 (`auto_adjust=False`, the pool builder gate's source; yfinance still
-split-adjusts Close, so a stock split inside the window makes the tape
-unavailable rather than show rescaled closes). Sessions in the last
+split-adjusts every Close before a split, so any split in the fetched
+~2 months, inside the window or after a past `as_of` (backfill, re-evaluation),
+makes the tape unavailable rather than show rescaled closes). Sessions in the last
 3 with |change| ≥ 5% are marked ⚠. Non-positive or NaN closes are left out,
 and the session after one shows no change (a move across the gap spans two
 sessions).

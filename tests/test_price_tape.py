@@ -220,6 +220,17 @@ def test_a_split_inside_the_window_makes_the_tape_unavailable():
 
 
 @pytest.mark.unit
+def test_a_split_after_a_past_as_of_also_makes_the_tape_unavailable():
+    import pandas as pd
+
+    days = pd.bdate_range("2026-10-01", periods=25)  # through 11-04
+    frame = pd.DataFrame({"Close": [100.0 + i for i in range(25)], "Stock Splits": 0.0}, index=days)
+    frame.loc[days[12], "Stock Splits"] = 4.0  # 13 bars before the frame's end, after the backfilled tape starts
+    backfill = date(2026, 10, 20)
+    assert pt.render_tape("X", backfill, fetch=lambda t: pt.closes_from_history(t, frame)) == pt.UNAVAILABLE
+
+
+@pytest.mark.unit
 def test_the_evaluator_still_searches_moves_outside_the_tape():
     from pipeline import evaluator as ev
     from pipeline.contracts.briefs import TickerBriefMeta
