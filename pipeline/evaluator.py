@@ -306,7 +306,10 @@ citations alone. Score the brief on five dimensions, each a 0-10 float:
    An unreachable URL is a 'minor' flag. A URL that does not contain the claim is a
    'minor' flag when you verified the claim itself elsewhere (say so in the issue) and a
    'major' flag when you could not verify it or found it wrong; a URL that contradicts the
-   claim is a 'major' flag; a fabricated-looking source is a 'fabrication' flag.
+   claim is a 'major' flag; a fabricated-looking source is a 'fabrication' flag. A close
+   or daily move cited as `[price tape]` is market data from the collector's verified
+   tape, a valid citation without a URL (never a missing-URL or fabrication flag):
+   check it against the price tape block below when there is one, else by search.
 3. coverage — run an independent "{coverage_target}" search; score down for obvious
    misses and list them in notes.
 4. timeliness — is the content actually about the trailing 48h/week as of {date}?

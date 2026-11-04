@@ -29,12 +29,18 @@ for them (each search is $0.01, and the collector is capped at 10).
 session-over-session change, from yfinance daily history
 (`auto_adjust=False`, the pool builder gate's source). Sessions in the last
 3 with |change| ≥ 5% are marked ⚠. Non-positive or NaN closes are ignored.
-Any failure, fewer than 2 sessions, or a newest session more than 4
-calendar days before `as_of` (the latest sessions missing — late data or an
-outage; a tape without them would hide the most relevant move) renders a
-fixed "unavailable" line;
-it never raises and never blocks a brief or an evaluation. Tests are
-offline: an autouse fixture makes the fetch fail.
+Any failure, fewer than 2 sessions, or a tape whose newest session is older
+than its market's latest session before `as_of` (the newest bar of the
+market benchmark: SPY for US, 000001.SS for Shanghai/Shenzhen, ^HSI for Hong
+Kong; cached per process), or older than a session the ticker's own history
+lists without a usable close, renders a fixed "unavailable" line. yfinance
+lists a finished session with a NaN close until its data is complete
+(measured 2026-11-05 00:28 Shanghai: 000001.SS and 600256.SS both at 11-04 =
+NaN), so such a bar counts as a session that happened; otherwise the market
+and the ticker lagging together would go unnoticed. A tape missing even one
+session (late data, an outage, a halt) would hide the most relevant move. When the benchmark cannot be read, a newest session more
+than 4 calendar days before `as_of` is the fallback rule. It never raises
+and never blocks a brief or an evaluation. Tests are offline: an autouse fixture makes the fetch fail.
 
 The collector's block (`for_writer=True`) carries the writer's rules. A
 tape figure is cited as `[price tape]`, a valid citation without a URL (the
@@ -57,7 +63,11 @@ brief's `as_of`.
 Ticker evaluations get the same tape facts (`as_of` = the brief's,
 `for_writer=False`: the table and the ⚠ list, none of the writer's rules) as
 a reference block with the evaluator's own rules; a `[price tape]` figure
-that matches the tape is correctly cited. When the tape is unavailable the
+that matches the tape is correctly cited. The evaluator's citation rules
+always state that `[price tape]` is a valid URL-less citation (checked
+against the tape block when there is one, else by search), so a brief
+collected with a tape is never penalised for it when the evaluator's own
+fetch fails. When the tape is unavailable the
 block is left out entirely and logged — the evaluator then checks prices by
 its own searches, as before. A statement that contradicts the tape (wrong close, wrong direction,
 a rebound described as a decline) is a **major** factual_accuracy flag; a ⚠

@@ -114,6 +114,48 @@ def test_an_unavailable_tape_leaves_the_evaluator_to_its_own_checks(tmp_path, ca
     (date(2026, 11, 6), True),    # 4 days after 11-02 (e.g. sessions missing over a holiday)
     (date(2026, 11, 7), False),   # 5 days: the latest sessions are missing
 ])
-def test_a_tape_missing_its_latest_sessions_is_unavailable(as_of, available):
-    text = pt.render_tape("INTC", as_of, fetch=lambda t: BARS[:-1])  # through 11-02
+def test_without_a_benchmark_the_calendar_rule_applies(as_of, available):
+    def fetch(t):
+        if t == "SPY":
+            raise RuntimeError("benchmark down")
+        return BARS[:-1]  # through 11-02
+
+    text = pt.render_tape("INTC", as_of, fetch=fetch)
     assert (text != pt.UNAVAILABLE) is available
+
+
+@pytest.mark.unit
+def test_a_tape_one_session_behind_its_market_is_unavailable():
+    spy = BARS + [(date(2026, 11, 4), 600.0)]
+
+    def fetch(t):
+        return spy if t == "SPY" else BARS  # INTC's 11-04 bar not published yet
+
+    assert pt.render_tape("INTC", date(2026, 11, 5), fetch=fetch) == pt.UNAVAILABLE
+    assert pt.render_tape("INTC", date(2026, 11, 4), fetch=fetch) != pt.UNAVAILABLE  # up to date
+
+
+@pytest.mark.unit
+def test_a_session_listed_without_a_close_is_still_missing_from_the_tape():
+    # Measured 2026-11-05 00:28 Shanghai: 000001.SS and 600256.SS both listed
+    # 11-04 with a NaN close — the market and the ticker lagging together.
+    nan_last = BARS + [(date(2026, 11, 4), float("nan"))]
+    assert pt.render_tape("600256.SS", date(2026, 11, 5), fetch=lambda t: nan_last) == pt.UNAVAILABLE
+    assert pt.render_tape("SPY", date(2026, 11, 5), fetch=lambda t: nan_last) == pt.UNAVAILABLE  # no benchmark of its own
+    assert pt.latest_market_session("INTC", date(2026, 11, 5), fetch=lambda t: nan_last) == date(2026, 11, 4)
+
+
+@pytest.mark.unit
+def test_benchmarks_follow_the_market():
+    assert [pt.benchmark_for(t) for t in ("AAPL", "600256.SS", "300750.SZ", "0700.HK")] == [
+        "SPY", "000001.SS", "000001.SS", "^HSI"]
+
+
+@pytest.mark.unit
+def test_the_evaluator_always_accepts_price_tape_citations():
+    from pipeline import evaluator as ev
+    from pipeline.contracts.briefs import TickerBriefMeta
+
+    prompt = ev.build_eval_prompt("ticker", TickerBriefMeta.model_construct(
+        ticker="INTC", as_of_date=date(2026, 11, 3), catalyst_score=3.0, session="us"), "BRIEF")  # no tape
+    assert "`[price tape]` is market data" in prompt and "never a missing-URL or fabrication flag" in prompt

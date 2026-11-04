@@ -26,8 +26,8 @@ TAPE_SESSIONS = 10
 #: must be explained by the brief (or marked unverified).
 BIG_MOVE_PCT = 5.0
 BIG_MOVE_LOOKBACK = 3
-#: The newest tape session may be at most this many calendar days before
-#: ``as_of`` (a weekend plus a one-day holiday); older means data is missing.
+#: Without the benchmark's latest session: the newest tape session may be at
+#: most this many calendar days before ``as_of`` (a weekend plus a holiday).
 MAX_STALE_DAYS = 4
 
 Bar = tuple[date, float]  # (session date, close)
@@ -56,6 +56,36 @@ def fetch_daily_closes(ticker: str) -> list[Bar]:
     return bars
 
 
+#: Benchmarks whose newest bar is the market's latest session.
+_BENCHMARKS = ((".SS", "000001.SS"), (".SZ", "000001.SS"), (".HK", "^HSI"))
+_SESSION_CACHE: dict[tuple[str, date], date | None] = {}
+
+
+def benchmark_for(ticker: str) -> str:
+    upper = ticker.upper()
+    return next((bench for suffix, bench in _BENCHMARKS if upper.endswith(suffix)), "SPY")
+
+
+def latest_market_session(ticker: str, as_of: date, fetch: Fetch | None = None) -> date | None:
+    """The market's latest session before ``as_of``: the newest bar of the
+    ticker's market benchmark (cached per process), with or without a close —
+    yfinance lists a finished session with a NaN close until its data is
+    complete, and that session still exists. None when it cannot be read — the
+    caller then falls back to the calendar-day rule."""
+    bench = benchmark_for(ticker)
+    if bench.upper() == ticker.upper():
+        return None
+    key = (bench, as_of)
+    if key not in _SESSION_CACHE:
+        try:
+            days = [day for day, _close in (fetch or fetch_daily_closes)(bench) if day < as_of]
+            _SESSION_CACHE[key] = max(days) if days else None
+        except Exception as exc:
+            logger.warning("benchmark %s unavailable for the staleness check: %s", bench, type(exc).__name__)
+            _SESSION_CACHE[key] = None
+    return _SESSION_CACHE[key]
+
+
 def tape_rows(bars: Sequence[Bar], as_of: date, sessions: int = TAPE_SESSIONS) -> list[tuple[date, float, float | None]]:
     """``(date, close, % change vs previous session)`` for the last
     ``sessions`` sessions strictly before ``as_of``, oldest first."""
@@ -73,16 +103,23 @@ def render_tape(ticker: str, as_of: date, fetch: Fetch | None = None, *, for_wri
     writer's rules; the evaluator (``for_writer=False``) gets the facts only
     and states its own rules. :data:`UNAVAILABLE` on any failure."""
     try:
-        rows = tape_rows((fetch or fetch_daily_closes)(ticker), as_of)
+        bars = (fetch or fetch_daily_closes)(ticker)
+        rows = tape_rows(bars, as_of)
     except Exception as exc:  # never blocks a brief or an evaluation
         logger.warning("price tape for %s unavailable: %s", ticker, type(exc).__name__)
         return UNAVAILABLE
     if len(rows) < 2:
         return UNAVAILABLE
-    if (as_of - rows[-1][0]).days > MAX_STALE_DAYS:
-        # The newest session is missing (late data, outage): a tape without it
-        # would hide the most relevant move behind "authoritative" — unavailable.
-        logger.warning("price tape for %s stale: last session %s before %s", ticker, rows[-1][0], as_of)
+    # A session listed without a usable close (incomplete data) still happened.
+    listed = max(day for day, _close in bars if day < as_of)
+    market = latest_market_session(ticker, as_of, fetch)
+    expected = max(listed, market) if market else listed
+    newest = rows[-1][0]
+    if newest < expected or (market is None and (as_of - newest).days > MAX_STALE_DAYS):
+        # The latest session is missing (late data, outage, a halt): a tape
+        # without it would hide the most relevant move behind "authoritative".
+        logger.warning("price tape for %s stale: last session %s, market's %s (before %s)",
+                       ticker, newest, expected, as_of)
         return UNAVAILABLE
     lines = [f"Daily closes for {ticker} before {as_of.isoformat()} (market data, authoritative):", "",
              "| session | close | change |", "|---|---|---|"]
