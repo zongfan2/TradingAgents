@@ -7,6 +7,10 @@ no code fences around the whole document.
 
 {{SEED}}
 
+# Verified price tape
+
+{{PRICE_TAPE}}
+
 Work section by section. {{SEARCH_BUDGET}} Emphasize the
 trailing 48 hours; add weekly context only where it changes the interpretation.
 Prefer primary sources (company filings, press releases, exchange and regulator

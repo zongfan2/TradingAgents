@@ -51,6 +51,7 @@ from pathlib import Path
 
 import yaml
 
+from pipeline import price_tape as price_tape_module
 from pipeline.claude_cli import (
     EnvelopeError,
     call_env,
@@ -331,6 +332,7 @@ def render_ticker_prompt(
     seed_block: str,
     template_path: str | Path | None = None,
     max_searches: int | None = None,
+    price_tape: str = price_tape_module.UNAVAILABLE,
 ) -> str:
     """Render the per-ticker deep-search prompt; any placeholder left
     unresolved raises (never send a partial render to the backend)."""
@@ -345,6 +347,7 @@ def render_ticker_prompt(
             "GENERATOR": generator,
             "SEED": seed_block,
             "SEARCH_BUDGET": render_search_budget(max_searches),
+            "PRICE_TAPE": price_tape,
         },
     )
 
@@ -599,7 +602,8 @@ def collect_one(
 
         prompt = render_ticker_prompt(as_of, job.ticker, session, generator,
                                       render_seed_block(job),
-                                      max_searches=max_searches)
+                                      max_searches=max_searches,
+                                      price_tape=price_tape_module.render_tape(job.ticker, as_of))
         text, meta, attempts = _generate_validated(runner, backend, prompt, target, generator)
 
         if target.exists():  # only reachable with --force

@@ -40,6 +40,18 @@ _API_KEY_ENV_VARS = (
 
 
 @pytest.fixture(autouse=True)
+def _offline_price_tape(monkeypatch):
+    """Tests are offline: the price tape never reaches yfinance (a test that
+    needs a tape injects its own fetch)."""
+    from pipeline import price_tape
+
+    def offline(ticker):
+        raise RuntimeError("price tape is offline in tests")
+
+    monkeypatch.setattr(price_tape, "fetch_daily_closes", offline)
+
+
+@pytest.fixture(autouse=True)
 def _dummy_api_keys(monkeypatch):
     for env_var in _API_KEY_ENV_VARS:
         # `or` not a .get default: an env var present but empty (e.g. a key left

@@ -1258,3 +1258,27 @@ def test_core_re_evaluation_fail_replaces_an_earlier_pass(batch_dirs, tmp_path, 
     outcome = current_outcomes(read_events(state, "us", day))[("evaluate", "AMD")]
     assert (outcome["outcome"], outcome["code"]) == ("info", "fail")
     assert [e["code"] for e in outcome["notes"]] == ["pass"]
+
+
+@pytest.mark.unit
+def test_ticker_evaluation_gets_the_price_tape_before_as_of(tmp_path, macro_dir, monkeypatch):
+    from datetime import date as _date
+
+    from pipeline import price_tape
+
+    seen = []
+
+    def fetch(ticker):
+        seen.append(ticker)
+        return [(_date(2026, 7, 30), 100.0), (_date(2026, 7, 31), 92.0), (_date(2026, 8, 3), 99.0)]
+
+    monkeypatch.setattr(price_tape, "fetch_daily_closes", fetch)
+    brief = write_brief(tmp_path / "ticker_briefs" / "NVDA", "2026-08-03.md", ticker_text())
+    runner = FakeRunner(judgment())
+    assert evaluate_brief(brief, runner=runner) == EXIT_OK
+    prompt = runner.prompts[0]
+    assert seen == ["NVDA"] and "VERIFIED PRICE TAPE" in prompt
+    assert "| 2026-07-31 | 92.00 | -8.00% ⚠ |" in prompt and "2026-08-03 | 99" not in prompt  # no look-ahead
+    macro_runner = FakeRunner(judgment())
+    assert evaluate_brief(write_brief(macro_dir, "2026-08-03.us.md", macro_text()), runner=macro_runner) == EXIT_OK
+    assert "VERIFIED PRICE TAPE" not in macro_runner.prompts[0] and seen == ["NVDA"]

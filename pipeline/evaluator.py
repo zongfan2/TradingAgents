@@ -44,6 +44,7 @@ from pathlib import Path
 
 from pydantic import Field, ValidationError
 
+from pipeline import price_tape as price_tape_module
 from pipeline.claude_cli import (
     EnvelopeError,
     call_env,
@@ -272,9 +273,11 @@ is discarded."""
 
 
 def build_eval_prompt(
-    kind: str, meta: MacroBriefMeta | TickerBriefMeta, brief_text: str
+    kind: str, meta: MacroBriefMeta | TickerBriefMeta, brief_text: str,
+    price_tape: str | None = None,
 ) -> str:
-    """Evaluation prompt: five scored dimensions embedding the brief verbatim."""
+    """Evaluation prompt: five scored dimensions embedding the brief verbatim
+    (ticker briefs: plus the verified price tape, specs/price-tape.md)."""
     date = meta.as_of_date.isoformat()
     if kind == "ticker":
         assert isinstance(meta, TickerBriefMeta)
@@ -300,17 +303,36 @@ citations alone. Score the brief on five dimensions, each a 0-10 float:
    searches, not just the brief's own citations.
 2. citation_support — fetch a sample (at least 5, always including the most
    market-moving claims) of cited URLs and verify each supports the claim it anchors.
-   An unreachable URL is a 'minor' flag; a URL that contradicts or does not contain the
+   An unreachable URL is a 'minor' flag. A URL that does not contain the claim is a
+   'minor' flag when you verified the claim itself elsewhere (say so in the issue) and a
+   'major' flag when you could not verify it or found it wrong; a URL that contradicts the
    claim is a 'major' flag; a fabricated-looking source is a 'fabrication' flag.
 3. coverage — run an independent "{coverage_target}" search; score down for obvious
    misses and list them in notes.
 4. timeliness — is the content actually about the trailing 48h/week as of {date}?
 5. consistency — internal contradictions between sections or Impact lines.{consistency_extra}
 
-{_JSON_INSTRUCTIONS}
+{_tape_section(price_tape)}{_JSON_INSTRUCTIONS}
 
 --- BRIEF UNDER EVALUATION (verbatim, including frontmatter) ---
 {brief_text}"""
+
+
+def _tape_section(price_tape: str | None) -> str:
+    """The verified closes (before as_of — no look-ahead) as the reference for
+    every price statement in the brief."""
+    if not price_tape:
+        return ""
+    return f"""--- VERIFIED PRICE TAPE (market data; reference, not part of the brief) ---
+{price_tape}
+
+Use this tape for every close, daily move or price trend the brief states — do not
+search for them. A brief statement that contradicts the tape (wrong close, wrong
+direction, a rebound described as a decline) is a 'major' factual_accuracy flag. A ⚠
+move the brief neither explains nor marks 'driver unverified' is a 'major' coverage
+flag.
+
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -586,7 +608,9 @@ def evaluate_brief(
         )
         return EXIT_OK
 
-    prompt = build_eval_prompt(kind, meta, text)
+    tape = (price_tape_module.render_tape(meta.ticker, meta.as_of_date)
+            if kind == "ticker" and isinstance(meta, TickerBriefMeta) else None)
+    prompt = build_eval_prompt(kind, meta, text, price_tape=tape)
     try:
         judgment = _run_judgment(runner, prompt)
     except BackendError as exc:
