@@ -179,3 +179,24 @@ def test_macro_evaluations_keep_their_citation_rules():
         as_of_date=date(2026, 11, 3), session="us"), "BRIEF")
     assert "[price tape]" not in prompt and "PRICE TAPE" not in prompt
     assert "a URL that contradicts or does not contain the\n   claim is a 'major' flag" in prompt
+
+
+@pytest.mark.unit
+def test_a_failed_benchmark_read_is_retried_by_the_next_ticker():
+    calls = []
+    spy = [(date(2026, 10, d), 600.0 + d) for d in (27, 28, 29, 30)]
+    intc = [(date(2026, 10, d), 90.0 + d) for d in (27, 28, 29)]  # Friday 10-30 missing
+
+    def fetch(t):
+        if t == "SPY":
+            calls.append(t)
+            if len(calls) == 1:
+                raise TimeoutError("transient")
+            return spy
+        return intc
+
+    monday = date(2026, 11, 2)
+    assert pt.render_tape("INTC", monday, fetch=fetch) != pt.UNAVAILABLE  # 4-day fallback lets it through
+    assert pt.render_tape("INTC", monday, fetch=fetch) == pt.UNAVAILABLE  # benchmark re-read: Friday missing
+    pt.render_tape("INTC", monday, fetch=fetch)
+    assert len(calls) == 2  # a session read is cached

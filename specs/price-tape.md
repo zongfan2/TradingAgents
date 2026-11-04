@@ -34,7 +34,7 @@ sessions).
 Any failure, fewer than 2 sessions, or a tape whose newest session is older
 than its market's latest session before `as_of` (the newest bar of the
 market benchmark: SPY for US, 000001.SS for Shanghai/Shenzhen, ^HSI for Hong
-Kong; cached per process), or older than a session the ticker's own history
+Kong; a session read is cached per process, a failed read is retried), or older than a session the ticker's own history
 lists without a usable close, renders a fixed "unavailable" line. yfinance
 lists a finished session with a NaN close until its data is complete
 (measured 2026-11-05 00:28 Shanghai: 000001.SS and 600256.SS both at 11-04 =

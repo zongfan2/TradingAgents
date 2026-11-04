@@ -58,7 +58,7 @@ def fetch_daily_closes(ticker: str) -> list[Bar]:
 
 #: Benchmarks whose newest bar is the market's latest session.
 _BENCHMARKS = ((".SS", "000001.SS"), (".SZ", "000001.SS"), (".HK", "^HSI"))
-_SESSION_CACHE: dict[tuple[str, date], date | None] = {}
+_SESSION_CACHE: dict[tuple[str, date], date] = {}
 
 
 def benchmark_for(ticker: str) -> str:
@@ -68,10 +68,11 @@ def benchmark_for(ticker: str) -> str:
 
 def latest_market_session(ticker: str, as_of: date, fetch: Fetch | None = None) -> date | None:
     """The market's latest session before ``as_of``: the newest bar of the
-    ticker's market benchmark (cached per process), with or without a close —
-    yfinance lists a finished session with a NaN close until its data is
-    complete, and that session still exists. None when it cannot be read — the
-    caller then falls back to the calendar-day rule."""
+    ticker's market benchmark, with or without a close — yfinance lists a
+    finished session with a NaN close until its data is complete, and that
+    session still exists. Only a session read is cached (per process): a
+    failed read is retried by the next ticker. None when it cannot be read —
+    the caller then falls back to the calendar-day rule."""
     bench = benchmark_for(ticker)
     if bench.upper() == ticker.upper():
         return None
@@ -79,10 +80,12 @@ def latest_market_session(ticker: str, as_of: date, fetch: Fetch | None = None) 
     if key not in _SESSION_CACHE:
         try:
             days = [day for day, _close in (fetch or fetch_daily_closes)(bench) if day < as_of]
-            _SESSION_CACHE[key] = max(days) if days else None
         except Exception as exc:
             logger.warning("benchmark %s unavailable for the staleness check: %s", bench, type(exc).__name__)
-            _SESSION_CACHE[key] = None
+            return None
+        if not days:
+            return None
+        _SESSION_CACHE[key] = max(days)
     return _SESSION_CACHE[key]
 
 
