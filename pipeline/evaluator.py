@@ -272,6 +272,21 @@ identity fields and the verdict are computed by the harness and anything extra y
 is discarded."""
 
 
+_MACRO_CITATION_RULES = """\
+An unreachable URL is a 'minor' flag; a URL that contradicts or does not contain the
+   claim is a 'major' flag; a fabricated-looking source is a 'fabrication' flag."""
+#: Ticker briefs (specs/price-tape.md P3): a right claim behind the wrong page is
+#: minor, and a ``[price tape]`` figure is a valid URL-less citation.
+_TICKER_CITATION_RULES = f"""\
+An unreachable URL is a 'minor' flag. A URL that does not contain the claim is a
+   'minor' flag when you verified the claim itself elsewhere (say so in the issue) and a
+   'major' flag when you could not verify it or found it wrong; a URL that contradicts the
+   claim is a 'major' flag; a fabricated-looking source is a 'fabrication' flag. A close
+   or daily move cited as `{price_tape_module.TAPE_CITATION}` is market data from the collector's verified
+   tape, a valid citation without a URL (never a missing-URL or fabrication flag):
+   check it against the price tape block below when there is one, else by search."""
+
+
 def build_eval_prompt(
     kind: str, meta: MacroBriefMeta | TickerBriefMeta, brief_text: str,
     price_tape: str | None = None,
@@ -283,6 +298,7 @@ def build_eval_prompt(
         assert isinstance(meta, TickerBriefMeta)
         subject = f"single-ticker research brief for {meta.ticker} (as of {date})"
         coverage_target = f"what moved {meta.ticker} in the 48h before {date}"
+        citation_rules = _TICKER_CITATION_RULES
         consistency_extra = (
             f" For this ticker brief, consistency includes catalyst_score inflation: the "
             f"frontmatter self-reports catalyst_score={meta.catalyst_score}; a "
@@ -293,6 +309,7 @@ def build_eval_prompt(
         session = f", session {meta.session}" if meta.session else ""
         subject = f"daily global macro brief (as of {date}{session})"
         coverage_target = f"what moved global markets in the 48h before {date}"
+        citation_rules = _MACRO_CITATION_RULES
         consistency_extra = ""
     return f"""\
 You are an independent accuracy evaluator for a {subject}. You have web search
@@ -303,13 +320,7 @@ citations alone. Score the brief on five dimensions, each a 0-10 float:
    searches, not just the brief's own citations.
 2. citation_support — fetch a sample (at least 5, always including the most
    market-moving claims) of cited URLs and verify each supports the claim it anchors.
-   An unreachable URL is a 'minor' flag. A URL that does not contain the claim is a
-   'minor' flag when you verified the claim itself elsewhere (say so in the issue) and a
-   'major' flag when you could not verify it or found it wrong; a URL that contradicts the
-   claim is a 'major' flag; a fabricated-looking source is a 'fabrication' flag. A close
-   or daily move cited as `[price tape]` is market data from the collector's verified
-   tape, a valid citation without a URL (never a missing-URL or fabrication flag):
-   check it against the price tape block below when there is one, else by search.
+   {citation_rules}
 3. coverage — run an independent "{coverage_target}" search; score down for obvious
    misses and list them in notes.
 4. timeliness — is the content actually about the trailing 48h/week as of {date}?

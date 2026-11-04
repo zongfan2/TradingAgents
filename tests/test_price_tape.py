@@ -146,6 +146,15 @@ def test_a_session_listed_without_a_close_is_still_missing_from_the_tape():
 
 
 @pytest.mark.unit
+def test_no_change_is_computed_across_a_gap_inside_the_window():
+    bars = [(date(2026, 10, 27), 100.0), (date(2026, 10, 28), float("nan")), (date(2026, 10, 29), 110.0),
+            (date(2026, 10, 30), 111.0)]
+    text = pt.render_tape("X", date(2026, 11, 2), fetch=lambda t: bars)
+    assert "| 2026-10-29 | 110.00 | — |" in text and "+10.00%" not in text and "⚠" not in text
+    assert "| 2026-10-30 | 111.00 | +0.91% |" in text
+
+
+@pytest.mark.unit
 def test_benchmarks_follow_the_market():
     assert [pt.benchmark_for(t) for t in ("AAPL", "600256.SS", "300750.SZ", "0700.HK")] == [
         "SPY", "000001.SS", "000001.SS", "^HSI"]
@@ -159,3 +168,14 @@ def test_the_evaluator_always_accepts_price_tape_citations():
     prompt = ev.build_eval_prompt("ticker", TickerBriefMeta.model_construct(
         ticker="INTC", as_of_date=date(2026, 11, 3), catalyst_score=3.0, session="us"), "BRIEF")  # no tape
     assert "`[price tape]` is market data" in prompt and "never a missing-URL or fabrication flag" in prompt
+
+
+@pytest.mark.unit
+def test_macro_evaluations_keep_their_citation_rules():
+    from pipeline import evaluator as ev
+    from pipeline.contracts.briefs import MacroBriefMeta
+
+    prompt = ev.build_eval_prompt("macro", MacroBriefMeta.model_construct(
+        as_of_date=date(2026, 11, 3), session="us"), "BRIEF")
+    assert "[price tape]" not in prompt and "PRICE TAPE" not in prompt
+    assert "a URL that contradicts or does not contain the\n   claim is a 'major' flag" in prompt

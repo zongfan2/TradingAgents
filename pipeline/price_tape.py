@@ -88,12 +88,17 @@ def latest_market_session(ticker: str, as_of: date, fetch: Fetch | None = None) 
 
 def tape_rows(bars: Sequence[Bar], as_of: date, sessions: int = TAPE_SESSIONS) -> list[tuple[date, float, float | None]]:
     """``(date, close, % change vs previous session)`` for the last
-    ``sessions`` sessions strictly before ``as_of``, oldest first."""
-    clean = sorted((day, close) for day, close in bars if day < as_of and close == close and close > 0)
+    ``sessions`` sessions strictly before ``as_of``, oldest first. A session
+    listed without a usable close is left out, and the next session's change
+    is None: a move across the gap spans two sessions, not one."""
     rows = []
-    for i, (day, close) in enumerate(clean):
-        prev = clean[i - 1][1] if i else None
+    prev = None
+    for day, close in sorted(bar for bar in bars if bar[0] < as_of):
+        if not (close == close and close > 0):  # NaN or non-positive
+            prev = None
+            continue
         rows.append((day, close, (close / prev - 1) * 100 if prev else None))
+        prev = close
     return rows[-sessions:]
 
 

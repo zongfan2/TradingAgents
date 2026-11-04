@@ -28,7 +28,9 @@ for them (each search is $0.01, and the collector is capped at 10).
 **strictly before** `as_of` (no partial day, no look-ahead) with the
 session-over-session change, from yfinance daily history
 (`auto_adjust=False`, the pool builder gate's source). Sessions in the last
-3 with |change| ≥ 5% are marked ⚠. Non-positive or NaN closes are ignored.
+3 with |change| ≥ 5% are marked ⚠. Non-positive or NaN closes are left out,
+and the session after one shows no change (a move across the gap spans two
+sessions).
 Any failure, fewer than 2 sessions, or a tape whose newest session is older
 than its market's latest session before `as_of` (the newest bar of the
 market benchmark: SPY for US, 000001.SS for Shanghai/Shenzhen, ^HSI for Hong
@@ -63,8 +65,8 @@ brief's `as_of`.
 Ticker evaluations get the same tape facts (`as_of` = the brief's,
 `for_writer=False`: the table and the ⚠ list, none of the writer's rules) as
 a reference block with the evaluator's own rules; a `[price tape]` figure
-that matches the tape is correctly cited. The evaluator's citation rules
-always state that `[price tape]` is a valid URL-less citation (checked
+that matches the tape is correctly cited. The ticker evaluator's citation
+rules always state that `[price tape]` is a valid URL-less citation (checked
 against the tape block when there is one, else by search), so a brief
 collected with a tape is never penalised for it when the evaluator's own
 fetch fails. When the tape is unavailable the
@@ -75,7 +77,7 @@ move neither explained nor marked "driver unverified" is a **major**
 coverage flag; the evaluator does not search for these prices. Macro briefs
 are unchanged.
 
-Citation severity: a cited URL that does not contain the claim is now
+Citation severity (ticker evaluations only): a cited URL that does not contain the claim is now
 **minor** when the evaluator verified the claim elsewhere (and says so),
 **major** when it could not verify it or found it wrong; a URL that
 contradicts the claim stays major. Measured on 23 briefs, many Opus "major"
