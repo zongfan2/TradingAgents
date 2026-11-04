@@ -266,3 +266,12 @@ def test_the_tape_digest_covers_the_closes_not_the_rules():
     revised = pt.render_tape("INTC", date(2026, 11, 3), fetch=lambda t: BARS[:-2] + [(date(2026, 11, 2), 59.98)])
     assert pt.tape_digest(writer) == pt.tape_digest(judge) != pt.tape_digest(revised)
     assert pt.tape_digest(pt.UNAVAILABLE) is None
+
+
+@pytest.mark.unit
+def test_no_change_is_computed_across_a_weekday_without_a_bar():
+    bars = [(date(2026, 10, 27), 100.0), (date(2026, 10, 28), 100.0), (date(2026, 10, 30), 108.0)]  # 10-29 absent
+    text = pt.render_tape("X", date(2026, 11, 2), fetch=lambda t: bars)
+    assert "| 2026-10-30 | 108.00 | — |" in text and "⚠" not in text and "+8.00%" not in text
+    weekend = [(date(2026, 10, 30), 100.0), (date(2026, 11, 2), 108.0)]  # Fri -> Mon is one session
+    assert "| 2026-11-02 | 108.00 | +8.00% ⚠ |" in pt.render_tape("X", date(2026, 11, 3), fetch=lambda t: weekend)

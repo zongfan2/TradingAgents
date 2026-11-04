@@ -81,15 +81,18 @@ def tape_rows(bars: Sequence[Bar], as_of: date, sessions: int = TAPE_SESSIONS) -
     """``(date, close, % change vs previous session)`` for the last
     ``sessions`` sessions strictly before ``as_of``, oldest first. A session
     listed without a usable close is left out, and the next session's change
-    is None: a move across the gap spans two sessions, not one."""
+    is None: a move across the gap spans two sessions, not one. So is the
+    change after a weekday with no bar at all (a suspension, or a holiday —
+    the weekday calendar cannot tell them apart: one change figure lost)."""
     rows = []
-    prev = None
+    prev: tuple[date, float] | None = None
     for day, close in sorted(bar for bar in bars if bar[0] < as_of):
         if not (close == close and close > 0):  # NaN or non-positive
             prev = None
             continue
-        rows.append((day, close, (close / prev - 1) * 100 if prev else None))
-        prev = close
+        contiguous = prev is not None and previous_weekday(day) == prev[0]
+        rows.append((day, close, (close / prev[1] - 1) * 100 if contiguous else None))
+        prev = (day, close)
     return rows[-sessions:]
 
 

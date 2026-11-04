@@ -33,7 +33,9 @@ split-adjusts every Close before a split, so any split in the fetched
 makes the tape unavailable rather than show rescaled closes). Sessions in the last
 3 with |change| ≥ 5% are marked ⚠. Non-positive or NaN closes are left out,
 and the session after one shows no change (a move across the gap spans two
-sessions).
+sessions); so does the session after a weekday with no bar at all (a
+suspension or a holiday, which the weekday calendar cannot tell apart: one
+change figure lost, never a two-session move shown as one).
 Any failure, fewer than 2 sessions, or a tape whose newest session is not
 the last weekday before `as_of` renders a fixed "unavailable" line: a tape
 missing even one session (late data, an outage, a halt) would hide the most
@@ -82,17 +84,21 @@ of its table rows; the collector logs the digest of its writer's tape), so a
 verdict reached with or without a tape, or on a tape the writer did not
 see, can be told apart. When the tape is unavailable the
 block is left out entirely and logged — the evaluator then checks prices by
-its own searches, as before. A statement that contradicts the tape (wrong close, wrong direction,
-a rebound described as a decline) is a **major** factual_accuracy flag; a ⚠
-move neither explained nor marked "driver unverified" is a **major**
-coverage flag when the writer had a tape. The collector and the evaluator
-read market data at different times (a cn session listed with a NaN close
-at collection may be complete at evaluation), so the brief's own
-`[price tape]` citations (any case or spacing) are the evidence; a writer
-that had a tape but cited none of it gets the weaker rule: without one, the ⚠ rule is
-stated as an ordinary coverage miss, while a contradiction stays major; the evaluator does not search for these session closes and moves, but
-still checks pre-market, after-hours, intraday and `as_of`-session moves (not
-in the tape) by search. Macro briefs
+its own searches, as before. A statement that contradicts the tape (wrong close, wrong direction, a
+rebound described as a decline) is a **major** factual_accuracy flag.
+
+A ⚠ move neither explained nor marked "driver unverified" is a **major**
+coverage flag only when the brief cites `[price tape]` at least once (any
+case or spacing). The collector and the evaluator read market data at
+different times (a cn session listed with a NaN close at collection may be
+complete at evaluation), and that citation is the evidence that the writer
+had a tape. A brief with no `[price tape]` citation, whether its writer had
+no tape or had one and cited none of it, is scored on an unexplained ⚠ move
+as an ordinary coverage miss; a contradiction is still major.
+
+The evaluator does not search for the session closes and moves in the tape.
+It still checks pre-market, after-hours, intraday and `as_of`-session moves,
+which the tape does not hold, by search. Macro briefs
 are unchanged.
 
 Citation severity (ticker evaluations only): a cited URL that does not contain the claim is now
