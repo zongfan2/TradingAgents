@@ -32,6 +32,9 @@ opportunity brief whose `catalyst_score` ≥ the analysis trigger threshold.
   market-moving claims) of cited URLs and verify each supports the claim it
   anchors. Unreachable URL = `minor`; URL that contradicts or does not contain
   the claim = `major`; fabricated-looking source = `fabrication`.
+  Ticker briefs differ (specs/price-tape.md P3): a URL that does not contain a
+  claim verified elsewhere = `minor`, and `[price tape]` is a valid URL-less
+  citation.
 - **coverage** — run an independent "what moved this market / this name in the
   last 48h" search; score down for obvious misses (list them in notes).
 - **timeliness** — is the content actually about the trailing 48h/week?

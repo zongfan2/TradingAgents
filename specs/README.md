@@ -40,6 +40,7 @@ specifies Flash for every model-assisted backup role without activating it.
 | [webui-pages.md](webui-pages.md) | Status banner, pool/briefs views, A/B aggregates, halt toggle | Claude Code | **Implemented** |
 | [decision-funnel.md](decision-funnel.md) | Per-slot exclusion record (event log, snapshot, webui page) | Claude Code | **Implemented** (P1–P3) |
 | [llm-cost.md](llm-cost.md) | LLM usage ledger, Claude-first routing with a monthly budget, run-volume cuts | Claude Code | **Implemented** (R1–R4, R6–R11; R5 deferred) |
+| [price-tape.md](price-tape.md) | Verified recent closes (before as_of) in the ticker collector and evaluator prompts; citation-severity rule | Claude Code | **Implemented** |
 | [trade-notifications.md](trade-notifications.md) | Separate Lark trades group: real-time order/fill/exit messages (Alpaca paper stream, read-only) + hourly reconcile + daily report | Claude Code | **Implemented** |
 | [llm-provider-ladder.md](llm-provider-ladder.md) | Claude → OpenAI (GPT, hermetic codex) → DeepSeek routing; monthly OpenAI balance confirmation (`pipeline.llm_budget`) | Claude Code | **Implemented** |
 | [ticker-brief-dossier.md](ticker-brief-dossier.md) | Ticker brief dossier + daily delta (cross-day research dedup) | Claude Code | **Draft** |

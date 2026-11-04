@@ -44,6 +44,7 @@ from pathlib import Path
 
 from pydantic import Field, ValidationError
 
+from pipeline import price_tape as price_tape_module
 from pipeline.claude_cli import (
     EnvelopeError,
     call_env,
@@ -271,15 +272,38 @@ identity fields and the verdict are computed by the harness and anything extra y
 is discarded."""
 
 
+#: ``[price tape]`` as a writer may spell it (case, spacing).
+_TAPE_CITATION_RE = re.compile(r"\[\s*price\s+tape\s*\]", re.IGNORECASE)
+_MACRO_CITATION_RULES = """\
+An unreachable URL is a 'minor' flag; a URL that contradicts or does not contain the
+   claim is a 'major' flag; a fabricated-looking source is a 'fabrication' flag."""
+#: Ticker briefs (specs/price-tape.md P3): a right claim behind the wrong page is
+#: minor, and a ``[price tape]`` figure is a valid URL-less citation.
+_TICKER_CITATION_RULES = f"""\
+An unreachable URL is a 'minor' flag. A URL that does not contain the claim is a
+   'minor' flag when you verified the claim itself elsewhere (say so in the issue) and a
+   'major' flag when you could not verify it or found it wrong; a URL that contradicts the
+   claim is a 'major' flag; a fabricated-looking source is a 'fabrication' flag. A close
+   or daily move cited as `{price_tape_module.TAPE_CITATION}` is market data from the collector's verified
+   tape, a valid citation without a URL (never a missing-URL or fabrication flag):
+   check it against the price tape block below when there is one, else by search."""
+
+
 def build_eval_prompt(
-    kind: str, meta: MacroBriefMeta | TickerBriefMeta, brief_text: str
+    kind: str, meta: MacroBriefMeta | TickerBriefMeta, brief_text: str,
+    price_tape: str | None = None,
 ) -> str:
-    """Evaluation prompt: five scored dimensions embedding the brief verbatim."""
+    """Evaluation prompt: five scored dimensions embedding the brief verbatim
+    (ticker briefs: plus the verified price tape, specs/price-tape.md)."""
     date = meta.as_of_date.isoformat()
+    # A writer given a tape is told to cite it (prompts/ticker_deep_search.md);
+    # one without a tape never sees the citation, so it is the evidence.
+    writer_had_tape = bool(_TAPE_CITATION_RE.search(brief_text))
     if kind == "ticker":
         assert isinstance(meta, TickerBriefMeta)
         subject = f"single-ticker research brief for {meta.ticker} (as of {date})"
         coverage_target = f"what moved {meta.ticker} in the 48h before {date}"
+        citation_rules = _TICKER_CITATION_RULES
         consistency_extra = (
             f" For this ticker brief, consistency includes catalyst_score inflation: the "
             f"frontmatter self-reports catalyst_score={meta.catalyst_score}; a "
@@ -290,6 +314,7 @@ def build_eval_prompt(
         session = f", session {meta.session}" if meta.session else ""
         subject = f"daily global macro brief (as of {date}{session})"
         coverage_target = f"what moved global markets in the 48h before {date}"
+        citation_rules = _MACRO_CITATION_RULES
         consistency_extra = ""
     return f"""\
 You are an independent accuracy evaluator for a {subject}. You have web search
@@ -300,17 +325,43 @@ citations alone. Score the brief on five dimensions, each a 0-10 float:
    searches, not just the brief's own citations.
 2. citation_support — fetch a sample (at least 5, always including the most
    market-moving claims) of cited URLs and verify each supports the claim it anchors.
-   An unreachable URL is a 'minor' flag; a URL that contradicts or does not contain the
-   claim is a 'major' flag; a fabricated-looking source is a 'fabrication' flag.
+   {citation_rules}
 3. coverage — run an independent "{coverage_target}" search; score down for obvious
    misses and list them in notes.
 4. timeliness — is the content actually about the trailing 48h/week as of {date}?
 5. consistency — internal contradictions between sections or Impact lines.{consistency_extra}
 
-{_JSON_INSTRUCTIONS}
+{_tape_section(price_tape, date, writer_had_tape)}{_JSON_INSTRUCTIONS}
 
 --- BRIEF UNDER EVALUATION (verbatim, including frontmatter) ---
 {brief_text}"""
+
+
+def _tape_section(price_tape: str | None, as_of: str = "as-of", writer_had_tape: bool = True) -> str:
+    """The verified closes (before as_of — no look-ahead) as the reference for
+    the brief's session closes and session-over-session moves. The ⚠ coverage
+    rule only binds a brief whose writer had a tape: the collector and the
+    evaluator read market data at different times (a cn session is listed
+    with a NaN close until complete), so the writer may have had none."""
+    if not price_tape:
+        return ""
+    coverage = (
+        "A ⚠\nmove the brief neither explains nor marks 'driver unverified' is a 'major' coverage\nflag."
+        if writer_had_tape else
+        "This brief's\nwriter had no tape: an unexplained ⚠ move is scored as an ordinary coverage miss,\nnot a 'major' flag."
+    )
+    return f"""--- VERIFIED PRICE TAPE (market data; reference, not part of the brief) ---
+{price_tape}
+
+Use this tape for the session closes and session-over-session moves it lists, and
+for price trends across those sessions — do not search for them. Pre-market,
+after-hours, intraday and {as_of}-session moves are not in the tape: check those by
+search as usual. A brief statement that contradicts the tape (wrong close, wrong
+direction, a rebound described as a decline) is a 'major' factual_accuracy flag. {coverage}
+A figure cited as {price_tape_module.TAPE_CITATION} that matches the tape is
+correctly cited.
+
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +458,7 @@ def _build_report(
     brief_sha256: str,
     evaluated_at: datetime,
     evaluator_id: str,
+    price_tape: str | None = None,
 ) -> MacroEvalReport | TickerEvalReport:
     """Identity fields come from the brief meta / file content — never from the
     model; the verdict is recomputed via ``compute_verdict`` (R3/R4).
@@ -424,7 +476,9 @@ def _build_report(
     }
     if kind == "ticker":
         assert isinstance(meta, TickerBriefMeta)
-        return TickerEvalReport(ticker=meta.ticker, session=meta.session, **common)
+        return TickerEvalReport(ticker=meta.ticker, session=meta.session,
+                                price_tape_newest=price_tape_module.newest_session(price_tape or ""),
+                                price_tape_sha256=price_tape_module.tape_digest(price_tape or ""), **common)
     if isinstance(meta, LegacyMacroBriefMeta) and meta.session is None:
         return _LegacyMacroEvalReport(**common)
     return MacroEvalReport(session=meta.session, **common)
@@ -586,7 +640,15 @@ def evaluate_brief(
         )
         return EXIT_OK
 
-    prompt = build_eval_prompt(kind, meta, text)
+    tape = None
+    if kind == "ticker" and isinstance(meta, TickerBriefMeta):
+        tape = price_tape_module.render_tape(meta.ticker, meta.as_of_date, for_writer=False)
+        if tape == price_tape_module.UNAVAILABLE:
+            # No tape: the evaluator checks prices by its own searches, as before.
+            print(f"evaluator: warning: price tape unavailable for {meta.ticker} — "
+                  "price statements checked by search only", file=sys.stderr)
+            tape = None
+    prompt = build_eval_prompt(kind, meta, text, price_tape=tape)
     try:
         judgment = _run_judgment(runner, prompt)
     except BackendError as exc:
@@ -594,7 +656,7 @@ def evaluate_brief(
         return EXIT_BACKEND_FAILURE
 
     now = datetime.now(timezone.utc)
-    report = _build_report(kind, meta, judgment, brief_sha256, now, evaluator_id)
+    report = _build_report(kind, meta, judgment, brief_sha256, now, evaluator_id, price_tape=tape)
     payload = report.model_dump(mode="json")
     if payload.get("session") is None:
         payload.pop("session", None)  # legacy v1 briefs carry no session anywhere

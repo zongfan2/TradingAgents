@@ -27,9 +27,19 @@ evaluator (reader + `*.eval.json` writer), and the TradingAgents pipeline
                "coverage": 7.5, "timeliness": 8.0, "consistency": 9.0},
     "flagged_claims": [{"section": "Risks", "claim": "…", "issue": "…", "severity": "minor"}],
     "verdict": "pass",
-    "notes": "free text"
+    "notes": "free text",
+    "price_tape_newest": "2026-07-31",
+    "price_tape_sha256": "…"
   }
   ```
+
+  `price_tape_newest` (optional, null or absent on older evals): the newest
+  session of the verified price tape in the evaluation prompt, null when the
+  evaluation ran without one (specs/price-tape.md P3); `price_tape_sha256`
+  (same rules): the digest of that tape's table rows, comparable with the
+  digest the collector logs for the tape its writer got. An eval is not re-run
+  when the tape later becomes available: idempotency stays bound to
+  `brief_sha256`.
 
   The macro contract's **revision binding** rule applies identically: an eval
   is valid only when `brief_sha256` matches the brief being served; mismatch
@@ -86,8 +96,11 @@ writing):
    final `**Impact**:` line (`bullish|bearish|neutral|mixed` + one-line
    rationale).
 2. Every factual claim carries an inline markdown citation to its source URL;
-   ≥ 5 distinct cited URLs counted from the body (`sources_count` must equal
-   that count — consumers never trust the self-reported number).
+   a close or daily move taken from the prompt's verified price tape
+   (specs/price-tape.md) cites `[price tape]` instead — market data, no URL;
+   it is not counted below. ≥ 5 distinct cited URLs counted from the body
+   (`sources_count` must equal that count — consumers never trust the
+   self-reported number).
 3. Frontmatter fields all present; `as_of_date` matches the filename; `ticker`
    matches the directory name.
 4. Content covers the trailing ~48h with weekly context; no forward-dated

@@ -51,6 +51,7 @@ from pathlib import Path
 
 import yaml
 
+from pipeline import price_tape as price_tape_module
 from pipeline.claude_cli import (
     EnvelopeError,
     call_env,
@@ -331,11 +332,13 @@ def render_ticker_prompt(
     seed_block: str,
     template_path: str | Path | None = None,
     max_searches: int | None = None,
+    price_tape: str = price_tape_module.UNAVAILABLE,
 ) -> str:
     """Render the per-ticker deep-search prompt; any placeholder left
     unresolved raises (never send a partial render to the backend)."""
     path = Path(template_path) if template_path is not None else TICKER_PROMPT_TEMPLATE
     text = path.read_text(encoding="utf-8")
+    no_tape = price_tape == price_tape_module.UNAVAILABLE
     return render_template(
         text,
         {
@@ -345,6 +348,14 @@ def render_ticker_prompt(
             "GENERATOR": generator,
             "SEED": seed_block,
             "SEARCH_BUDGET": render_search_budget(max_searches),
+            "PRICE_TAPE": price_tape,
+            # Only a writer that has a tape may cite it or take numbers from it
+            # (specs/price-tape.md P2).
+            "TAPE_CITATION_RULE": "" if no_tape else (
+                " (a close or daily move taken from the Verified price tape cites "
+                f"`{price_tape_module.TAPE_CITATION}`)"),
+            "TAPE_NUMBERS_RULE": "" if no_tape else (
+                " or, for past closes and daily moves, the Verified price tape (do not search those)"),
         },
     )
 
@@ -591,6 +602,10 @@ def collect_one(
             _log(log_path, as_of, session, job.ticker, "-", "-", "skipped")
             return TickerOutcome(job.ticker, "skipped", path=target)
 
+        # Market data first: a slow read must not eat the backend's window.
+        price_tape = price_tape_module.render_tape(job.ticker, as_of)
+        logger.info("price tape for %s: newest %s, sha256 %s", job.ticker,
+                    price_tape_module.newest_session(price_tape), price_tape_module.tape_digest(price_tape))
         if job_window is not None and aggregate_deadline is not None:
             job_deadline = min(aggregate_deadline, time.monotonic() + job_window)
             runner = functools.partial(
@@ -599,7 +614,8 @@ def collect_one(
 
         prompt = render_ticker_prompt(as_of, job.ticker, session, generator,
                                       render_seed_block(job),
-                                      max_searches=max_searches)
+                                      max_searches=max_searches,
+                                      price_tape=price_tape)
         text, meta, attempts = _generate_validated(runner, backend, prompt, target, generator)
 
         if target.exists():  # only reachable with --force
