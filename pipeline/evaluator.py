@@ -272,6 +272,8 @@ identity fields and the verdict are computed by the harness and anything extra y
 is discarded."""
 
 
+#: ``[price tape]`` as a writer may spell it (case, spacing).
+_TAPE_CITATION_RE = re.compile(r"\[\s*price\s+tape\s*\]", re.IGNORECASE)
 _MACRO_CITATION_RULES = """\
 An unreachable URL is a 'minor' flag; a URL that contradicts or does not contain the
    claim is a 'major' flag; a fabricated-looking source is a 'fabrication' flag."""
@@ -296,7 +298,7 @@ def build_eval_prompt(
     date = meta.as_of_date.isoformat()
     # A writer given a tape is told to cite it (prompts/ticker_deep_search.md);
     # one without a tape never sees the citation, so it is the evidence.
-    writer_had_tape = price_tape_module.TAPE_CITATION in brief_text
+    writer_had_tape = bool(_TAPE_CITATION_RE.search(brief_text))
     if kind == "ticker":
         assert isinstance(meta, TickerBriefMeta)
         subject = f"single-ticker research brief for {meta.ticker} (as of {date})"

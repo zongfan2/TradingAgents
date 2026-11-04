@@ -83,7 +83,8 @@ move neither explained nor marked "driver unverified" is a **major**
 coverage flag when the writer had a tape. The collector and the evaluator
 read market data at different times (a cn session listed with a NaN close
 at collection may be complete at evaluation), so the brief's own
-`[price tape]` citations are the evidence: without one, the ⚠ rule is
+`[price tape]` citations (any case or spacing) are the evidence; a writer
+that had a tape but cited none of it gets the weaker rule: without one, the ⚠ rule is
 stated as an ordinary coverage miss, while a contradiction stays major; the evaluator does not search for these session closes and moves, but
 still checks pre-market, after-hours, intraday and `as_of`-session moves (not
 in the tape) by search. Macro briefs

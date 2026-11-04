@@ -252,6 +252,9 @@ def test_the_warning_coverage_rule_binds_only_a_brief_whose_writer_had_a_tape():
     tape = pt.render_tape("INTC", date(2026, 11, 3), fetch=lambda t: BARS, for_writer=False)
     with_tape = ev.build_eval_prompt("ticker", meta, "closed at 59.97 [price tape]", price_tape=tape)
     assert "neither explains nor marks 'driver unverified' is a 'major' coverage" in with_tape
+    for spelling in ("[Price Tape]", "[ price  tape ]", "[PRICE TAPE](tape)"):
+        prompt = ev.build_eval_prompt("ticker", meta, f"closed at 59.97 {spelling}", price_tape=tape)
+        assert "is a 'major' coverage" in prompt, spelling
     # The collector read no tape (e.g. a NaN cn close), the evaluator later did.
     without = ev.build_eval_prompt("ticker", meta, "closed at 59.97 [Src](https://x)", price_tape=tape)
     assert "writer had no tape" in without and "'major' coverage" not in without
