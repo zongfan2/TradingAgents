@@ -38,14 +38,16 @@ Any failure, fewer than 2 sessions, or a tape whose newest session is older
 than its market's latest session before `as_of` (the newest bar of the
 market benchmark: SPY for US, 000001.SS for Shanghai/Shenzhen, ^HSI for Hong
 Kong, 000001.SS also for Beijing; another suffix has no benchmark and gets
-the calendar rule; a session read is cached for 10 minutes, a failed read is retried), or older than a session the ticker's own history
+the previous-weekday rule; a session read is cached for 10 minutes, a failed read is retried), or older than a session the ticker's own history
 lists without a usable close, renders a fixed "unavailable" line. yfinance
 lists a finished session with a NaN close until its data is complete
 (measured 2026-11-05 00:28 Shanghai: 000001.SS and 600256.SS both at 11-04 =
 NaN), so such a bar counts as a session that happened; otherwise the market
 and the ticker lagging together would go unnoticed. A tape missing even one
-session (late data, an outage, a halt) would hide the most relevant move. When the benchmark cannot be read, a newest session more
-than 4 calendar days before `as_of` is the fallback rule. It never raises
+session (late data, an outage, a halt) would hide the most relevant move. When the benchmark cannot be read, the tape must reach the
+last weekday before `as_of` (a holiday then costs the tape: a missed tape,
+never one a weekday short whose missing session the evaluator would later
+hold the brief to). It never raises
 and never blocks a brief or an evaluation. Tests are offline: an autouse fixture makes the fetch fail.
 
 The collector's block (`for_writer=True`) carries the writer's rules. A

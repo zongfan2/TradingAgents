@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Sequence
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 logger = logging.getLogger("pipeline.price_tape")
 
@@ -27,9 +27,14 @@ TAPE_SESSIONS = 10
 #: must be explained by the brief (or marked unverified).
 BIG_MOVE_PCT = 5.0
 BIG_MOVE_LOOKBACK = 3
-#: Without the benchmark's latest session: the newest tape session may be at
-#: most this many calendar days before ``as_of`` (a weekend plus a holiday).
-MAX_STALE_DAYS = 4
+def previous_weekday(as_of: date) -> date:
+    """The last weekday before ``as_of``: without the benchmark's latest
+    session, the tape must reach it. A holiday then makes the tape
+    unavailable — a missed tape, never a tape a weekday short."""
+    day = as_of - timedelta(days=1)
+    while day.weekday() >= 5:
+        day -= timedelta(days=1)
+    return day
 
 Bar = tuple[date, float]  # (session date, close)
 Fetch = Callable[[str], Sequence[Bar]]
@@ -71,7 +76,7 @@ def closes_from_history(ticker: str, frame) -> list[Bar]:
 
 #: Benchmarks whose newest bar is the market's latest session. A ticker
 #: without a suffix is US (SPY); any other suffix has no benchmark here, so
-#: the calendar-day rule applies rather than another exchange's calendar.
+#: the previous-weekday rule applies rather than another exchange's calendar.
 _BENCHMARKS = ((".SS", "000001.SS"), (".SZ", "000001.SS"), (".BJ", "000001.SS"), (".HK", "^HSI"))
 #: (benchmark, as_of) -> (latest session, monotonic read time).
 _SESSION_CACHE: dict[tuple[str, date], tuple[date, float]] = {}
@@ -94,7 +99,7 @@ def latest_market_session(ticker: str, as_of: date, fetch: Fetch | None = None) 
     session still exists. Only a session read is cached, for
     :data:`SESSION_CACHE_SECONDS`: a failed read is retried by the next
     ticker. None when it cannot be read — the caller then falls back to the
-    calendar-day rule."""
+    previous-weekday rule."""
     bench = benchmark_for(ticker)
     if bench is None or bench.upper() == ticker.upper():
         return None
@@ -147,7 +152,7 @@ def render_tape(ticker: str, as_of: date, fetch: Fetch | None = None, *, for_wri
     market = latest_market_session(ticker, as_of, fetch)
     expected = max(listed, market) if market else listed
     newest = rows[-1][0]
-    if newest < expected or (market is None and (as_of - newest).days > MAX_STALE_DAYS):
+    if newest < expected or (market is None and newest < previous_weekday(as_of)):
         # The latest session is missing (late data, outage, a halt): a tape
         # without it would hide the most relevant move behind "authoritative".
         logger.warning("price tape for %s stale: last session %s, market's %s (before %s)",

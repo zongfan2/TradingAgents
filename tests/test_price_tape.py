@@ -112,11 +112,11 @@ def test_an_unavailable_tape_leaves_the_evaluator_to_its_own_checks(tmp_path, ca
 
 @pytest.mark.unit
 @pytest.mark.parametrize(("as_of", "available"), [
-    (date(2026, 11, 3), True),    # newest 11-02 (Mon): 1 day
-    (date(2026, 11, 6), True),    # 4 days after 11-02 (e.g. sessions missing over a holiday)
-    (date(2026, 11, 7), False),   # 5 days: the latest sessions are missing
+    (date(2026, 11, 3), True),    # Tue: newest 11-02 (Mon) is the previous weekday
+    (date(2026, 11, 4), False),   # Wed: Tuesday 11-03 missing (with SPY down, nothing else would tell)
+    (date(2026, 11, 9), False),   # next Mon: Fri 11-06 missing — a holiday too costs the tape
 ])
-def test_without_a_benchmark_the_calendar_rule_applies(as_of, available):
+def test_without_a_benchmark_the_tape_must_reach_the_previous_weekday(as_of, available):
     def fetch(t):
         if t == "SPY":
             raise RuntimeError("benchmark down")
@@ -160,7 +160,7 @@ def test_no_change_is_computed_across_a_gap_inside_the_window():
 def test_benchmarks_follow_the_market():
     assert [pt.benchmark_for(t) for t in ("AAPL", "BRK-B", "600256.SS", "300750.SZ", "830799.BJ", "0700.HK")] == [
         "SPY", "SPY", "000001.SS", "000001.SS", "000001.SS", "^HSI"]
-    assert pt.benchmark_for("7203.T") is None  # no benchmark: the calendar rule, not SPY's calendar
+    assert pt.benchmark_for("7203.T") is None  # no benchmark: the previous-weekday rule, not SPY's calendar
     assert pt.latest_market_session("7203.T", date(2026, 11, 5), fetch=lambda t: BARS) is None
 
 
@@ -200,7 +200,7 @@ def test_a_failed_benchmark_read_is_retried_by_the_next_ticker():
         return intc
 
     monday = date(2026, 11, 2)
-    assert pt.render_tape("INTC", monday, fetch=fetch) != pt.UNAVAILABLE  # 4-day fallback lets it through
+    assert pt.render_tape("INTC", monday, fetch=fetch) == pt.UNAVAILABLE  # previous-weekday fallback: Fri missing
     assert pt.render_tape("INTC", monday, fetch=fetch) == pt.UNAVAILABLE  # benchmark re-read: Friday missing
     pt.render_tape("INTC", monday, fetch=fetch)
     assert len(calls) == 2  # a session read is cached
