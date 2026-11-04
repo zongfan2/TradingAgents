@@ -598,6 +598,8 @@ def collect_one(
             _log(log_path, as_of, session, job.ticker, "-", "-", "skipped")
             return TickerOutcome(job.ticker, "skipped", path=target)
 
+        # Market data first: a slow read must not eat the backend's window.
+        price_tape = price_tape_module.render_tape(job.ticker, as_of)
         if job_window is not None and aggregate_deadline is not None:
             job_deadline = min(aggregate_deadline, time.monotonic() + job_window)
             runner = functools.partial(
@@ -607,7 +609,7 @@ def collect_one(
         prompt = render_ticker_prompt(as_of, job.ticker, session, generator,
                                       render_seed_block(job),
                                       max_searches=max_searches,
-                                      price_tape=price_tape_module.render_tape(job.ticker, as_of))
+                                      price_tape=price_tape)
         text, meta, attempts = _generate_validated(runner, backend, prompt, target, generator)
 
         if target.exists():  # only reachable with --force

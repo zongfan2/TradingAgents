@@ -15,6 +15,7 @@ fall back to today's behaviour.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable, Sequence
 from datetime import date, datetime
 
@@ -72,7 +73,11 @@ def closes_from_history(ticker: str, frame) -> list[Bar]:
 #: without a suffix is US (SPY); any other suffix has no benchmark here, so
 #: the calendar-day rule applies rather than another exchange's calendar.
 _BENCHMARKS = ((".SS", "000001.SS"), (".SZ", "000001.SS"), (".BJ", "000001.SS"), (".HK", "^HSI"))
-_SESSION_CACHE: dict[tuple[str, date], date] = {}
+#: (benchmark, as_of) -> (latest session, monotonic read time).
+_SESSION_CACHE: dict[tuple[str, date], tuple[date, float]] = {}
+#: A read session is reused this long: a long-lived process (a collection
+#: then its evaluations) re-reads the benchmark and sees a newly listed session.
+SESSION_CACHE_SECONDS = 600.0
 
 
 def benchmark_for(ticker: str) -> str | None:
@@ -86,23 +91,26 @@ def latest_market_session(ticker: str, as_of: date, fetch: Fetch | None = None) 
     """The market's latest session before ``as_of``: the newest bar of the
     ticker's market benchmark, with or without a close — yfinance lists a
     finished session with a NaN close until its data is complete, and that
-    session still exists. Only a session read is cached (per process): a
-    failed read is retried by the next ticker. None when it cannot be read —
-    the caller then falls back to the calendar-day rule."""
+    session still exists. Only a session read is cached, for
+    :data:`SESSION_CACHE_SECONDS`: a failed read is retried by the next
+    ticker. None when it cannot be read — the caller then falls back to the
+    calendar-day rule."""
     bench = benchmark_for(ticker)
     if bench is None or bench.upper() == ticker.upper():
         return None
     key = (bench, as_of)
-    if key not in _SESSION_CACHE:
-        try:
-            days = [day for day, _close in (fetch or fetch_daily_closes)(bench) if day < as_of]
-        except Exception as exc:
-            logger.warning("benchmark %s unavailable for the staleness check: %s", bench, type(exc).__name__)
-            return None
-        if not days:
-            return None
-        _SESSION_CACHE[key] = max(days)
-    return _SESSION_CACHE[key]
+    cached = _SESSION_CACHE.get(key)
+    if cached is not None and time.monotonic() - cached[1] < SESSION_CACHE_SECONDS:
+        return cached[0]
+    try:
+        days = [day for day, _close in (fetch or fetch_daily_closes)(bench) if day < as_of]
+    except Exception as exc:
+        logger.warning("benchmark %s unavailable for the staleness check: %s", bench, type(exc).__name__)
+        return None
+    if not days:
+        return None
+    _SESSION_CACHE[key] = (max(days), time.monotonic())
+    return _SESSION_CACHE[key][0]
 
 
 def tape_rows(bars: Sequence[Bar], as_of: date, sessions: int = TAPE_SESSIONS) -> list[tuple[date, float, float | None]]:

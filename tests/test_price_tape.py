@@ -256,3 +256,40 @@ def test_the_warning_coverage_rule_binds_only_a_brief_whose_writer_had_a_tape():
     without = ev.build_eval_prompt("ticker", meta, "closed at 59.97 [Src](https://x)", price_tape=tape)
     assert "writer had no tape" in without and "'major' coverage" not in without
     assert "contradicts the tape" in without and "'major' factual_accuracy flag" in without
+
+
+@pytest.mark.unit
+def test_a_read_session_expires_so_a_newly_listed_one_is_seen(monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(pt.time, "monotonic", lambda: clock[0])
+    through_03 = [(date(2026, 11, d), 600.0 + d) for d in (2, 3)]
+    through_04 = through_03 + [(date(2026, 11, 4), float("nan"))]
+    assert pt.latest_market_session("INTC", date(2026, 11, 5), fetch=lambda t: through_03) == date(2026, 11, 3)
+    clock[0] += 60
+    assert pt.latest_market_session("INTC", date(2026, 11, 5), fetch=lambda t: through_04) == date(2026, 11, 3)  # cached
+    clock[0] += pt.SESSION_CACHE_SECONDS
+    assert pt.latest_market_session("INTC", date(2026, 11, 5), fetch=lambda t: through_04) == date(2026, 11, 4)
+
+
+@pytest.mark.unit
+def test_the_tape_read_does_not_eat_the_backend_window(monkeypatch, tmp_path):
+    import pipeline.ticker_collector as tc
+
+    clock = [100.0]
+    seen = {}
+    monkeypatch.setattr(tc.time, "monotonic", lambda: clock[0])
+
+    def slow_tape(t, d):
+        clock[0] += 50  # a slow market-data read
+        return pt.UNAVAILABLE
+
+    def capture(runner, *a, **k):
+        seen.update(runner.keywords)
+        raise tc.CollectorError("stop")
+
+    monkeypatch.setattr(tc.price_tape_module, "render_tape", slow_tape)
+    monkeypatch.setattr(tc, "_generate_validated", capture)
+    tc.collect_one(tc.TickerJob("INTC"), as_of=date(2026, 11, 3), session="us", backend="claude", force=False,
+                   runner=lambda *a, **k: "", brief_dir=tmp_path, log_path=tmp_path / "log.csv",
+                   job_window=300.0, aggregate_deadline=10_000.0)
+    assert seen == {"timeout": 300.0, "deadline": 150.0 + 300.0}  # measured after the read
