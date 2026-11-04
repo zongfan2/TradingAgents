@@ -44,10 +44,20 @@ UNAVAILABLE = (
 
 def fetch_daily_closes(ticker: str) -> list[Bar]:
     """Daily closes for the last ~2 months via yfinance (the pool builder's
-    source; ``auto_adjust=False`` so closes are the quoted ones)."""
+    source). ``auto_adjust=False`` leaves dividends out, but yfinance still
+    split-adjusts Close: a split inside the tape window would rescale closes
+    away from the prices sources quote, so it raises (the tape is then
+    unavailable)."""
     import yfinance as yf  # deferred: pipeline components stay import-light
 
-    frame = yf.Ticker(ticker).history(period="2mo", interval="1d", auto_adjust=False)
+    return closes_from_history(ticker, yf.Ticker(ticker).history(period="2mo", interval="1d", auto_adjust=False))
+
+
+def closes_from_history(ticker: str, frame) -> list[Bar]:
+    """``(date, close)`` bars from a yfinance history frame; raises on a split
+    inside the tape window (see :func:`fetch_daily_closes`)."""
+    if "Stock Splits" in frame and (frame["Stock Splits"].tail(TAPE_SESSIONS + 1).fillna(0) != 0).any():
+        raise ValueError(f"{ticker}: stock split inside the tape window (split-adjusted closes)")
     bars: list[Bar] = []
     for index, row in frame.iterrows():
         moment = index.to_pydatetime() if hasattr(index, "to_pydatetime") else index
@@ -56,14 +66,18 @@ def fetch_daily_closes(ticker: str) -> list[Bar]:
     return bars
 
 
-#: Benchmarks whose newest bar is the market's latest session.
-_BENCHMARKS = ((".SS", "000001.SS"), (".SZ", "000001.SS"), (".HK", "^HSI"))
+#: Benchmarks whose newest bar is the market's latest session. A ticker
+#: without a suffix is US (SPY); any other suffix has no benchmark here, so
+#: the calendar-day rule applies rather than another exchange's calendar.
+_BENCHMARKS = ((".SS", "000001.SS"), (".SZ", "000001.SS"), (".BJ", "000001.SS"), (".HK", "^HSI"))
 _SESSION_CACHE: dict[tuple[str, date], date] = {}
 
 
-def benchmark_for(ticker: str) -> str:
+def benchmark_for(ticker: str) -> str | None:
     upper = ticker.upper()
-    return next((bench for suffix, bench in _BENCHMARKS if upper.endswith(suffix)), "SPY")
+    if "." not in upper:
+        return "SPY"
+    return next((bench for suffix, bench in _BENCHMARKS if upper.endswith(suffix)), None)
 
 
 def latest_market_session(ticker: str, as_of: date, fetch: Fetch | None = None) -> date | None:
@@ -74,7 +88,7 @@ def latest_market_session(ticker: str, as_of: date, fetch: Fetch | None = None) 
     failed read is retried by the next ticker. None when it cannot be read —
     the caller then falls back to the calendar-day rule."""
     bench = benchmark_for(ticker)
-    if bench.upper() == ticker.upper():
+    if bench is None or bench.upper() == ticker.upper():
         return None
     key = (bench, as_of)
     if key not in _SESSION_CACHE:

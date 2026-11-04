@@ -156,8 +156,10 @@ def test_no_change_is_computed_across_a_gap_inside_the_window():
 
 @pytest.mark.unit
 def test_benchmarks_follow_the_market():
-    assert [pt.benchmark_for(t) for t in ("AAPL", "600256.SS", "300750.SZ", "0700.HK")] == [
-        "SPY", "000001.SS", "000001.SS", "^HSI"]
+    assert [pt.benchmark_for(t) for t in ("AAPL", "BRK-B", "600256.SS", "300750.SZ", "830799.BJ", "0700.HK")] == [
+        "SPY", "SPY", "000001.SS", "000001.SS", "000001.SS", "^HSI"]
+    assert pt.benchmark_for("7203.T") is None  # no benchmark: the calendar rule, not SPY's calendar
+    assert pt.latest_market_session("7203.T", date(2026, 11, 5), fetch=lambda t: BARS) is None
 
 
 @pytest.mark.unit
@@ -200,3 +202,29 @@ def test_a_failed_benchmark_read_is_retried_by_the_next_ticker():
     assert pt.render_tape("INTC", monday, fetch=fetch) == pt.UNAVAILABLE  # benchmark re-read: Friday missing
     pt.render_tape("INTC", monday, fetch=fetch)
     assert len(calls) == 2  # a session read is cached
+
+
+@pytest.mark.unit
+def test_a_split_inside_the_window_makes_the_tape_unavailable():
+    import pandas as pd
+
+    days = pd.to_datetime([f"2026-10-{d}" for d in (27, 28, 29, 30)])
+    frame = pd.DataFrame({"Close": [100.0, 101.0, 25.5, 25.0], "Stock Splits": [0.0, 0.0, 4.0, 0.0]}, index=days)
+    with pytest.raises(ValueError, match="split"):
+        pt.closes_from_history("X", frame)
+    split_fetch = lambda t: pt.closes_from_history(t, frame)  # noqa: E731
+    assert pt.render_tape("X", date(2026, 11, 2), fetch=split_fetch) == pt.UNAVAILABLE
+    frame["Stock Splits"] = 0.0
+    assert pt.closes_from_history("X", frame) == [
+        (date(2026, 10, d), c) for d, c in ((27, 100.0), (28, 101.0), (29, 25.5), (30, 25.0))]
+
+
+@pytest.mark.unit
+def test_the_evaluator_still_searches_moves_outside_the_tape():
+    from pipeline import evaluator as ev
+    from pipeline.contracts.briefs import TickerBriefMeta
+
+    prompt = ev.build_eval_prompt("ticker", TickerBriefMeta.model_construct(
+        ticker="INTC", as_of_date=date(2026, 11, 3), catalyst_score=3.0, session="us"), "BRIEF",
+        price_tape="| 2026-11-02 | 59.97 | -8.80% ⚠ |")
+    assert "Pre-market,\nafter-hours, intraday and 2026-11-03-session moves are not in the tape" in prompt

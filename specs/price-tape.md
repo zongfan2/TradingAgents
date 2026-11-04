@@ -27,14 +27,17 @@ for them (each search is $0.01, and the collector is capped at 10).
 `pipeline.price_tape.render_tape(ticker, as_of)`: the last 10 daily closes
 **strictly before** `as_of` (no partial day, no look-ahead) with the
 session-over-session change, from yfinance daily history
-(`auto_adjust=False`, the pool builder gate's source). Sessions in the last
+(`auto_adjust=False`, the pool builder gate's source; yfinance still
+split-adjusts Close, so a stock split inside the window makes the tape
+unavailable rather than show rescaled closes). Sessions in the last
 3 with |change| ≥ 5% are marked ⚠. Non-positive or NaN closes are left out,
 and the session after one shows no change (a move across the gap spans two
 sessions).
 Any failure, fewer than 2 sessions, or a tape whose newest session is older
 than its market's latest session before `as_of` (the newest bar of the
 market benchmark: SPY for US, 000001.SS for Shanghai/Shenzhen, ^HSI for Hong
-Kong; a session read is cached per process, a failed read is retried), or older than a session the ticker's own history
+Kong, 000001.SS also for Beijing; another suffix has no benchmark and gets
+the calendar rule; a session read is cached per process, a failed read is retried), or older than a session the ticker's own history
 lists without a usable close, renders a fixed "unavailable" line. yfinance
 lists a finished session with a NaN close until its data is complete
 (measured 2026-11-05 00:28 Shanghai: 000001.SS and 600256.SS both at 11-04 =
@@ -74,7 +77,9 @@ block is left out entirely and logged — the evaluator then checks prices by
 its own searches, as before. A statement that contradicts the tape (wrong close, wrong direction,
 a rebound described as a decline) is a **major** factual_accuracy flag; a ⚠
 move neither explained nor marked "driver unverified" is a **major**
-coverage flag; the evaluator does not search for these prices. Macro briefs
+coverage flag; the evaluator does not search for these session closes and moves, but
+still checks pre-market, after-hours, intraday and `as_of`-session moves (not
+in the tape) by search. Macro briefs
 are unchanged.
 
 Citation severity (ticker evaluations only): a cited URL that does not contain the claim is now
