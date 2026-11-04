@@ -69,6 +69,9 @@ class TickerEvalReport(_EvalReportBase):
     #: Newest session of the price tape in the evaluation prompt; None when
     #: the evaluation ran without one (specs/price-tape.md P3).
     price_tape_newest: date | None = None
+    #: :func:`pipeline.price_tape.tape_digest` of that tape (the collector
+    #: logs its own), so a tape contradiction can be traced to what each saw.
+    price_tape_sha256: str | None = None
 
 
 def compute_verdict(scores: EvalScores, flagged_claims: list[FlaggedClaim]) -> Verdict:

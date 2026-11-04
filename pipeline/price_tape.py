@@ -14,6 +14,7 @@ fall back to today's behaviour.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from collections.abc import Callable, Sequence
@@ -154,3 +155,15 @@ def newest_session(tape: str) -> date | None:
     can be told apart afterwards."""
     days = _ROW_DATE.findall(tape)
     return date.fromisoformat(days[-1]) if days else None
+
+
+_ROW = re.compile(r"^\| \d{4}-\d{2}-\d{2} \|.*\|$", re.MULTILINE)
+
+
+def tape_digest(tape: str) -> str | None:
+    """sha256 of the tape's table rows only — the same for the writer's and
+    the evaluator's block (their rules differ), so the collector's logged
+    digest and the eval report's tell whether both saw the same closes.
+    None for :data:`UNAVAILABLE`."""
+    rows = _ROW.findall(tape)
+    return hashlib.sha256("\n".join(rows).encode()).hexdigest() if rows else None

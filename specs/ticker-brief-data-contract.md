@@ -28,13 +28,16 @@ evaluator (reader + `*.eval.json` writer), and the TradingAgents pipeline
     "flagged_claims": [{"section": "Risks", "claim": "…", "issue": "…", "severity": "minor"}],
     "verdict": "pass",
     "notes": "free text",
-    "price_tape_newest": "2026-07-31"
+    "price_tape_newest": "2026-07-31",
+    "price_tape_sha256": "…"
   }
   ```
 
   `price_tape_newest` (optional, null or absent on older evals): the newest
   session of the verified price tape in the evaluation prompt, null when the
-  evaluation ran without one (specs/price-tape.md P3). An eval is not re-run
+  evaluation ran without one (specs/price-tape.md P3); `price_tape_sha256`
+  (same rules): the digest of that tape's table rows, comparable with the
+  digest the collector logs for the tape its writer got. An eval is not re-run
   when the tape later becomes available: idempotency stays bound to
   `brief_sha256`.
 

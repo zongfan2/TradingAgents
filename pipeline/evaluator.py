@@ -477,7 +477,8 @@ def _build_report(
     if kind == "ticker":
         assert isinstance(meta, TickerBriefMeta)
         return TickerEvalReport(ticker=meta.ticker, session=meta.session,
-                                price_tape_newest=price_tape_module.newest_session(price_tape or ""), **common)
+                                price_tape_newest=price_tape_module.newest_session(price_tape or ""),
+                                price_tape_sha256=price_tape_module.tape_digest(price_tape or ""), **common)
     if isinstance(meta, LegacyMacroBriefMeta) and meta.session is None:
         return _LegacyMacroEvalReport(**common)
     return MacroEvalReport(session=meta.session, **common)

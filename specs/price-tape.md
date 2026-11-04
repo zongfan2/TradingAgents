@@ -77,8 +77,10 @@ rules always state that `[price tape]` is a valid URL-less citation (checked
 against the tape block when there is one, else by search), so a brief
 collected with a tape is never penalised for it when the evaluator's own
 fetch fails. The ticker eval report records `price_tape_newest` (the
-tape's newest session, null without one), so a verdict reached with or
-without a tape can be told apart. When the tape is unavailable the
+tape's newest session, null without one) and `price_tape_sha256` (a digest
+of its table rows; the collector logs the digest of its writer's tape), so a
+verdict reached with or without a tape, or on a tape the writer did not
+see, can be told apart. When the tape is unavailable the
 block is left out entirely and logged — the evaluator then checks prices by
 its own searches, as before. A statement that contradicts the tape (wrong close, wrong direction,
 a rebound described as a decline) is a **major** factual_accuracy flag; a ⚠

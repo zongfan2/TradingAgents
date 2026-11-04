@@ -600,6 +600,8 @@ def collect_one(
 
         # Market data first: a slow read must not eat the backend's window.
         price_tape = price_tape_module.render_tape(job.ticker, as_of)
+        logger.info("price tape for %s: newest %s, sha256 %s", job.ticker,
+                    price_tape_module.newest_session(price_tape), price_tape_module.tape_digest(price_tape))
         if job_window is not None and aggregate_deadline is not None:
             job_deadline = min(aggregate_deadline, time.monotonic() + job_window)
             runner = functools.partial(

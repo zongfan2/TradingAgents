@@ -113,7 +113,8 @@ def test_an_unavailable_tape_leaves_the_evaluator_to_its_own_checks(tmp_path, ca
     assert "price tape unavailable for NVDA" in capsys.readouterr().err
     import json
 
-    assert json.loads(brief.with_name("2026-08-03.eval.json").read_text())["price_tape_newest"] is None
+    report = json.loads(brief.with_name("2026-08-03.eval.json").read_text())
+    assert report["price_tape_newest"] is None and report["price_tape_sha256"] is None
 
 
 @pytest.mark.unit
@@ -256,3 +257,12 @@ def test_the_tape_read_does_not_eat_the_backend_window(monkeypatch, tmp_path):
 def test_newest_session_reads_the_rendered_tape():
     assert pt.newest_session(pt.render_tape("INTC", date(2026, 11, 3), fetch=lambda t: BARS)) == date(2026, 11, 2)
     assert pt.newest_session(pt.UNAVAILABLE) is None
+
+
+@pytest.mark.unit
+def test_the_tape_digest_covers_the_closes_not_the_rules():
+    writer = pt.render_tape("INTC", date(2026, 11, 3), fetch=lambda t: BARS)
+    judge = pt.render_tape("INTC", date(2026, 11, 3), fetch=lambda t: BARS, for_writer=False)
+    revised = pt.render_tape("INTC", date(2026, 11, 3), fetch=lambda t: BARS[:-2] + [(date(2026, 11, 2), 59.98)])
+    assert pt.tape_digest(writer) == pt.tape_digest(judge) != pt.tape_digest(revised)
+    assert pt.tape_digest(pt.UNAVAILABLE) is None
