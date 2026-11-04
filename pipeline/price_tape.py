@@ -125,10 +125,13 @@ def render_tape(ticker: str, as_of: date, fetch: Fetch | None = None, *, for_wri
     for i, (day, close, pct) in enumerate(rows):
         change = "—" if pct is None else f"{pct:+.2f}%"
         recent = i >= len(rows) - BIG_MOVE_LOOKBACK
-        mark = " ⚠" if pct is not None and abs(pct) >= BIG_MOVE_PCT and recent else ""
+        # Judged on the shown change: never "+5.00%" without its ⚠.
+        mark = " ⚠" if pct is not None and abs(round(pct, 2)) >= BIG_MOVE_PCT and recent else ""
         if mark:
             big.append(f"{day.isoformat()} ({change})")
-        lines.append(f"| {day.isoformat()} | {close:,.2f} | {change}{mark} |")
+        # Sub-unit prices trade at 3-4 decimals (HK ticks of 0.001 below HK$0.50).
+        shown = f"{close:,.4f}" if close < 1 else f"{close:,.2f}"
+        lines.append(f"| {day.isoformat()} | {shown} | {change}{mark} |")
     lines.append("")
     if big:
         lines.append(f"⚠ Large recent moves: {', '.join(big)}.")

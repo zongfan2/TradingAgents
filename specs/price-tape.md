@@ -31,7 +31,8 @@ session-over-session change, from yfinance daily history
 split-adjusts every Close before a split, so any split in the fetched
 ~2 months, inside the window or after a past `as_of` (backfill, re-evaluation),
 makes the tape unavailable rather than show rescaled closes). Sessions in the last
-3 with |change| ≥ 5% are marked ⚠. Non-positive or NaN closes are left out,
+3 with |change| ≥ 5% (as shown, to 2 decimals) are marked ⚠; closes below 1
+are shown to 4 decimals, others to 2. Non-positive or NaN closes are left out,
 and the session after one shows no change (a move across the gap spans two
 sessions); so does the session after a weekday with no bar at all (a
 suspension or a holiday, which the weekday calendar cannot tell apart: one

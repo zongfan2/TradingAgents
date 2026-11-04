@@ -275,3 +275,12 @@ def test_no_change_is_computed_across_a_weekday_without_a_bar():
     assert "| 2026-10-30 | 108.00 | — |" in text and "⚠" not in text and "+8.00%" not in text
     weekend = [(date(2026, 10, 30), 100.0), (date(2026, 11, 2), 108.0)]  # Fri -> Mon is one session
     assert "| 2026-11-02 | 108.00 | +8.00% ⚠ |" in pt.render_tape("X", date(2026, 11, 3), fetch=lambda t: weekend)
+
+
+@pytest.mark.unit
+def test_sub_unit_closes_keep_their_precision_and_the_mark_follows_the_shown_change():
+    cheap = [(date(2026, 10, 29), 0.3450), (date(2026, 10, 30), 0.3625)]
+    text = pt.render_tape("X.HK", date(2026, 11, 2), fetch=lambda t: cheap)
+    assert "| 2026-10-29 | 0.3450 |" in text and "| 2026-10-30 | 0.3625 |" in text
+    edge = [(date(2026, 10, 29), 100.0), (date(2026, 10, 30), 104.9996)]  # +4.9996% shows as +5.00%
+    assert "| 2026-10-30 | 105.00 | +5.00% ⚠ |" in pt.render_tape("X", date(2026, 11, 2), fetch=lambda t: edge)
