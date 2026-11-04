@@ -294,6 +294,9 @@ def build_eval_prompt(
     """Evaluation prompt: five scored dimensions embedding the brief verbatim
     (ticker briefs: plus the verified price tape, specs/price-tape.md)."""
     date = meta.as_of_date.isoformat()
+    # A writer given a tape is told to cite it (prompts/ticker_deep_search.md);
+    # one without a tape never sees the citation, so it is the evidence.
+    writer_had_tape = price_tape_module.TAPE_CITATION in brief_text
     if kind == "ticker":
         assert isinstance(meta, TickerBriefMeta)
         subject = f"single-ticker research brief for {meta.ticker} (as of {date})"
@@ -326,17 +329,25 @@ citations alone. Score the brief on five dimensions, each a 0-10 float:
 4. timeliness — is the content actually about the trailing 48h/week as of {date}?
 5. consistency — internal contradictions between sections or Impact lines.{consistency_extra}
 
-{_tape_section(price_tape, date)}{_JSON_INSTRUCTIONS}
+{_tape_section(price_tape, date, writer_had_tape)}{_JSON_INSTRUCTIONS}
 
 --- BRIEF UNDER EVALUATION (verbatim, including frontmatter) ---
 {brief_text}"""
 
 
-def _tape_section(price_tape: str | None, as_of: str = "as-of") -> str:
+def _tape_section(price_tape: str | None, as_of: str = "as-of", writer_had_tape: bool = True) -> str:
     """The verified closes (before as_of — no look-ahead) as the reference for
-    the brief's session closes and session-over-session moves."""
+    the brief's session closes and session-over-session moves. The ⚠ coverage
+    rule only binds a brief whose writer had a tape: the collector and the
+    evaluator read market data at different times (a cn session is listed
+    with a NaN close until complete), so the writer may have had none."""
     if not price_tape:
         return ""
+    coverage = (
+        "A ⚠\nmove the brief neither explains nor marks 'driver unverified' is a 'major' coverage\nflag."
+        if writer_had_tape else
+        "This brief's\nwriter had no tape: an unexplained ⚠ move is scored as an ordinary coverage miss,\nnot a 'major' flag."
+    )
     return f"""--- VERIFIED PRICE TAPE (market data; reference, not part of the brief) ---
 {price_tape}
 
@@ -344,9 +355,8 @@ Use this tape for the session closes and session-over-session moves it lists, an
 for price trends across those sessions — do not search for them. Pre-market,
 after-hours, intraday and {as_of}-session moves are not in the tape: check those by
 search as usual. A brief statement that contradicts the tape (wrong close, wrong
-direction, a rebound described as a decline) is a 'major' factual_accuracy flag. A ⚠
-move the brief neither explains nor marks 'driver unverified' is a 'major' coverage
-flag. A figure cited as {price_tape_module.TAPE_CITATION} that matches the tape is
+direction, a rebound described as a decline) is a 'major' factual_accuracy flag. {coverage}
+A figure cited as {price_tape_module.TAPE_CITATION} that matches the tape is
 correctly cited.
 
 """

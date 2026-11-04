@@ -55,7 +55,9 @@ def test_the_collector_prompt_carries_the_tape(monkeypatch):
     text = render_ticker_prompt(date(2026, 11, 3), "INTC", "us", "claude-deep-search", "seed",
                                 price_tape=pt.render_tape("INTC", date(2026, 11, 3), fetch=lambda t: BARS))
     assert "# Verified price tape" in text and "-8.80% ⚠" in text and "{{" not in text
-    assert pt.UNAVAILABLE in render_ticker_prompt(date(2026, 11, 3), "INTC", "us", "g", "seed")
+    assert "Verified price tape cites `[price tape]`" in text
+    bare = render_ticker_prompt(date(2026, 11, 3), "INTC", "us", "g", "seed")
+    assert pt.UNAVAILABLE in bare and "[price tape]" not in bare and "{{" not in bare  # nothing to cite
 
 
 @pytest.mark.unit
@@ -239,3 +241,18 @@ def test_the_evaluator_still_searches_moves_outside_the_tape():
         ticker="INTC", as_of_date=date(2026, 11, 3), catalyst_score=3.0, session="us"), "BRIEF",
         price_tape="| 2026-11-02 | 59.97 | -8.80% ⚠ |")
     assert "Pre-market,\nafter-hours, intraday and 2026-11-03-session moves are not in the tape" in prompt
+
+
+@pytest.mark.unit
+def test_the_warning_coverage_rule_binds_only_a_brief_whose_writer_had_a_tape():
+    from pipeline import evaluator as ev
+    from pipeline.contracts.briefs import TickerBriefMeta
+
+    meta = TickerBriefMeta.model_construct(ticker="INTC", as_of_date=date(2026, 11, 3), catalyst_score=3.0, session="us")
+    tape = pt.render_tape("INTC", date(2026, 11, 3), fetch=lambda t: BARS, for_writer=False)
+    with_tape = ev.build_eval_prompt("ticker", meta, "closed at 59.97 [price tape]", price_tape=tape)
+    assert "neither explains nor marks 'driver unverified' is a 'major' coverage" in with_tape
+    # The collector read no tape (e.g. a NaN cn close), the evaluator later did.
+    without = ev.build_eval_prompt("ticker", meta, "closed at 59.97 [Src](https://x)", price_tape=tape)
+    assert "writer had no tape" in without and "'major' coverage" not in without
+    assert "contradicts the tape" in without and "'major' factual_accuracy flag" in without

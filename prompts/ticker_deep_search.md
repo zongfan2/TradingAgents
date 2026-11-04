@@ -58,7 +58,7 @@ dated catalyst.
 # Rules
 
 - Every factual claim carries an inline markdown citation to the URL you got it
-  from: `claim text [Source](https://...)`. No uncited numbers (a close or daily move taken from the Verified price tape cites `[price tape]`).
+  from: `claim text [Source](https://...)`. No uncited numbers{{TAPE_CITATION_RULE}}.
 - Cite at least 5 distinct source URLs across the brief. Set `sources_count` in
   the frontmatter to the exact number of distinct URLs you cited in the body.
 - Numbers must come from your searches, not memory. If you could not verify

@@ -38,7 +38,7 @@ TAPE_CITATION = "[price tape]"
 
 UNAVAILABLE = (
     "Price tape unavailable (market data could not be read). Verify any close or "
-    "daily move you state against a primary source."
+    "daily move you state against a primary source and cite its URL."
 )
 
 

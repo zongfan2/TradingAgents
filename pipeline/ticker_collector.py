@@ -348,6 +348,10 @@ def render_ticker_prompt(
             "SEED": seed_block,
             "SEARCH_BUDGET": render_search_budget(max_searches),
             "PRICE_TAPE": price_tape,
+            # Only a writer that has a tape may cite it (specs/price-tape.md P2).
+            "TAPE_CITATION_RULE": "" if price_tape == price_tape_module.UNAVAILABLE else (
+                " (a close or daily move taken from the Verified price tape cites "
+                f"`{price_tape_module.TAPE_CITATION}`)"),
         },
     )
 

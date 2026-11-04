@@ -62,7 +62,9 @@ never described in the opposite direction or omitted.
 
 `prompts/ticker_deep_search.md` gains a "Verified price tape" section
 (`{{PRICE_TAPE}}`) after the seed. The collector renders it per job with the
-brief's `as_of`.
+brief's `as_of`. The `[price tape]` citation rule (`{{TAPE_CITATION_RULE}}`) is
+rendered only when the tape is: a writer without one is never told it may
+cite it.
 
 ### P3 — Evaluator
 
@@ -78,7 +80,11 @@ block is left out entirely and logged — the evaluator then checks prices by
 its own searches, as before. A statement that contradicts the tape (wrong close, wrong direction,
 a rebound described as a decline) is a **major** factual_accuracy flag; a ⚠
 move neither explained nor marked "driver unverified" is a **major**
-coverage flag; the evaluator does not search for these session closes and moves, but
+coverage flag when the writer had a tape. The collector and the evaluator
+read market data at different times (a cn session listed with a NaN close
+at collection may be complete at evaluation), so the brief's own
+`[price tape]` citations are the evidence: without one, the ⚠ rule is
+stated as an ordinary coverage miss, while a contradiction stays major; the evaluator does not search for these session closes and moves, but
 still checks pre-market, after-hours, intraday and `as_of`-session moves (not
 in the tape) by search. Macro briefs
 are unchanged.
@@ -105,6 +111,6 @@ Collector cost per brief ≈ $0.13 with 10 searches (from ≈ $0.25).
 1. The tape never includes the `as_of` session or later; ⚠ marks only the
    last 3 sessions at |change| ≥ 5%; failures render "unavailable".
 2. The collector prompt and the ticker evaluation prompt carry the same
-   tape; macro evaluation prompts carry none.
+   tape when both reads agree (each reads at its own run time); macro evaluation prompts carry none.
 3. The evaluator prompt states the tape and citation severity rules.
 4. No test reaches the network.
