@@ -41,6 +41,10 @@ opportunity brief whose `catalyst_score` ≥ the analysis trigger threshold.
 - **consistency** — internal contradictions between sections / Impact lines.
   For ticker briefs this includes `catalyst_score` inflation: a score ≥ 7 with
   no dated catalyst inside ~2 weeks in the body is a `major` flag.
+  For macro briefs (2026-11-06): every Impact line `mixed` with rationales
+  that never say why the forces balance or which matters most is a `minor`
+  coverage flag — no read at all (the 11-05 brief; the collector is not
+  forced to pick a direction, specs/macro-brief-collector.md R1).
 
 ## Requirements
 

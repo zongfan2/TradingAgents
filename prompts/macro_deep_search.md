@@ -36,9 +36,12 @@ Caixin) over aggregators and commentary blogs.
 6. **China & Asia** — PBoC and fiscal policy, property sector, China tech/AI
    developments, HK/A-share market drivers, Japan/Korea/India movers.
 7. **Surprises & Watchlist** — anything in the last 24h that consensus did not
-   expect; index futures and the largest pre-market movers with their stated
-   reasons; plus the next 5 trading days' known catalysts (data releases,
-   central bank meetings, major earnings).
+   expect; the latest market tape for the session you write for (see the
+   session block) — for `us`, US index futures and the largest pre-market
+   movers; for `cn`, the last US session's close and after-hours movers and
+   the Asian index futures before the open — each with its stated reason, or
+   say it was not found; plus the next 5 trading days' known catalysts (data
+   releases, central bank meetings, major earnings).
 
 # Rules
 
