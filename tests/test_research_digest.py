@@ -287,3 +287,24 @@ def test_every_digest_log_line_is_in_the_runbook():
     assert len(pieces) >= 8
     for piece in pieces:
         assert piece in section, piece
+
+
+@pytest.mark.unit
+def test_a_wrong_session_nominee_is_not_listed(tmp_path):
+    cfg = config(tmp_path)
+    write_slot(cfg, briefs={"0981.HK": ticker_brief("0981.HK", 7.0, "mixed — cn brief."),
+                            "MU": ticker_brief("MU", 4.5, "mixed — m.")},
+               tickers=[{"ticker": "0981.HK", "stages": {"nominate": stage("wrong-session")}}, entry("MU")])
+    text = rd.build_digest(cfg, "us", DAY)
+    assert "0981.HK" not in text and "个股 1 只" in text
+
+
+@pytest.mark.unit
+def test_a_damaged_macro_frontmatter_costs_only_the_macro_line(tmp_path):
+    cfg = config(tmp_path)
+    write_slot(cfg, briefs={"MU": ticker_brief("MU", 4.5, "mixed — m.")}, tickers=[entry("MU")],
+               macro="---\nas_of_date: 2026-13-45\nsession: us\n---\n\n## Monetary Policy & Rates\n",
+               macro_verdict=None)
+    text = rd.build_digest(cfg, "us", DAY)
+    assert text.splitlines()[1] == "宏观：简报无法读取"  # PyYAML raises ValueError on 2026-13-45
+    assert "• MU 4.5" in text

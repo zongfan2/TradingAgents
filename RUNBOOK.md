@@ -457,7 +457,8 @@ model call) and sent once per slot day, only by a full slot run (never by
   failed` (a local failure), `research digest not queued within 60s — the
   hourly watchdog retries it`, `research digest not started` (no thread
   could start; also retried), `research digest: skipped a malformed funnel
-  row` (that row only), and `trade notification research:<session>:<date>
+  row` (that row only), `research digest: macro brief unreadable` (the
+  macro line only), and `trade notification research:<session>:<date>
   not sent` (Lark refused it; it stays queued).
 - `scheduler.watchdog.err.log` — the hourly retry: `research digest retry
   failed`, `research digest for <session> <date> not sent`, `research

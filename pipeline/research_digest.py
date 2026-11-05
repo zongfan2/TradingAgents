@@ -19,6 +19,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from pipeline.common import session_for_ticker
 from pipeline.config import PipelineConfig
 from pipeline.contracts.briefs import MACRO_IMPACT_SECTIONS, split_frontmatter
 
@@ -125,9 +126,11 @@ def ticker_line(config: PipelineConfig, entry: dict[str, Any], slot_date: date, 
     already there on a re-fire) or a decision (a core ticker is analysed
     even when its collection failed)."""
     ticker = str(entry.get("ticker") or "")
+    if not ticker or session_for_ticker(ticker) != session:
+        return None  # a wrong-session nominee: its brief (same date, no session in the path) is not this slot's
     stages = entry.get("stages") or {}
     decision = _decision(stages.get("decide"), session)
-    text = _read(config.ticker_brief_dir / ticker / f"{slot_date.isoformat()}.md") if ticker else None
+    text = _read(config.ticker_brief_dir / ticker / f"{slot_date.isoformat()}.md")
     if text is None and decision is None:
         return None
     meta, body, _errors = split_frontmatter(text or "")
@@ -162,8 +165,12 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date) -> str:
     """The digest text for one slot; never raises on a missing or partial input."""
     from pipeline.funnel import snapshot_path
 
-    lines = [f"📊 研究摘要 · {SESSION_NAMES.get(session, session)} · {slot_date.isoformat()}",
-             macro_line(config, session, slot_date)]
+    try:
+        macro = macro_line(config, session, slot_date)
+    except Exception as exc:  # e.g. a damaged frontmatter date: the tickers still go out
+        logger.warning("research digest: macro brief unreadable (%s)", type(exc).__name__)
+        macro = "宏观：简报无法读取"
+    lines = [f"📊 研究摘要 · {SESSION_NAMES.get(session, session)} · {slot_date.isoformat()}", macro]
     snapshot: dict[str, Any] = {}
     raw = _read(snapshot_path(config.state_dir, session, slot_date))
     if raw is not None:

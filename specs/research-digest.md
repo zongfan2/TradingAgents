@@ -27,7 +27,8 @@ group** — it is low-frequency (one message per slot, two a day).
 - **Macro**: the revision-bound eval verdict of `<date>.<session>.md`
   (`未评估` without one) and the `**Impact**` word of each of sections 1–6
   (bullish 偏多 · bearish 偏空 · neutral 中性 · mixed 分歧).
-- **Tickers**: every ticker of the slot's funnel snapshot that has a brief
+- **Tickers**: every ticker of the slot's own session (a wrong-session
+  nominee is skipped: brief paths carry no session) in the funnel snapshot that has a brief
   for the slot's date (written now, or already there when a slot re-fires)
   or a decision (a core ticker is analysed even when its collection failed:
   `（无简报）`) — catalyst score, type and window (`none`/`other` omitted),
@@ -46,7 +47,8 @@ group** — it is low-frequency (one message per slot, two a day).
   loses nothing.
 - Built only from files the slot already wrote — no model call, no cost. A
   missing or unreadable input gives a shorter digest (`宏观：无简报`,
-  `个股：无简报`), never an exception.
+  `宏观：简报无法读取`, `个股：无简报`, a malformed row skipped), never an
+  exception.
 
 ### D2 — Delivery
 
@@ -67,8 +69,8 @@ slot end first marks the digest pending
 queuing it clears the mark, and the hourly watchdog retries any mark still
 there (one older than 3 days is dropped with an error). Once queued, a Lark
 failure is the outbox's to retry. The us digest goes
-out at slot end (05:30 ET), so its BUY decisions precede the 09:45 order
-messages.
+out at slot end (the 05:30 ET slot finishes around 07:00–07:30), so its BUY
+decisions precede the 09:45 order messages.
 
 ## Prior art (specs/README.md rule 6)
 
