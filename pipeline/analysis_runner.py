@@ -1034,7 +1034,7 @@ def select_core_runs(
         if (move is None or round(move[0], 2) >= CORE_MOVE_SESSION_PCT
                 or round(move[1], 2) >= CORE_MOVE_TOTAL_PCT):
             logger.info("%s: core run despite an unchanged HOLD — price move %s since %s", ticker,
-                        "unknown" if move is None else f"{move[0]:.1f}% max session, {move[1]:.1f}% total",
+                        "unknown" if move is None else f"{move[0]:.2f}% max session, {move[1]:.2f}% total",
                         row["date"])
             run.append(ticker)
             continue
@@ -1043,7 +1043,7 @@ def select_core_runs(
             "core-unchanged",
             f"HOLD on {row['date']} ({age} trading day(s) ago), no position, "
             f"brief catalyst {score:g} < trigger {threshold:g} (eval {info.verdict}), "
-            f"price moved {move[1]:.1f}% since (max session {move[0]:.1f}%)",
+            f"price moved {move[1]:.2f}% since (max session {move[0]:.2f}%)",
             {"last_decision_date": row["date"], "age": age, "score": score, "threshold": threshold,
              "max_session_move_pct": round(move[0], 2), "total_move_pct": round(move[1], 2)},
         ))

@@ -290,3 +290,10 @@ def test_by_default_a_core_skip_needs_real_price_data():
         ["AAA"], session="us", slot_date=FRIDAY, settings=ar.RunnerSettings(core_skip_unchanged=True),
         decision_rows=[row("AAA", "2026-08-06")], positions=snapshot(), inspect_ticker=brief(5.0))
     assert out == (["AAA"], [])
+
+
+@pytest.mark.unit
+def test_the_skip_reason_shows_the_move_as_judged():
+    run_, skipped = select(["AAA"], [row("AAA", "2026-08-06")], snapshot(), score=5.0,
+                           move=lambda *_: (4.96, 7.96))
+    assert run_ == [] and "price moved 7.96% since (max session 4.96%)" in skipped[0][2]
