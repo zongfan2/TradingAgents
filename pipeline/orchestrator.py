@@ -512,6 +512,8 @@ LARK_TIMEOUT_S = 10.0
 #: Hard bound on the whole delivery (DNS included) as seen by the slot: the
 #: POST runs on a daemon thread that is abandoned past this.
 LARK_DEADLINE_S = 15.0
+#: How long a slot end waits for the research digest (lock + build + send).
+DIGEST_DEADLINE_S = 60.0
 
 
 class LarkError(RuntimeError):
@@ -851,6 +853,8 @@ class Orchestrator:
         self._execution_orders: str | None = None
         #: Set by run_slot: step 7 is left to the ``execute`` job.
         self._defer_execution = False
+        #: run_slot's --only component (None: the slot sequence ran).
+        self._only: str | None = None
         #: The execute job's pre-submit refresh counts (run_execution only).
         self._refresh_counts: dict[str, int] | None = None
 
@@ -889,6 +893,7 @@ class Orchestrator:
 
         Raises :class:`SlotLockHeld` when another invocation owns the slot.
         """
+        self._only = only
         selected = self._select(only, from_step)
         by_step = {c.step: c for c in selected}
         # Only an explicit --only execution_adapter runs step 7 inline when a
@@ -1117,14 +1122,26 @@ class Orchestrator:
 
     def _send_research_digest(self) -> None:
         """specs/research-digest.md: the slot's research to the trades group,
-        once per slot day. Imported lazily and guarded: it never changes the
-        slot's outcome."""
-        try:
-            from pipeline.research_digest import send_digest
+        once per slot day, after the slot is recorded finished. Imported
+        lazily, guarded, and bounded by DIGEST_DEADLINE_S (the trades store
+        lock has no timeout): it never changes the slot's outcome nor holds
+        the slot lock for long. A send cut off by the process exit is
+        kill-safe — the outbox keeps it for the next flush."""
 
-            send_digest(self.config, self.session, self.slot_date)
-        except Exception as exc:
-            logger.warning("research digest failed: %s", type(exc).__name__)
+        def send() -> None:
+            try:
+                from pipeline.research_digest import send_digest
+
+                send_digest(self.config, self.session, self.slot_date)
+            except Exception as exc:
+                logger.warning("research digest failed: %s", type(exc).__name__)
+
+        worker = threading.Thread(target=send, name="research-digest", daemon=True)
+        worker.start()
+        worker.join(DIGEST_DEADLINE_S)
+        if worker.is_alive():
+            logger.warning("research digest still pending after %.0fs — left to the next flush",
+                           DIGEST_DEADLINE_S)
 
     def _finalize(self) -> int:
         self._build_funnel()
@@ -1171,8 +1188,9 @@ class Orchestrator:
             dedup_key=("summary", (self.session, self.slot_date.isoformat()), "end-of-slot"),
             details=self._execution_orders,
         )
-        self._send_research_digest()
         self.status.finish_slot(to_utc_iso(self.clock()))
+        if self._only is None:  # a single-component run must not take the day's digest
+            self._send_research_digest()
         return 1 if problems else 0
 
 

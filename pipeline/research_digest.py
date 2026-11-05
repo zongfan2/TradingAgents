@@ -30,6 +30,7 @@ MACRO_SECTION_NAMES = dict(zip(MACRO_IMPACT_SECTIONS, ("利率", "增长", "地�
 #: A brief's impact rationale is cut to this many characters.
 RATIONALE_CHARS = 110
 
+_HEADING = re.compile(r"^##[ \t]+", re.MULTILINE)
 _IMPACT = re.compile(r"^\*\*Impact\*\*:\s*([A-Za-z]+)\s*(?:[—–-]+\s*(.*))?$")
 
 
@@ -69,7 +70,9 @@ def macro_line(config: PipelineConfig, session: str, slot_date: date) -> str:
         return "宏观：无简报"
     _meta, body, _errors = split_frontmatter(text)
     reads = []
-    for chunk in body.split("\n## ")[1:]:
+    # The contract's heading rule: any line "## Title" (the body may start
+    # with one when no blank line follows the frontmatter).
+    for chunk in _HEADING.split(body)[1:]:
         title, _, section = chunk.partition("\n")
         name = MACRO_SECTION_NAMES.get(title.strip())
         impact = _last_impact(section) if name else None
@@ -81,16 +84,31 @@ def macro_line(config: PipelineConfig, session: str, slot_date: date) -> str:
 
 
 def _decision(stage: dict[str, Any] | None, session: str) -> str | None:
+    """The decision of the arm that trades: a paired ticker's decide stage
+    keeps its strongest arm, so a feeds BUY would hide the brief arm's HOLD
+    (specs/decision-funnel.md) — the brief arm's latest event is read when
+    there is one. A BUY/SELL that cannot become an order says so."""
     if not stage:
         return None
-    code = stage.get("code")
+    events = [event for event in stage.get("events") or [] if isinstance(event, dict)]
+    brief = [event for event in events if (event.get("details") or {}).get("arm") == "brief"]
+    chosen = brief[-1] if brief else stage
+    code = chosen.get("code")
+    details = chosen.get("details") or {}
     if code == "ERROR":
         return "出错"  # never the error text: it carries API error bodies
     if code not in ("BUY", "SELL", "HOLD"):
         return None
-    rating = (stage.get("details") or {}).get("pm_rating")
+    rating = details.get("pm_rating")
     text = f"{code}（PM {rating}）" if rating else str(code)
-    return text + ("，不下单" if session == "cn" and code != "HOLD" else "")
+    if details.get("arm") == "feeds":
+        text = f"feeds 对照 {text}"
+    if code != "HOLD":
+        if details.get("plan_valid") is False:
+            text += "，计划无效"
+        if session == "cn" or details.get("execute_eligible") is not True:
+            text += "，不下单"
+    return text
 
 
 def _verdict_text(stage: dict[str, Any] | None) -> str:
@@ -101,14 +119,16 @@ def _verdict_text(stage: dict[str, Any] | None) -> str:
 
 
 def ticker_line(config: PipelineConfig, entry: dict[str, Any], slot_date: date, session: str) -> tuple[tuple, str] | None:
+    """Every ticker with a brief for the slot's date (written now, or
+    already there on a re-fire) or a decision (a core ticker is analysed
+    even when its collection failed)."""
     ticker = str(entry.get("ticker") or "")
     stages = entry.get("stages") or {}
-    if (stages.get("collect") or {}).get("code") != "written":
+    decision = _decision(stages.get("decide"), session)
+    text = _read(config.ticker_brief_dir / ticker / f"{slot_date.isoformat()}.md") if ticker else None
+    if text is None and decision is None:
         return None
-    text = _read(config.ticker_brief_dir / ticker / f"{slot_date.isoformat()}.md")
-    if text is None:
-        return None
-    meta, body, _errors = split_frontmatter(text)
+    meta, body, _errors = split_frontmatter(text or "")
     meta = meta or {}
     try:
         score = float(meta.get("catalyst_score"))
@@ -118,15 +138,16 @@ def ticker_line(config: PipelineConfig, entry: dict[str, Any], slot_date: date, 
         str(part) for part in (meta.get("catalyst_type"), meta.get("catalyst_window"))
         if part not in (None, "", "none", "other")
     )
-    impact = _last_impact(body)
+    impact = _last_impact(body) if text is not None else None
     parts = [f"• {ticker} {score:.1f}" if score is not None else f"• {ticker} –"]
+    if text is None:
+        parts.append("（无简报）")
     if catalyst:
         parts.append(catalyst)
     line = " ".join(parts)
     if impact:
         line += f" · {impact[0]}" + (f" — {impact[1]}" if impact[1] else "")
     tail = [_verdict_text(stages.get("evaluate"))]
-    decision = _decision(stages.get("decide"), session)
     if decision:
         tail.append(f"分析 {decision}")
     line += "｜" + "｜".join(tail)
@@ -152,7 +173,7 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date) -> str:
             if (row := ticker_line(config, entry, slot_date, session)) is not None]
     rows.sort(key=lambda row: row[0])
     analysed = sum(1 for order, _line in rows if not order[0])
-    lines.append(f"个股简报 {len(rows)} 份，分析 {analysed} 只：" if rows else "个股：无简报")
+    lines.append(f"个股 {len(rows)} 只，分析 {analysed} 只：" if rows else "个股：无简报")
     lines.extend(line for _order, line in rows)
     return "\n".join(lines)
 

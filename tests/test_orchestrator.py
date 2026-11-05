@@ -2111,3 +2111,35 @@ def test_the_slot_end_sends_the_research_digest_and_its_failure_changes_nothing(
     write_eval(config, "cn", SLOT_DATE)
     assert run_slot(config, "cn", FakeRunner({})) == 0  # the slot's outcome is unchanged
     assert read_status(config, "cn")["slot"]["finished_at"]
+
+
+@pytest.mark.unit
+def test_an_only_run_does_not_take_the_days_digest(tmp_path, monkeypatch):
+    from pipeline import research_digest
+
+    config = make_config(tmp_path)
+    write_eval(config, "us", SLOT_DATE)
+    calls = []
+    monkeypatch.setattr(research_digest, "send_digest", lambda cfg, session, day: calls.append(session))
+    run_slot(config, "us", FakeRunner({}), only="pool_builder")
+    assert calls == []
+    run_slot(config, "us", FakeRunner({}))
+    assert calls == ["us"]
+
+
+@pytest.mark.unit
+def test_a_stuck_digest_never_holds_the_slot_end(tmp_path, monkeypatch):
+    import threading as _threading
+
+    from pipeline import research_digest
+
+    release = _threading.Event()
+    monkeypatch.setattr(orchestrator, "DIGEST_DEADLINE_S", 0.2)
+    monkeypatch.setattr(research_digest, "send_digest", lambda *a: release.wait(5))
+    config = make_config(tmp_path)
+    write_eval(config, "us", SLOT_DATE)
+    try:
+        assert run_slot(config, "us", FakeRunner({})) == 0
+        assert read_status(config, "us")["slot"]["finished_at"]  # recorded before the digest
+    finally:
+        release.set()

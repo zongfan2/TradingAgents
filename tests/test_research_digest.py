@@ -69,7 +69,7 @@ def test_the_digest_lists_macro_reads_and_briefs_analysed_first(tmp_path):
     }, tickers=[
         entry("AAPL", evaluate="warn"),
         entry("LITE", evaluate="fail"),
-        entry("NVDA", evaluate="warn", decide=stage("BUY", pm_rating="Overweight")),
+        entry("NVDA", evaluate="warn", decide=stage("BUY", pm_rating="Overweight", execute_eligible=True)),
         entry("HUM", evaluate="warn", decide=stage("HOLD", pm_rating="Hold")),
         entry("META", collect="not-collected-watch"),  # no brief: not listed
     ])
@@ -77,7 +77,7 @@ def test_the_digest_lists_macro_reads_and_briefs_analysed_first(tmp_path):
     lines = text.splitlines()
     assert lines[0] == "📊 研究摘要 · 美股 · 2026-11-04"
     assert lines[1] == "宏观（评估 warn）：利率 偏空 · 增长 分歧"  # Watchlist has no impact read
-    assert lines[2] == "个股简报 4 份，分析 2 只："
+    assert lines[2] == "个股 4 只，分析 2 只："
     assert lines[3] == "• HUM 8.0 earnings 2026-11-17 · 中性 — no verified news.｜评估 warn｜分析 HOLD（PM Hold）"
     assert lines[4] == ("• NVDA 7.0 earnings 2026-11-17 · 分歧 — positive tape into the print."
                         "｜评估 warn｜分析 BUY（PM Overweight）")
@@ -152,3 +152,69 @@ def test_a_failing_send_never_raises(tmp_path, monkeypatch):
 
     monkeypatch.setattr(trade_notify, "enqueue", boom)
     assert rd.send_digest(config(tmp_path, lark_trades_webhook_url=HOOK), "us", DAY) == 0
+
+
+def event(code, **details):
+    return {"code": code, "details": details}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("decide", "shown"), [
+    # Paired: the stage keeps the strongest arm (feeds BUY), the brief arm trades.
+    ({**stage("BUY", arm="feeds", pm_rating="Overweight"),
+      "events": [event("HOLD", arm="brief", pm_rating="Hold"), event("BUY", arm="feeds", pm_rating="Overweight")]},
+     "分析 HOLD（PM Hold）"),
+    (stage("BUY", arm="feeds", pm_rating="Overweight", plan_valid=True), "分析 feeds 对照 BUY（PM Overweight），不下单"),
+    (stage("BUY", arm="brief", pm_rating="Overweight", plan_valid=False, execute_eligible=False),
+     "分析 BUY（PM Overweight），计划无效，不下单"),
+    (stage("SELL", arm="brief", pm_rating="Underweight", plan_valid=True, execute_eligible=True),
+     "分析 SELL（PM Underweight）"),
+])
+def test_the_decision_shown_is_the_trading_arms_and_says_when_no_order_follows(tmp_path, decide, shown):
+    cfg = config(tmp_path)
+    write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "mixed — m.")},
+               tickers=[entry("NVDA", evaluate="warn", decide=decide)])
+    line = next(x for x in rd.build_digest(cfg, "us", DAY).splitlines() if x.startswith("• NVDA"))
+    assert line.endswith("｜评估 warn｜" + shown)
+
+
+@pytest.mark.unit
+def test_an_existing_brief_and_a_decision_without_a_brief_are_listed(tmp_path):
+    cfg = config(tmp_path)
+    write_slot(cfg, briefs={"MU": ticker_brief("MU", 4.5, "mixed — m.")}, tickers=[
+        entry("MU", collect="exists", evaluate="warn"),  # a re-fired slot found it on disk
+        entry("AAPL", collect="failed",
+              decide=stage("HOLD", arm="feeds", pm_rating="Hold")),  # core: analysed on feeds
+    ])
+    text = rd.build_digest(cfg, "us", DAY)
+    assert "个股 2 只，分析 1 只：" in text
+    assert "• AAPL – （无简报）｜未评估｜分析 feeds 对照 HOLD（PM Hold）" in text
+    assert "• MU 4.5 earnings 2026-11-17 · 分歧 — m.｜评估 warn" in text
+
+
+@pytest.mark.unit
+def test_macro_sections_follow_the_contracts_heading_rule(tmp_path):
+    cfg = config(tmp_path)
+    tight = ("---\nas_of_date: 2026-11-04\nsession: us\n---\n## Monetary Policy & Rates\n\n- a\n\n"
+             "**Impact**: bearish — r.\n\n##  Growth & Earnings\n\n- b\n\n**Impact**: bullish — g.\n")
+    write_slot(cfg, briefs={}, tickers=[], macro=tight, macro_verdict=None)
+    assert rd.macro_line(cfg, "us", DAY) == "宏观（未评估）：利率 偏空 · 增长 偏多"
+
+
+@pytest.mark.unit
+def test_a_lark_failure_is_logged_as_the_runbook_says_and_kept(tmp_path, monkeypatch, caplog):
+    from pipeline import trade_monitor
+    from pipeline.orchestrator import LarkError
+
+    def refuse(title, text):
+        raise LarkError("code 19021: sign match fail")
+
+    monkeypatch.setattr(trade_monitor, "make_trades_sender", lambda cfg: refuse)
+    cfg = config(tmp_path, lark_trades_webhook_url=HOOK)
+    write_slot(cfg, briefs={}, tickers=[])
+    with caplog.at_level("WARNING"):
+        assert rd.send_digest(cfg, "us", DAY) == 0
+    assert "trade notification research:us:2026-11-04 not sent" in caplog.text
+    from pipeline.trade_notify import SentStore
+
+    assert [item["key"] for item in SentStore(tmp_path).outbox()] == ["research:us:2026-11-04"]  # retried later

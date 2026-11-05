@@ -18,7 +18,7 @@ group** — it is low-frequency (one message per slot, two a day).
 ```
 📊 研究摘要 · 美股 · 2026-11-04
 宏观（评估 warn）：利率 偏空 · 增长 分歧 · 地缘 分歧 · 流动性 分歧 · 大宗 分歧 · 中国/亚洲 分歧
-个股简报 15 份，分析 2 只：
+个股 15 只，分析 2 只：
 • HUM 8.0 earnings 2026-11-06 · 中性 — <impact rationale>｜评估 warn｜分析 HOLD（PM Hold）
 • LITE 8.0 earnings 2026-11-05 · 分歧 — <impact rationale>｜评估 fail
 • FN 2.0 earnings 2026-11-02 · 偏多 — <impact rationale>｜未评估
@@ -27,27 +27,39 @@ group** — it is low-frequency (one message per slot, two a day).
 - **Macro**: the revision-bound eval verdict of `<date>.<session>.md`
   (`未评估` without one) and the `**Impact**` word of each of sections 1–6
   (bullish 偏多 · bearish 偏空 · neutral 中性 · mixed 分歧).
-- **Tickers**: every ticker the slot's funnel snapshot shows as collected
-  (`collect` code `written`) whose brief file exists — catalyst score, type
-  and window (`none`/`other` omitted), the final `**Impact**` line (rationale
-  cut to 110 characters), the funnel's eval stage (`评估 pass|warn|fail`,
-  else `未评估`), and the decide stage when there is one: `BUY|SELL|HOLD（PM
-  rating）`; on cn a BUY/SELL adds `，不下单` (cn is never executed); an
-  analysis error reads `分析 出错` and **never** carries the error text (it
-  holds API error bodies). Analysed names first, then by catalyst score.
+- **Tickers**: every ticker of the slot's funnel snapshot that has a brief
+  for the slot's date (written now, or already there when a slot re-fires)
+  or a decision (a core ticker is analysed even when its collection failed:
+  `（无简报）`) — catalyst score, type and window (`none`/`other` omitted),
+  the final `**Impact**` line (rationale cut to 110 characters), the
+  funnel's eval stage (`评估 pass|warn|fail`, else `未评估`), and the
+  decision of the arm that trades: the decide stage keeps a paired ticker's
+  strongest arm, so the brief arm's latest event is read when there is one
+  (a feeds-only decision reads `feeds 对照 …`). `BUY|SELL|HOLD（PM rating）`;
+  a BUY/SELL adds `，计划无效` when its plan is invalid and `，不下单` when it
+  cannot become an order (cn, or not `execute_eligible`); an analysis error
+  reads `分析 出错` and **never** carries the error text (it holds API error
+  bodies). Analysed names first, then by catalyst score.
+- Macro sections are found by the contract's heading rule (a line starting
+  `##` and whitespace), so a body without a blank line after the frontmatter
+  loses nothing.
 - Built only from files the slot already wrote — no model call, no cost. A
   missing or unreadable input gives a shorter digest (`宏观：无简报`,
   `个股：无简报`), never an exception.
 
 ### D2 — Delivery
 
-At the end of every slot, right after the ops end-of-slot summary, through
+At the end of every **full** slot run (never a single-component `--only`
+run, which would take the day's key with a partial slot), after the ops
+end-of-slot summary and after the slot is recorded finished, through
 the trades outbox (`trade_notify.enqueue`, specs/trade-notifications.md T3)
 under the key `research:<session>:<date>`: exactly once per slot day (a
 re-run, `--from-step`, or the us execution reopen never sends it again), and
 never ahead of a queued trade message. Off when notifications are disabled
-or the trades webhook is unset. Imported lazily and guarded: a digest
-failure is logged and never changes the slot's outcome. The us digest goes
+or the trades webhook is unset. Imported lazily, guarded, and bounded
+(60 s: the trades store lock has no timeout, the slot lock must not wait on
+it): a digest failure is logged and never changes the slot's outcome; a send
+cut off is kept by the outbox for the next flush. The us digest goes
 out at slot end (05:30 ET), so its BUY decisions precede the 09:45 order
 messages.
 
