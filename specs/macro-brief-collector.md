@@ -33,6 +33,16 @@ The robust version below replaces this one-liner.
   The prompt template gains a session block: the `cn` render emphasizes the
   Asia session setup (overnight US close, Asia calendars); the `us` render
   recaps the Asia session and US pre-market data (releases land 08:30 ET).
+  Coverage rules (2026-11-06, after the 11-05 review: Qualcomm's guide after
+  the 11-04 close went unmentioned before a −5.5% Nasdaq day, the midterm
+  result was read only as relief, and all six Impact lines were `mixed`):
+  Growth & Earnings always covers results and guidance released after the
+  previous close and before the open by mega-caps and sector bellwethers
+  (semiconductors / AI infrastructure first) with the move each caused;
+  Geopolitics states an election or policy outcome's second-order sector
+  effects; the Watchlist adds index futures and the largest pre-market
+  movers with their reasons; `mixed` only when opposing forces are of
+  similar size, else the dominant direction with the offsetting risk named.
 - **R2 — Generate**: invoke the deep-search backend. The primary backend is
   selectable via config `collect_backend` (env `TRADINGAGENTS_COLLECT_BACKEND`),
   default `claude` per D20 — a hermetic web-only `claude -p` (`--safe-mode`,
