@@ -169,6 +169,10 @@ def event(code, **details):
      "分析 BUY（PM Overweight），计划无效，不下单"),
     (stage("SELL", arm="brief", pm_rating="Underweight", plan_valid=True, execute_eligible=True),
      "分析 SELL（PM Underweight）"),
+    # A stage rebuilt from files carries no execute_eligible: unknown, not "no order".
+    (stage("BUY", arm="brief", run_id="r", pair_id=None, plan_valid=True), "分析 BUY"),
+    (stage("BUY", arm="brief", pm_rating="Overweight", plan_valid=True, execute_eligible=False),
+     "分析 BUY（PM Overweight），不下单"),
 ])
 def test_the_decision_shown_is_the_trading_arms_and_says_when_no_order_follows(tmp_path, decide, shown):
     cfg = config(tmp_path)
@@ -218,3 +222,37 @@ def test_a_lark_failure_is_logged_as_the_runbook_says_and_kept(tmp_path, monkeyp
     from pipeline.trade_notify import SentStore
 
     assert [item["key"] for item in SentStore(tmp_path).outbox()] == ["research:us:2026-11-04"]  # retried later
+
+
+@pytest.mark.unit
+def test_a_digest_not_queued_stays_pending_until_the_watchdog_queues_it(tmp_path, monkeypatch):
+    from pipeline import trade_monitor, trade_notify
+
+    sent = []
+    monkeypatch.setattr(trade_monitor, "make_trades_sender", lambda cfg: lambda title, text: sent.append(text))
+    cfg = config(tmp_path, lark_trades_webhook_url=HOOK)
+    write_slot(cfg, briefs={}, tickers=[])
+    rd.mark_pending(cfg, "us", DAY)
+    real_enqueue = trade_notify.enqueue
+
+    def no_lock(*a, **k):
+        raise TimeoutError("trades lock")
+
+    monkeypatch.setattr(trade_notify, "enqueue", no_lock)
+    assert rd.send_digest(cfg, "us", DAY) == 0
+    pending = tmp_path / "trade_notify" / "research_pending" / "us_2026-11-04"
+    assert pending.exists()  # not queued: still due
+    monkeypatch.setattr(trade_notify, "enqueue", real_enqueue)
+    assert rd.retry_pending(cfg, date(2026, 11, 4)) == 1
+    assert not pending.exists() and len(sent) == 1
+    assert rd.retry_pending(cfg, date(2026, 11, 4)) == 0  # nothing left, and the key is spent
+
+
+@pytest.mark.unit
+def test_an_old_pending_digest_is_dropped_with_an_error(tmp_path, caplog):
+    cfg = config(tmp_path, lark_trades_webhook_url=HOOK)
+    rd.mark_pending(cfg, "cn", date(2026, 10, 30))
+    with caplog.at_level("ERROR"):
+        assert rd.retry_pending(cfg, date(2026, 11, 4)) == 0
+    assert "research digest for cn 2026-10-30 dropped" in caplog.text
+    assert not list((tmp_path / "trade_notify" / "research_pending").iterdir())

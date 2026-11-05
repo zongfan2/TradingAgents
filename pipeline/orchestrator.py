@@ -1125,14 +1125,21 @@ class Orchestrator:
         once per slot day, after the slot is recorded finished. Imported
         lazily, guarded, and bounded by DIGEST_DEADLINE_S (the trades store
         lock has no timeout): it never changes the slot's outcome nor holds
-        the slot lock for long. A send cut off by the process exit is
-        kill-safe — the outbox keeps it for the next flush."""
+        the slot lock for long. It is marked pending first (no lock): one
+        not queued in time is retried by the hourly watchdog."""
+
+        try:
+            from pipeline import research_digest
+
+            if self.config.notifications_enabled and self.config.lark_trades_webhook_url:
+                research_digest.mark_pending(self.config, self.session, self.slot_date)
+        except Exception as exc:
+            logger.warning("research digest failed: %s", type(exc).__name__)
+            return
 
         def send() -> None:
             try:
-                from pipeline.research_digest import send_digest
-
-                send_digest(self.config, self.session, self.slot_date)
+                research_digest.send_digest(self.config, self.session, self.slot_date)
             except Exception as exc:
                 logger.warning("research digest failed: %s", type(exc).__name__)
 
@@ -1140,7 +1147,7 @@ class Orchestrator:
         worker.start()
         worker.join(DIGEST_DEADLINE_S)
         if worker.is_alive():
-            logger.warning("research digest still pending after %.0fs — left to the next flush",
+            logger.warning("research digest not queued within %.0fs — the hourly watchdog retries it",
                            DIGEST_DEADLINE_S)
 
     def _finalize(self) -> int:
@@ -1991,6 +1998,12 @@ def _hourly_trade_notifications(config: PipelineConfig, now: datetime) -> None:
 
     trade_notify.run_hourly(state_dir=config.state_dir, send=make_trades_sender(config), now=now,
                             ledger_dir=config.ledger_dir)
+    try:
+        from pipeline import research_digest
+
+        research_digest.retry_pending(config, now.date())
+    except Exception as exc:
+        logger.warning("research digest retry failed: %s", type(exc).__name__)
 
 
 def _alertable_days(session: str, at_time: str, now: datetime) -> list[date]:

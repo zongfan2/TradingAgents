@@ -106,7 +106,9 @@ def _decision(stage: dict[str, Any] | None, session: str) -> str | None:
     if code != "HOLD":
         if details.get("plan_valid") is False:
             text += "，计划无效"
-        if session == "cn" or details.get("execute_eligible") is not True:
+        # Only the brief arm trades; an absent execute_eligible (a stage
+        # rebuilt from files) is unknown, not "no order".
+        if session == "cn" or details.get("arm") == "feeds" or details.get("execute_eligible") is False:
             text += "，不下单"
     return text
 
@@ -178,10 +180,27 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date) -> str:
     return "\n".join(lines)
 
 
+#: A pending digest older than this is dropped (logged) instead of retried.
+PENDING_MAX_DAYS = 3
+
+
+def _pending_dir(config: PipelineConfig) -> Path:
+    return config.state_dir / "trade_notify" / "research_pending"
+
+
+def mark_pending(config: PipelineConfig, session: str, slot_date: date) -> None:
+    """Record, without the trades lock, that this slot's digest is due: it
+    survives a send that never got the lock (the hourly watchdog retries)."""
+    path = _pending_dir(config) / f"{session}_{slot_date.isoformat()}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch()
+
+
 def send_digest(config: PipelineConfig, session: str, slot_date: date) -> int:
     """Queue the slot's digest on the trades channel (once per key) and flush;
-    nothing when notifications are off or the trades webhook is unset.
-    Returns messages sent; never raises."""
+    nothing when notifications are off or the trades webhook is unset. Once
+    queued its pending mark is cleared — a Lark failure afterwards is the
+    outbox's to retry. Returns messages sent; never raises."""
     if not config.notifications_enabled or not config.lark_trades_webhook_url:
         return 0
     try:
@@ -189,9 +208,35 @@ def send_digest(config: PipelineConfig, session: str, slot_date: date) -> int:
         from pipeline.trade_monitor import make_trades_sender
 
         text = build_digest(config, session, slot_date)
-        return trade_notify.enqueue(config.state_dir, digest_key(session, slot_date), text,
+        sent = trade_notify.enqueue(config.state_dir, digest_key(session, slot_date), text,
                                     make_trades_sender(config))
+        (_pending_dir(config) / f"{session}_{slot_date.isoformat()}").unlink(missing_ok=True)
+        return sent
     except Exception as exc:  # never the URL: LarkError text is scrubbed
         reason = str(exc) if exc.__class__.__name__ == "LarkError" else type(exc).__name__
         logger.warning("research digest for %s %s not sent: %s", session, slot_date, reason)
         return 0
+
+
+def retry_pending(config: PipelineConfig, today: date) -> int:
+    """The hourly watchdog's retry of digests a slot end could not queue;
+    one older than PENDING_MAX_DAYS is dropped with an error. Never raises."""
+    sent = 0
+    try:
+        marks = sorted(_pending_dir(config).glob("*_*"))
+    except OSError:
+        return 0
+    for mark in marks:
+        session, _, day = mark.name.partition("_")
+        try:
+            slot_date = date.fromisoformat(day)
+        except ValueError:
+            mark.unlink(missing_ok=True)
+            continue
+        if (today - slot_date).days > PENDING_MAX_DAYS:
+            logger.error("research digest for %s %s dropped: not queued within %d days",
+                         session, slot_date, PENDING_MAX_DAYS)
+            mark.unlink(missing_ok=True)
+            continue
+        sent += send_digest(config, session, slot_date)
+    return sent

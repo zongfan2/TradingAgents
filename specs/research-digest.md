@@ -37,7 +37,8 @@ group** — it is low-frequency (one message per slot, two a day).
   strongest arm, so the brief arm's latest event is read when there is one
   (a feeds-only decision reads `feeds 对照 …`). `BUY|SELL|HOLD（PM rating）`;
   a BUY/SELL adds `，计划无效` when its plan is invalid and `，不下单` when it
-  cannot become an order (cn, or not `execute_eligible`); an analysis error
+  cannot become an order (cn, the feeds arm, or `execute_eligible` false — absent, as on
+  a stage rebuilt from files, is unknown and says nothing); an analysis error
   reads `分析 出错` and **never** carries the error text (it holds API error
   bodies). Analysed names first, then by catalyst score.
 - Macro sections are found by the contract's heading rule (a line starting
@@ -58,8 +59,12 @@ re-run, `--from-step`, or the us execution reopen never sends it again), and
 never ahead of a queued trade message. Off when notifications are disabled
 or the trades webhook is unset. Imported lazily, guarded, and bounded
 (60 s: the trades store lock has no timeout, the slot lock must not wait on
-it): a digest failure is logged and never changes the slot's outcome; a send
-cut off is kept by the outbox for the next flush. The us digest goes
+it): a digest failure is logged and never changes the slot's outcome. The
+slot end first marks the digest pending
+(`trade_notify/research_pending/<session>_<date>`, a plain file, no lock);
+queuing it clears the mark, and the hourly watchdog retries any mark still
+there (one older than 3 days is dropped with an error). Once queued, a Lark
+failure is the outbox's to retry. The us digest goes
 out at slot end (05:30 ET), so its BUY decisions precede the 09:45 order
 messages.
 

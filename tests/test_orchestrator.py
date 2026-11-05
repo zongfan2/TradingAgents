@@ -2136,10 +2136,24 @@ def test_a_stuck_digest_never_holds_the_slot_end(tmp_path, monkeypatch):
     release = _threading.Event()
     monkeypatch.setattr(orchestrator, "DIGEST_DEADLINE_S", 0.2)
     monkeypatch.setattr(research_digest, "send_digest", lambda *a: release.wait(5))
-    config = make_config(tmp_path)
+    config = make_config(tmp_path, lark_trades_webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/abc")
     write_eval(config, "us", SLOT_DATE)
     try:
         assert run_slot(config, "us", FakeRunner({})) == 0
         assert read_status(config, "us")["slot"]["finished_at"]  # recorded before the digest
+        # Not queued in time: marked pending for the hourly watchdog.
+        assert (config.state_dir / "trade_notify" / "research_pending" / f"us_{SLOT_DATE.isoformat()}").exists()
     finally:
         release.set()
+
+
+@pytest.mark.unit
+def test_the_hourly_watchdog_retries_pending_digests(tmp_path, monkeypatch):
+    from pipeline import research_digest, trade_notify
+
+    calls = []
+    monkeypatch.setattr(trade_notify, "run_hourly", lambda **k: None)
+    monkeypatch.setattr(research_digest, "retry_pending", lambda cfg, today: calls.append(today))
+    config = make_config(tmp_path, lark_trades_webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/abc")
+    orchestrator._hourly_trade_notifications(config, NOW)
+    assert calls == [NOW.date()]

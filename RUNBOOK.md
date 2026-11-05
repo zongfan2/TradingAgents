@@ -453,7 +453,9 @@ model call) and sent once per slot day, only by a full slot run (never by
 `--only`). A Lark delivery failure shows up as `trade notification
 research:<session>:<date> not sent` (retried at the next send, dropped with
 an error after 10 failures over 2 hours), a local failure as `research
-digest … not sent` or `research digest failed`, in
+digest … not sent` or `research digest failed`, a slot end that could not
+queue it in 60 s as `research digest not queued … the hourly watchdog
+retries it`, in
 `scheduler.<session>.err.log`.
 
 ## 7b. LLM provider ladder (Claude → OpenAI → DeepSeek)
