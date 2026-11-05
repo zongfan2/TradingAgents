@@ -450,24 +450,25 @@ right after the end-of-slot summary): the macro brief's per-section read
 and every ticker brief with its catalyst, impact line, eval verdict and
 decision (specs/research-digest.md). It is built from the slot's files (no
 model call) and sent once per slot day, only by a full slot run (never by
-`--only`). Where a missing one shows up:
+`--only`). Where a missing one shows up: the slot's own attempt logs to
+`scheduler.<session>.err.log` and the hourly retry to
+`scheduler.watchdog.err.log`. Both run the same build-and-send path, so
+either log can show any of these lines:
 
-- `scheduler.<session>.err.log` — the slot's own attempt:
-  `research digest for <session> <date> not sent` and `research digest
-  failed` (a local failure), `research digest not queued within 60s — the
-  hourly watchdog retries it`, `research digest not started` (no thread
-  could start; also retried), `research digest: skipped a malformed funnel
-  row` (that row only), `research digest: macro brief unreadable` (the
-  macro line only), and `trade notification research:<session>:<date>
-  not sent` (Lark refused it; it stays queued).
-- `scheduler.watchdog.err.log` — the hourly retry: `research digest retry
-  failed`, `research digest for <session> <date> not sent`, `research
-  digest: skipped a malformed funnel row`, `research digest for <session>
-  <date> dropped: not queued within 3 days`, and the queue's
-  `trade notification research:… not sent` / `… dropped after 10 failed
-  sends`.
-- `scheduler.trade-monitor.err.log` — the listener flushes the same queue,
-  so only the `trade notification research:… not sent` / `… dropped` lines.
+- `research digest for <session> <date> not sent` / `research digest
+  failed` — a local failure; the digest stays pending.
+- `research digest not queued within 60s — the hourly watchdog retries it`
+  / `research digest not started` — slot end only; retried.
+- `research digest: macro brief unreadable` / `research digest: skipped a
+  malformed funnel row` — that line or row only; the digest still goes out.
+- `research digest retry failed` — watchdog only.
+- `research digest for <session> <date> dropped: not queued within 3 days`
+  — watchdog only; given up.
+- `trade notification research:<session>:<date> not sent` (Lark refused it,
+  it stays queued) / `… dropped after 10 failed sends` (given up).
+
+`scheduler.trade-monitor.err.log` (the listener flushes the same queue)
+can show only the last pair.
 
 ## 7b. LLM provider ladder (Claude → OpenAI → DeepSeek)
 
