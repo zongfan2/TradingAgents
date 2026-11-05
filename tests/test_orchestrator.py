@@ -2162,9 +2162,10 @@ def test_the_hourly_watchdog_retries_pending_digests(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(trade_notify, "run_hourly", lambda **k: None)
     monkeypatch.setattr(research_digest, "retry_pending", lambda cfg, today: calls.append(today))
+    monkeypatch.setattr(trade_notify, "flush_outbox", lambda state_dir, send: calls.append("flush"))
     config = make_config(tmp_path, lark_trades_webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/abc")
     orchestrator._hourly_trade_notifications(config, NOW)
-    assert calls == [NOW.date()]
+    assert calls == [NOW.date(), "flush"]
 
 
 
@@ -2199,3 +2200,20 @@ def test_a_pending_mark_that_cannot_be_written_still_sends(tmp_path, monkeypatch
     write_eval(config, "us", SLOT_DATE)
     assert run_slot(config, "us", FakeRunner({})) == 0
     assert calls == ["us"]
+
+
+@pytest.mark.unit
+def test_a_refused_digest_is_resent_hourly_without_the_broker(tmp_path, monkeypatch):
+    from pipeline import trade_monitor, trade_notify
+    from pipeline.orchestrator import LarkError
+
+    def refuse(title, text):
+        raise LarkError("code 9499")
+
+    config = make_config(tmp_path, lark_trades_webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/abc")
+    trade_notify.enqueue(config.state_dir, "research:us:2026-01-05", "digest", refuse)
+    sent = []
+    monkeypatch.setattr(trade_monitor, "make_trades_sender", lambda cfg: lambda title, text: sent.append(text))
+    monkeypatch.setattr(trade_notify, "alpaca_keys", lambda: (_ for _ in ()).throw(RuntimeError("no keys")))
+    orchestrator._hourly_trade_notifications(config, NOW)
+    assert sent == ["digest"] and trade_notify.SentStore(config.state_dir).outbox() == []

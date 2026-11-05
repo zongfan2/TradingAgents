@@ -2008,12 +2008,15 @@ def _hourly_trade_notifications(config: PipelineConfig, now: datetime) -> None:
     from pipeline import trade_notify
     from pipeline.trade_monitor import make_trades_sender
 
-    trade_notify.run_hourly(state_dir=config.state_dir, send=make_trades_sender(config), now=now,
+    send = make_trades_sender(config)
+    trade_notify.run_hourly(state_dir=config.state_dir, send=send, now=now,
                             ledger_dir=config.ledger_dir)
     try:
         from pipeline import research_digest
 
         research_digest.retry_pending(config, now.date())
+        # Broker-free: run_hourly flushes only once the broker is up.
+        trade_notify.flush_outbox(config.state_dir, send)
     except Exception as exc:
         logger.warning("research digest retry failed: %s", type(exc).__name__)
 

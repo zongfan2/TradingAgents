@@ -68,7 +68,9 @@ slot end first marks the digest pending
 (`trade_notify/research_pending/<session>_<date>`, a plain file, no lock);
 queuing it clears the mark, and the hourly watchdog retries any mark still
 there (one older than 3 days is dropped with an error). Once queued, a Lark
-failure is the outbox's to retry. The us digest goes
+failure is the outbox's to retry; the hourly watchdog also flushes the outbox
+without the broker (`trade_notify.flush_outbox`), so a queued digest never
+waits for the broker to be healthy. The us digest goes
 out at slot end (the 05:30 ET slot finishes around 07:00–07:30), so its BUY
 decisions precede the 09:45 order messages.
 
