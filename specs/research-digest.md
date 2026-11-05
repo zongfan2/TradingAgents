@@ -63,7 +63,13 @@ line) was hard to read: the user asked why a name with no position was
     cn always `A股不下单`. Execution mode at build time: the kill switch
     (`EXECUTION_HALT`) → `执行已暂停`, `TRADINGAGENTS_EXECUTION_ENABLED` off →
     `模拟`, in the header and in place of `下单`; neither is listed as a
-    planned live order. PM ratings in words: Buy 强烈看多 · Overweight 看多 ·
+    planned live order. With positions unknown a BUY/SELL is **undetermined**
+    (the adapter reads live broker state, so it may still order): the header
+    lists it as `待定：X（持仓未知）`, never `计划下单：无`. A digest built after
+    step 7 (the funnel snapshot's `execute_ran`: a late retry, an inline
+    execution) makes no pre-order claim: `看多/看空（已执行，见交易消息）`,
+    `不操作`. A brief-arm run whose ticker or macro evaluation failed adds
+    `；简报未采用（评估 fail）` (the brief was withheld). PM ratings in words: Buy 强烈看多 · Overweight 看多 ·
     Hold 中性 · Underweight 看淡 · Sell 看空. An analysis error reads
     `分析出错` and **never** carries the error text (API error bodies).
   - **被拦下**: trigger code `eval-fail` — the brief failed evaluation and
@@ -82,10 +88,16 @@ line) was hard to read: the user asked why a name with no position was
   first two sections and — when analysed — the PM view in words with the
   plan's conviction and invalidation (never the internal HOLD/BUY/SELL).
   The prompt frames the brief text as data and forbids new facts and the
-  words 持有/减持/增持/评级/HOLD. Only names with source text are asked (no
-  brief or an analysis error: no summary). Each returned summary is
-  screened: dropped if it contains a forbidden word, exceeds 60 characters,
-  or holds a number its source does not; only the names asked are used.
+  words 持有/减持/增持/评级/HOLD. Only names with source text the decision
+  actually used are asked: no brief, an analysis error, or an analysed run
+  that did not read the brief (a feeds run, a withheld eval-fail brief, a
+  macro-fail feeds-only day) get no summary. Each returned summary is
+  screened: dropped if it contains a forbidden or action word
+  (持有/减持/增持/评级/买入/卖出/加仓/减仓/建仓/清仓/做空/做多/下单/止损/
+  HOLD/BUY/SELL), exceeds 60 characters, or holds a whole number its source
+  (links removed) does not; only the names asked are used. A call that used
+  a web tool is discarded (the CLI keeps web tools on; outside facts would
+  pass every screen).
   Any failure or a 45 s timeout: logged, and the digest goes out without
   them. A re-run whose digest key is already queued or sent builds nothing
   (no model call) and only flushes the outbox.

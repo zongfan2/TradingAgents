@@ -53,8 +53,10 @@ BLOCKER_NAMES = {
 }
 #: Words a summary must not contain (the action is shown separately; the
 #: user asked why "HOLD" appeared for a name with no position).
-_FORBIDDEN = re.compile(r"持有|减持|增持|评级|HOLD|BUY|SELL", re.IGNORECASE)
+_FORBIDDEN = re.compile(r"持有|减持|增持|评级|买入|卖出|加仓|减仓|建仓|清仓|做空|做多|下单|止损|HOLD|BUY|SELL",
+                        re.IGNORECASE)
 SUMMARY_MAX_CHARS = 60
+_NUMBER = re.compile(r"(?<![\d.])\d+(?:\.\d+)?(?![\d.])")
 #: The summary call: one small, cheap model; a tight timeout so the digest
 #: never waits long for it (DIGEST_DEADLINE_S in the orchestrator bounds all).
 DIGEST_SUMMARY_MODEL = "claude-haiku-5-5"
@@ -180,6 +182,14 @@ def _decide_event(stage: dict[str, Any] | None) -> dict[str, Any] | None:
     return brief[-1] if brief else shaped(stage)
 
 
+def _pm_read_the_brief(record: Any | None) -> bool:
+    """Whether the analysed run read this brief: a brief-arm run on a brief
+    neither the ticker nor the macro evaluation failed (a failed one is
+    withheld; a macro fail runs on feeds only — specs/analysis-runner.md)."""
+    return (record is not None and record.arm == "brief"
+            and record.ticker_eval_verdict in ("pass", "warn") and record.macro_eval_verdict != "fail")
+
+
 def order_blocker(record: Any | None, settings: Any) -> str | None:
     """The execution adapter's own reason this decision places no order
     (its candidate filter, then its gate), "unknown" without a ledger row,
@@ -193,8 +203,10 @@ def order_blocker(record: Any | None, settings: Any) -> str | None:
 
 def action_text(code: str | None, rating: str | None, *, session: str, held: bool | None,
                 blocker: str | None, add_intent: bool, mode: str | None,
-                execution_time: str | None) -> tuple[str, bool]:
-    """``(the decision in plain words, whether an order is planned)``.
+                execution_time: str | None) -> tuple[str, bool | None]:
+    """``(the decision in plain words, whether an order is planned)`` —
+    None when that is undetermined (positions unknown: the adapter reads
+    live broker state, so an order may still follow).
 
     HOLD only means "no order": with no position it is "不买", never
     "持有"; an unknown position is said to be unknown. Whether a BUY/SELL
@@ -212,13 +224,18 @@ def action_text(code: str | None, rating: str | None, *, session: str, held: boo
         kept = [part for part in parts if part]
         return f"（{'；'.join(kept)}）" if kept else ""
 
+    if mode == "已执行" and code in ("BUY", "SELL"):
+        # After execution the book holds today's fills: no pre-order claim.
+        return ("看多" if code == "BUY" else "看空") + paren(pm, "已执行，见交易消息"), False
+    if mode == "已执行" and code == "HOLD":
+        return "不操作" + paren(pm), False
     if session == "cn" and code in ("BUY", "SELL"):
         return ("看多" if code == "BUY" else "看空") + "，不下单" + paren(pm, "A股不下单"), False
     if code == "BUY":
         if blocker:
             return "看多，不下单" + paren(pm, BLOCKER_NAMES.get(blocker, blocker)), False
         if held is None:
-            return "看多" + paren(pm, "持仓未知，是否下单待定"), False
+            return "看多" + paren(pm, "持仓未知，是否下单待定"), None if not mode else False
         if held:
             if add_intent:
                 return "可能加仓" + paren(pm, mode or f"{at}按加仓规则"), not mode
@@ -226,7 +243,7 @@ def action_text(code: str | None, rating: str | None, *, session: str, held: boo
         return "买入" + paren(pm, when), not mode
     if code == "SELL":
         if held is None:
-            return "看空" + paren(pm, "持仓未知"), False
+            return "看空" + paren(pm, "持仓未知，是否下单待定"), None if not mode else False
         if not held:
             return "不买" + paren(pm, "无持仓，不做空"), False
         if blocker:
@@ -297,7 +314,7 @@ class _Ticker:
         return "\n".join(part for part in parts if part)
 
 
-def _tickers(config: PipelineConfig, session: str, slot_date: date) -> tuple[list[_Ticker], float | None]:
+def _tickers(config: PipelineConfig, session: str, slot_date: date) -> tuple[list[_Ticker], float | None, bool]:
     """Every ticker of the slot's own session (a wrong-session nominee is
     skipped: brief paths carry no session) with a brief for the slot's date
     or a decision; a malformed funnel row is skipped, never the digest."""
@@ -314,6 +331,8 @@ def _tickers(config: PipelineConfig, session: str, slot_date: date) -> tuple[lis
         threshold: float | None = float(snapshot["context"]["thresholds"]["trigger"])
     except (KeyError, TypeError, ValueError):
         threshold = None
+    context = snapshot.get("context") if isinstance(snapshot.get("context"), dict) else {}
+    executed = context.get("execute_ran") is True
     out = []
     for entry in entries if isinstance(entries, list) else []:
         try:
@@ -330,7 +349,7 @@ def _tickers(config: PipelineConfig, session: str, slot_date: date) -> tuple[lis
             out.append(item)
         except Exception as exc:  # one malformed row never costs the digest
             logger.warning("research digest: skipped a malformed funnel row (%s)", type(exc).__name__)
-    return out, threshold
+    return out, threshold, executed
 
 
 # ---------------------------------------------------------------------------
@@ -397,6 +416,11 @@ def _run_summary(prompt: str) -> str:
     record_usage("research_digest", model, effort, envelope, outcome="ok" if isinstance(output, dict) else "error")
     if not isinstance(output, dict):
         raise RuntimeError("summary call returned no structured output")
+    # The call needs no tools (the CLI keeps web tools on): a summary that
+    # searched or fetched may carry outside facts no screen can see.
+    calls = envelope.get("_tool_calls") if isinstance(envelope.get("_tool_calls"), dict) else {}
+    if any(calls.get(field) for field in ("web_search_queries", "web_fetch_urls", "web_fetch_requests")):
+        raise RuntimeError("summary call used web tools")
     return json.dumps(output)
 
 
@@ -406,7 +430,9 @@ def _screened(summary: str, source: str) -> str | None:
     text = " ".join(summary.split())
     if not text or len(text) > SUMMARY_MAX_CHARS or _FORBIDDEN.search(text):
         return None
-    if any(number not in source for number in re.findall(r"\d+(?:\.\d+)?", text)):
+    # Whole numbers only, and never from a link: a URL's digits vouch for nothing.
+    known = set(_NUMBER.findall(re.sub(r"https?://\S+", " ", source)))
+    if any(number not in known for number in _NUMBER.findall(text)):
         return None
     return text
 
@@ -442,7 +468,7 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date) -> str:
     except Exception as exc:  # e.g. a damaged frontmatter date: the tickers still go out
         logger.warning("research digest: macro brief unreadable (%s)", type(exc).__name__)
         macro, macro_text = "宏观：简报无法读取", None
-    tickers, threshold = _tickers(config, session, slot_date)
+    tickers, threshold, executed = _tickers(config, session, slot_date)
     try:
         held = _held(config)
     except Exception:
@@ -458,6 +484,8 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date) -> str:
         mode = _execution_mode(config) if session == "us" else None
     except Exception:
         settings, mode = None, "执行状态未知"
+    if executed and session == "us":
+        mode = "已执行"  # built after step 7 (a late retry, an inline execution)
     execution_time = config.sessions[session].execution_time if session in config.sessions else None
 
     analysed = sorted((t for t in tickers if t.decide is not None), key=lambda t: (-(t.score or -1), t.ticker))
@@ -467,6 +495,7 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date) -> str:
 
     actions: dict[str, str] = {}
     planned: list[str] = []
+    undecided: list[str] = []
     for t in analysed:
         details = t.decide.get("details") or {}
         record = records.get(str(details.get("run_id")))
@@ -482,12 +511,19 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date) -> str:
             held=None if held is None else t.ticker in held, blocker=blocker,
             add_intent=bool(record is not None and record.plan is not None and record.plan.add_intent),
             mode=mode, execution_time=execution_time)
+        if (record is not None and record.arm == "brief"
+                and (record.ticker_eval_verdict == "fail" or record.macro_eval_verdict == "fail")):
+            text += "；简报未采用（评估 fail）"
         actions[t.ticker] = text
         if ordered:
             planned.append(f"{t.ticker} {text.split('（')[0]}")
+        elif ordered is None:
+            undecided.append(t.ticker)
     inputs = {}
     for t in analysed + blocked:
         record = records.get(str(((t.decide or {}).get("details") or {}).get("run_id")))
+        if t.decide is not None and not _pm_read_the_brief(record):
+            continue  # its brief would be presented as a reason the PM never read
         source = t.summary_input(record.plan if record is not None else None)
         if source:
             inputs[t.ticker] = source
@@ -499,7 +535,10 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date) -> str:
     if session == "cn":
         head.append("A股不下单")
     else:
-        head.append("计划下单" + (f"（{mode}）" if mode else "") + "：" + ("、".join(planned) if planned else "无"))
+        orders = "、".join(planned) if planned else ("" if undecided else "无")
+        if undecided:
+            orders += ("；" if orders else "") + "待定：" + "、".join(undecided) + "（持仓未知）"
+        head.append("计划下单" + (f"（{mode}）" if mode else "") + "：" + orders)
     lines = [" ｜ ".join(head), macro]
     if macro_summary:
         lines.append(f"  要点：{macro_summary}")

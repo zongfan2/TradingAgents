@@ -57,6 +57,8 @@ def _offline_digest_summaries(monkeypatch):
     model (a test that needs summaries injects its own ``_run_summary``)."""
     from pipeline import research_digest
 
+    monkeypatch.setattr(research_digest, "REAL_RUN_SUMMARY", research_digest._run_summary, raising=False)
+
     def offline(prompt):
         raise RuntimeError("digest summaries are offline in tests")
 

@@ -132,14 +132,16 @@ def test_the_digest_groups_tickers_by_outcome_in_plain_words(tmp_path, live):
     # A held BUY is a view refresh unless the plan asks to add (the adapter maintains).
     ("BUY", "Overweight", True, {}, "继续持有（PM 看多；不加仓）", False),
     ("BUY", "Overweight", True, {"add_intent": True}, "可能加仓（PM 看多；09:45 ET 按加仓规则）", True),
-    ("BUY", "Overweight", None, {}, "看多（PM 看多；持仓未知，是否下单待定）", False),
+    ("BUY", "Overweight", None, {}, "看多（PM 看多；持仓未知，是否下单待定）", None),
     ("BUY", "Overweight", False, {"blocker": "action-mismatch"}, "看多，不下单（PM 看多；计划与结论不一致）", False),
     ("BUY", "Overweight", False, {"blocker": "unknown"}, "看多，不下单（PM 看多；下单待核实）", False),
     ("BUY", "Overweight", False, {"mode": "模拟"}, "买入（PM 看多；模拟）", False),
     ("BUY", "Overweight", False, {"mode": "执行已暂停"}, "买入（PM 看多；执行已暂停）", False),
     ("SELL", "Sell", True, {}, "卖出（PM 看空；09:45 ET 下单）", True),
     ("SELL", "Sell", False, {}, "不买（PM 看空；无持仓，不做空）", False),
-    ("SELL", "Sell", None, {}, "看空（PM 看空；持仓未知）", False),
+    ("SELL", "Sell", None, {}, "看空（PM 看空；持仓未知，是否下单待定）", None),
+    ("BUY", "Overweight", True, {"mode": "已执行"}, "看多（PM 看多；已执行，见交易消息）", False),
+    ("HOLD", "Hold", False, {"mode": "已执行"}, "不操作（PM 中性）", False),
     ("ERROR", None, False, {}, "分析出错", False),
 ])
 def test_actions_are_the_adapters_outcome_in_plain_words(code, rating, held, kw, shown, ordered):
@@ -193,8 +195,9 @@ def test_unknown_positions_are_never_read_as_none(tmp_path, live):
             path.write_bytes(state if isinstance(state, bytes) else state.encode())
         text = rd.build_digest(cfg, "us", DAY)
         assert "持仓：" not in text.splitlines()[0], state
-        assert "• MU 4.5 财报 11-17 → 看空（PM 看空；持仓未知）" in text, state
+        assert "• MU 4.5 财报 11-17 → 看空（PM 看空；持仓未知，是否下单待定）" in text, state
         assert "不买" not in text and "无持仓" not in text
+        assert "计划下单：待定：MU（持仓未知）" in text.splitlines()[0]  # never "无" on an unread book
 
 
 @pytest.mark.unit
@@ -262,7 +265,7 @@ def test_chinese_summaries_follow_their_lines_and_their_absence_costs_nothing(tm
     book(cfg)
     write_slot(cfg, briefs={"HUM": ticker_brief("HUM", 8.0, "neutral — n."),
                             "LITE": ticker_brief("LITE", 9.0, "mixed — d.")}, tickers=[
-        entry("HUM", decide=stage("HOLD", arm="brief", pm_rating="Underweight")),
+        entry("HUM", decide=decided(cfg, "HUM", "HOLD", "Underweight", plan=None, eligible=False)),
         entry("LITE", evaluate="fail", trigger="eval-fail")])
     prompts = []
 
@@ -288,8 +291,8 @@ def test_summaries_are_screened_and_names_without_source_are_not_asked(tmp_path,
     cfg = config(tmp_path)
     write_slot(cfg, briefs={"HUM": ticker_brief("HUM", 8.0, "neutral — 11-06 print."),
                             "NVDA": ticker_brief("NVDA", 7.0, "mixed — m.")}, tickers=[
-        entry("HUM", decide=stage("HOLD", arm="brief", pm_rating="Underweight")),
-        entry("NVDA", decide=stage("HOLD", arm="brief", pm_rating="Hold")),
+        entry("HUM", decide=decided(cfg, "HUM", "HOLD", "Underweight", plan=None)),
+        entry("NVDA", decide=decided(cfg, "NVDA", "HOLD", "Hold", plan=None)),
         entry("AAPL", collect="failed", decide=stage("HOLD", arm="feeds", pm_rating="Hold")),  # no brief
         entry("IBM", decide=stage("ERROR"))])
     prompts = []
@@ -506,3 +509,60 @@ def test_a_damaged_macro_frontmatter_costs_only_the_macro_line(tmp_path):
     text = rd.build_digest(cfg, "us", DAY)
     assert text.splitlines()[1] == "宏观：简报无法读取"  # PyYAML raises ValueError on 2026-13-45
     assert "其他：MU 4.5" in text
+
+
+@pytest.mark.unit
+def test_a_brief_the_pm_never_read_is_never_summarized_as_its_reason(tmp_path, monkeypatch):
+    cfg = config(tmp_path)
+    book(cfg)
+    write_slot(cfg, briefs={t: ticker_brief(t, 7.0, f"mixed — {t} text.") for t in ("AAA", "BBB", "CCC")}, tickers=[
+        entry("AAA", decide=decided(cfg, "AAA", "HOLD", "Hold", plan=None, ticker_v="fail")),  # withheld
+        entry("BBB", decide=decided(cfg, "BBB", "HOLD", "Hold", plan=None, macro="fail")),  # feeds-only day
+        entry("CCC", decide=decided(cfg, "CCC", "HOLD", "Hold", plan=None))])
+    prompts = []
+    monkeypatch.setattr(rd, "_run_summary", lambda p: prompts.append(p) or json.dumps({"macro": "", "tickers": []}))
+    text = rd.build_digest(cfg, "us", DAY)
+    assert "[AAA]" not in prompts[0] and "[BBB]" not in prompts[0] and "[CCC]" in prompts[0]
+    assert "• AAA 7.0 财报 11-17 → 不买（PM 中性）；简报未采用（评估 fail）" in text
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("summary", "source", "kept"), [
+    ("股价目标 20 美元。", "catalyst on 2026-11-17 [r](https://x/120)", False),  # 20 only inside 2026 / a URL
+    ("财报在11月17日。", "catalyst on 2026-11-17", True),
+    ("建议买入。", "x", False), ("等待下单时机。", "x", False), ("不宜做空。", "x", False),
+])
+def test_the_summary_screen(summary, source, kept):
+    assert (rd._screened(summary, source) is not None) is kept
+
+
+@pytest.mark.unit
+def test_a_summary_call_that_used_web_tools_is_discarded(monkeypatch):
+    import subprocess
+
+    from pipeline import claude_cli
+
+    envelope = {"structured_output": {"macro": "x", "tickers": []},
+                "_tool_calls": {"web_search_queries": ["q"], "web_fetch_urls": [], "web_fetch_requests": 0}}
+    monkeypatch.setattr(claude_cli, "claude_command", lambda *a, **k: ["claude"])
+    monkeypatch.setattr(claude_cli, "call_env", lambda command: None)
+    monkeypatch.setattr(claude_cli, "parse_envelope", lambda stdout: envelope)
+    monkeypatch.setattr(claude_cli, "record_usage", lambda *a, **k: None)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="{}", stderr=""))
+    with pytest.raises(RuntimeError, match="web tools"):
+        rd.REAL_RUN_SUMMARY("prompt")  # the real call, captured before the offline stub
+
+
+@pytest.mark.unit
+def test_a_digest_built_after_execution_makes_no_pre_order_claim(tmp_path, live):
+    cfg = config(tmp_path)
+    book(cfg, held=["NVDA"])  # today's fill is already in the book
+    write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "m — m.")},
+               tickers=[entry("NVDA", decide=decided(cfg, "NVDA", "BUY", "Overweight"))])
+    path = cfg.state_dir / "funnel" / "us" / f"{DAY}.json"
+    snap = json.loads(path.read_text())
+    snap["context"] = {"execute_ran": True}
+    path.write_text(json.dumps(snap), encoding="utf-8")
+    text = rd.build_digest(cfg, "us", DAY)
+    assert "• NVDA 7.0 财报 11-17 → 看多（PM 看多；已执行，见交易消息）" in text
+    assert "继续持有" not in text and "计划下单（已执行）：无" in text.splitlines()[0]
