@@ -36,7 +36,8 @@ line) was hard to read: the user asked why a name with no position was
 ```
 
 - **Header**: positions from the trades book (`trade_notify/entries.json`;
-  the segment is left out when there is no book) and the planned orders
+  with no book, or one that does not parse, positions are **unknown** — the
+  segment is left out and no line claims 无持仓) and the planned orders
   (us) or `A股不下单` (cn).
 - **Macro**: the revision-bound eval verdict and each of sections 1–6's
   Impact direction (one phrase when all six agree), found by the contract's
@@ -47,20 +48,29 @@ line) was hard to read: the user asked why a name with no position was
   grouped by outcome:
   - **已分析**: the decision of the arm that trades (the brief arm's latest
     decide event when there is one; the stage keeps a paired ticker's
-    strongest arm) in plain words. `HOLD` only means "no order":
-    `不买` without a position (`；无持仓，不做空` when the PM view is
-    Underweight/Sell — the account is long-only), `继续持有` with one;
-    `BUY` → `买入`/`加仓（… 09:45 ET 下单）`; `SELL` → `卖出` with a
-    position, `不买（…不做空）` without; a BUY/SELL that cannot become an
-    order reads `看多/看空，不下单（A股不下单 | 对照分析 | 计划无效 |
-    不满足下单条件）` — only an explicit `execute_eligible: false`, never
-    an absent one. PM ratings in words: Buy 强烈看多 · Overweight 看多 ·
+    strongest arm) in plain words, and whether an order follows decided by
+    the **execution adapter's own rules** on the ledger row of that run
+    (`non_candidate_reason`, then `blocking_reason`; no ledger row → `下单待核实`,
+    a feeds-arm decision → `对照分析`). `HOLD` only means "no order": `不买`
+    without a position (`；无持仓，不做空` for a PM view of Underweight/Sell —
+    the account is long-only), `继续持有` with one, `不操作（持仓未知）` when
+    positions are unknown. `BUY` → `买入（… 09:45 ET 下单）` without a
+    position; on a held name `继续持有（不加仓）` unless the plan sets
+    `add_intent` (`可能加仓（按加仓规则）` — the adapter's add-on gates still
+    apply); `看多（持仓未知，是否下单待定）` when positions are unknown. `SELL`
+    → `卖出` when held, `不买（…不做空）` when not, `看空（持仓未知）` when
+    unknown. A blocked BUY/SELL reads `看多/看空，不下单（<adapter reason>）`;
+    cn always `A股不下单`. Execution mode at build time: the kill switch
+    (`EXECUTION_HALT`) → `执行已暂停`, `TRADINGAGENTS_EXECUTION_ENABLED` off →
+    `模拟`, in the header and in place of `下单`; neither is listed as a
+    planned live order. PM ratings in words: Buy 强烈看多 · Overweight 看多 ·
     Hold 中性 · Underweight 看淡 · Sell 看空. An analysis error reads
     `分析出错` and **never** carries the error text (API error bodies).
   - **被拦下**: trigger code `eval-fail` — the brief failed evaluation and
     was not analysed.
   - **未触发**: one line per trigger code (`core-unchanged`,
-    `below-threshold` — not evaluated by the cost rule —,
+    `below-threshold` — not evaluated by the cost rule; the label shows the
+    snapshot's trigger threshold in force —,
     `core-session-off`, else `其他`) listing ticker and score.
   - Catalyst type and window in Chinese (`MM-DD`, ranges `~`); a window
     wholly before the slot date already happened and is dropped.
@@ -71,9 +81,14 @@ line) was hard to read: the user asked why a name with no position was
   and watchlist, and for each analysed/blocked name its Impact line, the
   first two sections and — when analysed — the PM view in words with the
   plan's conviction and invalidation (never the internal HOLD/BUY/SELL).
-  The prompt forbids new facts and the words 持有/减持/增持/评级/HOLD. Only
-  summaries for the names asked are used. Any failure or a 45 s timeout:
-  logged, and the digest goes out without them.
+  The prompt frames the brief text as data and forbids new facts and the
+  words 持有/减持/增持/评级/HOLD. Only names with source text are asked (no
+  brief or an analysis error: no summary). Each returned summary is
+  screened: dropped if it contains a forbidden word, exceeds 60 characters,
+  or holds a number its source does not; only the names asked are used.
+  Any failure or a 45 s timeout: logged, and the digest goes out without
+  them. A re-run whose digest key is already queued or sent builds nothing
+  (no model call) and only flushes the outbox.
 
 ### D2 — Delivery
 
@@ -101,21 +116,29 @@ decisions precede the 09:45 order messages.
 ## Prior art (specs/README.md rule 6)
 
 No new survey was done, and none is claimed. The digest adds no external
-integration and no new delivery mechanism. It is a formatter over files the
-pipeline already writes, delivered through the trades outbox, whose prior
-art (alpaca-py, freqtrade's per-event notifications, the transactional
-outbox) is recorded in specs/trade-notifications.md. The one new piece, the
-pending mark retried by the hourly watchdog, is that outbox's own pattern
-applied one step earlier: the intent is persisted before the step that can
-fail (here, getting the store lock) and a periodic job finishes it, with an
-age bound so it cannot retry forever.
+integration and no new delivery mechanism: it renders files the pipeline
+already writes, reuses the execution adapter's own candidate and gate rules
+(never a second copy), and makes one call through the existing hermetic CLI
+path (`claude_command`, the provider ladder and usage logging the evaluator
+already uses). Delivery is the trades outbox, whose prior art (alpaca-py,
+freqtrade's per-event notifications, the transactional outbox) is recorded
+in specs/trade-notifications.md. The pending mark retried by the hourly
+watchdog is that outbox's own pattern applied one step earlier: the intent
+is persisted before the step that can fail (getting the store lock) and a
+periodic job finishes it, with an age bound so it cannot retry forever.
 
 ## Acceptance criteria
 
-1. One digest per slot day in the trades group, cn and us, built from the
-   slot's files; analysed names first.
-2. Revision-bound macro verdict; ticker verdicts from the funnel's eval stage.
-3. An analysis error never puts its error text in the message.
-4. No trades webhook or notifications off → nothing sent anywhere; a failure
+1. One Chinese digest per slot day in the trades group, cn and us, grouped
+   as 已分析 / 被拦下 / 未触发 with the reason per group.
+2. An action word never claims an order the execution adapter would not
+   place (its own candidate filter and gate, `add_intent` for add-ons, the
+   execution switch and kill switch), and never claims a position state
+   that was not read (unknown ≠ 无持仓).
+3. Revision-bound macro verdict; blocked = trigger `eval-fail`.
+4. An analysis error never puts its error text in the message.
+5. The summary call is one small schema-bound call; its output is screened;
+   its failure costs only the summary lines; a re-run makes no call.
+6. No trades webhook or notifications off → nothing sent anywhere; a failure
    never changes the slot's outcome.
-5. Tests are offline.
+7. Tests are offline (the summary call is stubbed by an autouse fixture).
