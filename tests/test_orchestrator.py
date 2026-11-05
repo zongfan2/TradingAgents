@@ -2183,3 +2183,19 @@ def test_a_digest_thread_that_cannot_start_changes_nothing(tmp_path, monkeypatch
     assert run_slot(config, "us", FakeRunner({})) == 0
     assert read_status(config, "us")["slot"]["finished_at"]
     assert (config.state_dir / "trade_notify" / "research_pending" / f"us_{SLOT_DATE.isoformat()}").exists()
+
+
+@pytest.mark.unit
+def test_a_pending_mark_that_cannot_be_written_still_sends(tmp_path, monkeypatch):
+    from pipeline import research_digest
+
+    def no_disk(*a):
+        raise OSError("read-only")
+
+    calls = []
+    monkeypatch.setattr(research_digest, "mark_pending", no_disk)
+    monkeypatch.setattr(research_digest, "send_digest", lambda cfg, session, day: calls.append(session))
+    config = make_config(tmp_path, lark_trades_webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/abc")
+    write_eval(config, "us", SLOT_DATE)
+    assert run_slot(config, "us", FakeRunner({})) == 0
+    assert calls == ["us"]

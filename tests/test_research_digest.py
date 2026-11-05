@@ -287,6 +287,9 @@ def test_every_digest_log_line_is_in_the_runbook():
     assert len(pieces) >= 8
     for piece in pieces:
         assert piece in section, piece
+    # The one line nothing retries says so.
+    failed = section[section.index("`research digest failed`"):][:120]
+    assert "slot end only" in failed and "not retried" in failed
 
 
 @pytest.mark.unit

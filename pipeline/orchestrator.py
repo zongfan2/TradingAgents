@@ -1136,12 +1136,15 @@ class Orchestrator:
 
         try:
             from pipeline import research_digest
-
-            if self.config.notifications_enabled and self.config.lark_trades_webhook_url:
-                research_digest.mark_pending(self.config, self.session, self.slot_date)
-        except Exception as exc:
+        except Exception as exc:  # a broken module: nothing can send it, nothing retries
             logger.warning("research digest failed: %s", type(exc).__name__)
             return
+        if self.config.notifications_enabled and self.config.lark_trades_webhook_url:
+            try:
+                research_digest.mark_pending(self.config, self.session, self.slot_date)
+            except Exception as exc:  # still sent now, just without the retry mark
+                logger.warning("research digest not marked pending (%s) — sending without a retry",
+                               type(exc).__name__)
 
         def send() -> None:
             try:

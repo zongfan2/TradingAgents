@@ -455,10 +455,14 @@ model call) and sent once per slot day, only by a full slot run (never by
 `scheduler.watchdog.err.log`. Both run the same build-and-send path, so
 either log can show any of these lines:
 
-- `research digest for <session> <date> not sent` / `research digest
-  failed` — a local failure; the digest stays pending.
+- `research digest for <session> <date> not sent` — a local failure; the
+  digest stays pending and is retried.
 - `research digest not queued within 60s — the hourly watchdog retries it`
   / `research digest not started` — slot end only; retried.
+- `research digest not marked pending … — sending without a retry` — slot
+  end only; sent at once, but not retried if that send fails.
+- `research digest failed` — slot end only (the module could not load);
+  **not retried**: re-run the slot once fixed.
 - `research digest: macro brief unreadable` / `research digest: skipped a
   malformed funnel row` — that line or row only; the digest still goes out.
 - `research digest retry failed` — watchdog only.
