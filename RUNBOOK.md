@@ -417,8 +417,11 @@ Run-volume cuts (same spec, R6): `TRADINGAGENTS_CORE_ANALYSIS_SESSIONS=us`
 makes cn slots catalyst-only (core tickers carry funnel code
 `core-session-off`); `TRADINGAGENTS_CORE_SKIP_UNCHANGED=on` skips a core
 ticker whose last HOLD is ≤ 4 trading days old when nothing changed (no
-position, no catalyst ≥ trigger) — funnel code `core-unchanged`; every core
-ticker still gets a full run at least weekly. A session outside
+position, no catalyst ≥ trigger, and no price move since that HOLD: no
+session ≥ 5 %, total < 8 %) — funnel code `core-unchanged`; every core
+ticker still gets a full run at least weekly. Unknown price data (a
+yfinance failure, a stale tape, a gap, a split) runs the ticker, so a
+data outage or a holiday raises core run volume. A session outside
 `TRADINGAGENTS_CORE_ANALYSIS_SESSIONS` also collects and evaluates no core
 briefs (R8). The Claude CLI steps (collection, evaluation) bill the same
 Anthropic key and count toward the same monthly budget; once it is spent

@@ -224,6 +224,8 @@ def test_snapshot_shows_a_cost_cut_core_ticker_from_its_event_or_as_unknown(tmp_
 @pytest.mark.unit
 @pytest.mark.parametrize(("move", "runs"), [
     ((4.9, 7.9), False),          # below both bars: still unchanged
+    ((4.996, 1.0), True),         # shows as 5.00%, like the tape's ⚠
+    ((1.0, 7.996), True),
     ((5.0, 1.0), True),           # one session at the bar
     ((3.0, 8.0), True),           # a slow grind to the total bar
     (None, True),                 # unknown move is doubt

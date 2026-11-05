@@ -1030,7 +1030,9 @@ def select_core_runs(
         except Exception as exc:  # no price data is doubt, and runs
             logger.warning("%s: price move unknown (%s) — runs", ticker, type(exc).__name__)
             move = None
-        if move is None or move[0] >= CORE_MOVE_SESSION_PCT or move[1] >= CORE_MOVE_TOTAL_PCT:
+        # Judged as shown (2 decimals), like the tape's ⚠: never a 5.00% skip.
+        if (move is None or round(move[0], 2) >= CORE_MOVE_SESSION_PCT
+                or round(move[1], 2) >= CORE_MOVE_TOTAL_PCT):
             logger.info("%s: core run despite an unchanged HOLD — price move %s since %s", ticker,
                         "unknown" if move is None else f"{move[0]:.1f}% max session, {move[1]:.1f}% total",
                         row["date"])

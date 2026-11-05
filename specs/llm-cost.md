@@ -161,7 +161,8 @@ caches common prefixes automatically. Behavior is otherwise unchanged
   skipped on 11-05 following −7%/−8% sessions, the day before a −17%/−22%
   one): over the sessions on or after the HOLD's date (it was decided
   before that day's open) and before the slot date, no session change
-  reaches `CORE_MOVE_SESSION_PCT` = 5 % (the price tape's ⚠ level) and the
+  reaches `CORE_MOVE_SESSION_PCT` = 5 % (the price tape's ⚠ level; both bars
+  are judged on the value rounded to 2 decimals, as the tape shows it) and the
   total change from the last close before the HOLD stays below
   `CORE_MOVE_TOTAL_PCT` = 8 %; daily closes from the price tape's source
   (`price_tape.fetch_daily_closes`). No data, a read failure, a tape behind
