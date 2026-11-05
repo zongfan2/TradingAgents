@@ -682,7 +682,10 @@ def test_the_coverage_rules_are_in_both_session_prompts(brief_dir):
                        "if you found none, say which names you searched",
                        "second-order effects on the sectors it touches",
                        "for `us`, US index futures and the largest pre-market movers",
-                       "for `cn`, the last US session's close and after-hours movers",
+                       "for `cn`, the last US session's close and after-hours movers and the Asian index "
+                       "futures before the open",
+                       "each with its stated reason, or say it was not found",
+                       "Name each report you found with its date, the guidance versus consensus and the move",
                        "Sections 1–6 each end with `**Impact**: bullish|bearish|neutral|mixed"):
             assert clause in prompt, (session, clause)
         assert "{{" not in prompt

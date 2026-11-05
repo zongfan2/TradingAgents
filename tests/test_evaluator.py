@@ -260,7 +260,9 @@ def test_ticker_consistency_prompt_includes_catalyst_inflation_instruction(tmp_p
     assert evaluate_brief(macro_brief, runner=macro_runner) == EXIT_OK
     assert "catalyst_score" not in macro_runner.prompts[0]
     # The macro brief's own consistency rule: an all-mixed read with no reason given.
-    assert "every Impact line reads 'mixed'" in macro_runner.prompts[0]
+    macro_prompt = " ".join(macro_runner.prompts[0].split())
+    assert "every Impact line reads 'mixed'" in macro_prompt
+    assert "flag it under coverage with severity 'minor'" in macro_prompt  # never a verdict change by itself
     assert "every Impact line reads 'mixed'" not in prompt
 
 
