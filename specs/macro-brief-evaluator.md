@@ -44,7 +44,10 @@ opportunity brief whose `catalyst_score` ≥ the analysis trigger threshold.
   For macro briefs (2026-11-06): every Impact line `mixed` with rationales
   that never say why the forces balance or which matters most is a `minor`
   coverage flag — no read at all (the 11-05 brief; the collector is not
-  forced to pick a direction, specs/macro-brief-collector.md R1).
+  forced to pick a direction, specs/macro-brief-collector.md R1). This flag
+  alone must not take any dimension score below 6, so it never changes the
+  verdict by itself (`compute_verdict` ignores `minor` flags but warns on
+  any score below 6).
 
 ## Requirements
 
