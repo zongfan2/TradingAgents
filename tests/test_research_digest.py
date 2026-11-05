@@ -140,8 +140,9 @@ def test_the_digest_groups_tickers_by_outcome_in_plain_words(tmp_path, live):
     ("SELL", "Sell", True, {}, "卖出（PM 看空；09:45 ET 下单）", True),
     ("SELL", "Sell", False, {}, "不买（PM 看空；无持仓，不做空）", False),
     ("SELL", "Sell", None, {}, "看空（PM 看空；持仓未知，是否下单待定）", None),
-    ("BUY", "Overweight", True, {"mode": "已执行"}, "看多（PM 看多；已执行，见交易消息）", False),
-    ("HOLD", "Hold", False, {"mode": "已执行"}, "不操作（PM 中性）", False),
+    # A blocked SELL is no order whatever the (unknown) position.
+    ("SELL", "Sell", None, {"blocker": "ticker-eval-fail"}, "看空，不下单（PM 看空；简报评估 fail）", False),
+    ("SELL", "Sell", None, {"blocker": "feeds-arm"}, "看空，不下单（PM 看空；对照分析）", False),
     ("ERROR", None, False, {}, "分析出错", False),
 ])
 def test_actions_are_the_adapters_outcome_in_plain_words(code, rating, held, kw, shown, ordered):
@@ -554,15 +555,59 @@ def test_a_summary_call_that_used_web_tools_is_discarded(monkeypatch):
 
 
 @pytest.mark.unit
-def test_a_digest_built_after_execution_makes_no_pre_order_claim(tmp_path, live):
+def test_a_digest_built_after_execution_tells_each_names_own_outcome(tmp_path, live):
     cfg = config(tmp_path)
     book(cfg, held=["NVDA"])  # today's fill is already in the book
-    write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "m — m.")},
-               tickers=[entry("NVDA", decide=decided(cfg, "NVDA", "BUY", "Overweight"))])
+    write_slot(cfg, briefs={t: ticker_brief(t, 7.0, "m — m.") for t in ("NVDA", "AMD", "MU", "INTC", "TSLA")},
+               tickers=[
+        {**entry("NVDA", decide=decided(cfg, "NVDA", "BUY", "Overweight")), "final": "order-live",
+         "stages": {**entry("NVDA", decide=decided(cfg, "NVDA", "BUY", "Overweight", n=2))["stages"],
+                    "execute": stage("submitted")}},
+        {**entry("AMD", decide=decided(cfg, "AMD", "BUY", "Overweight")), "final": "order-dry"},
+        {**entry("MU", decide={**stage("BUY", arm="feeds", pm_rating="Overweight")}), "final": "excluded"},
+        {"ticker": "INTC", "final": "excluded", "stages": {
+            "collect": stage("written"), "decide": decided(cfg, "INTC", "BUY", "Overweight", ticker_v="fail"),
+            "execute": stage("ticker-eval-fail")}},
+        {**entry("TSLA", decide=decided(cfg, "TSLA", "HOLD", "Hold", plan=None)), "final": "excluded"},
+    ])
     path = cfg.state_dir / "funnel" / "us" / f"{DAY}.json"
     snap = json.loads(path.read_text())
     snap["context"] = {"execute_ran": True}
     path.write_text(json.dumps(snap), encoding="utf-8")
     text = rd.build_digest(cfg, "us", DAY)
-    assert "• NVDA 7.0 财报 11-17 → 看多（PM 看多；已执行，见交易消息）" in text
-    assert "继续持有" not in text and "计划下单（已执行）：无" in text.splitlines()[0]
+    assert "• NVDA 7.0 财报 11-17 → 看多（PM 看多；已下单，见交易消息）" in text
+    assert "• AMD 7.0 财报 11-17 → 看多（PM 看多；模拟单）" in text
+    assert "• MU 7.0 财报 11-17 → 看多（PM 看多；未下单）" in text
+    assert "• INTC 7.0 财报 11-17 → 看多（PM 看多；未下单：简报评估 fail）" in text
+    assert "• TSLA 7.0 财报 11-17 → 不操作（PM 中性）" in text
+    assert "继续持有" not in text and "已执行：NVDA 已下单" in text.splitlines()[0]
+
+
+@pytest.mark.unit
+def test_triggered_names_without_a_decision_say_so(tmp_path):
+    cfg = config(tmp_path)
+    write_slot(cfg, briefs={"HUM": ticker_brief("HUM", 8.0, "m — m."), "LITE": ticker_brief("LITE", 7.5, "m — m.")},
+               tickers=[{"ticker": "HUM", "stages": {"collect": stage("written"),
+                                                     "trigger": {"code": "catalyst", "outcome": "passed"}}},
+                        {"ticker": "LITE", "stages": {"collect": stage("written"),
+                                                      "trigger": {"code": "budget-dropped", "outcome": "passed"}}}])
+    text = rd.build_digest(cfg, "us", DAY)
+    assert "• 已触发，因预算上限未分析：LITE 7.5" in text
+    assert "• 已触发但无分析结果（运行失败或被中止）：HUM 8.0" in text and "其他" not in text
+
+
+@pytest.mark.unit
+def test_a_billed_search_without_query_text_also_discards(monkeypatch):
+    import subprocess
+
+    from pipeline import claude_cli
+
+    envelope = {"structured_output": {"macro": "x", "tickers": []},
+                "modelUsage": {"m": {"webSearchRequests": 1}}, "_tool_calls": {}}
+    monkeypatch.setattr(claude_cli, "claude_command", lambda *a, **k: ["claude"])
+    monkeypatch.setattr(claude_cli, "call_env", lambda command: None)
+    monkeypatch.setattr(claude_cli, "parse_envelope", lambda stdout: envelope)
+    monkeypatch.setattr(claude_cli, "record_usage", lambda *a, **k: None)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="{}", stderr=""))
+    with pytest.raises(RuntimeError, match="web tools"):
+        rd.REAL_RUN_SUMMARY("prompt")

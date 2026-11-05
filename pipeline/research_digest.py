@@ -42,6 +42,8 @@ SKIP_REASONS = (
     ("core-unchanged", "近几日已分析且无新变化，不重复"),
     ("below-threshold", "机会池分数 <{threshold}，未评估"),
     ("core-session-off", "A股核心股本时段不分析"),
+    ("budget-dropped", "已触发，因预算上限未分析"),
+    ("triggered", "已触发但无分析结果（运行失败或被中止）"),
 )
 #: Execution-adapter codes for "no order" (non_candidate_reason /
 #: blocking_reason), in words.
@@ -50,6 +52,8 @@ BLOCKER_NAMES = {
     "no-plan": "无交易计划", "plan-invalid": "计划无效", "action-mismatch": "计划与结论不一致",
     "incomplete-plan": "计划不完整", "manual-trigger": "手动触发", "macro-eval-fail": "宏观简报评估 fail",
     "ticker-eval-fail": "简报评估 fail", "eval-missing": "缺少评估", "unknown": "下单待核实",
+    # execute-stage codes (the adapter's own outcome, after step 7)
+    "stale-quote": "报价过期", "no-position": "无持仓", "maintain": "维持原仓", "budget": "超出风险限额",
 }
 #: Words a summary must not contain (the action is shown separately; the
 #: user asked why "HOLD" appeared for a name with no position).
@@ -201,6 +205,28 @@ def order_blocker(record: Any | None, settings: Any) -> str | None:
     return non_candidate_reason(record) or blocking_reason(record, settings)
 
 
+def executed_text(code: str | None, rating: str | None, *, final: str | None,
+                  execute: dict[str, Any] | None) -> str:
+    """After step 7 the trades book holds today's fills, so no line claims a
+    pre-order position: the adapter's own outcome for this name is told
+    (its funnel ``final`` and execute stage)."""
+    if code == "ERROR":
+        return "分析出错"
+    view = RATING_NAMES.get(str(rating), str(rating)) if rating else None
+    pm = f"PM {view}" if view else None
+    lean = {"BUY": "看多", "SELL": "看空"}.get(str(code))
+    if lean is None:
+        return "不操作" + (f"（{pm}）" if pm else "")
+    if final == "order-live":
+        outcome = "已下单，见交易消息"
+    elif final == "order-dry":
+        outcome = "模拟单"
+    else:
+        reason = (execute or {}).get("code")
+        outcome = "未下单" + (f"：{BLOCKER_NAMES.get(str(reason), str(reason))}" if reason else "")
+    return lean + "（" + "；".join(part for part in (pm, outcome) if part) + "）"
+
+
 def action_text(code: str | None, rating: str | None, *, session: str, held: bool | None,
                 blocker: str | None, add_intent: bool, mode: str | None,
                 execution_time: str | None) -> tuple[str, bool | None]:
@@ -224,11 +250,6 @@ def action_text(code: str | None, rating: str | None, *, session: str, held: boo
         kept = [part for part in parts if part]
         return f"（{'；'.join(kept)}）" if kept else ""
 
-    if mode == "已执行" and code in ("BUY", "SELL"):
-        # After execution the book holds today's fills: no pre-order claim.
-        return ("看多" if code == "BUY" else "看空") + paren(pm, "已执行，见交易消息"), False
-    if mode == "已执行" and code == "HOLD":
-        return "不操作" + paren(pm), False
     if session == "cn" and code in ("BUY", "SELL"):
         return ("看多" if code == "BUY" else "看空") + "，不下单" + paren(pm, "A股不下单"), False
     if code == "BUY":
@@ -242,12 +263,13 @@ def action_text(code: str | None, rating: str | None, *, session: str, held: boo
             return "继续持有" + paren(pm, "不加仓"), False
         return "买入" + paren(pm, when), not mode
     if code == "SELL":
+        if blocker:  # the adapter rejects the row whatever the position
+            return ("不买" + paren(pm, "无持仓，不做空")) if held is False else (
+                "看空，不下单" + paren(pm, BLOCKER_NAMES.get(blocker, blocker))), False
         if held is None:
             return "看空" + paren(pm, "持仓未知，是否下单待定"), None if not mode else False
         if not held:
             return "不买" + paren(pm, "无持仓，不做空"), False
-        if blocker:
-            return "看空，不下单" + paren(pm, BLOCKER_NAMES.get(blocker, blocker)), False
         return "卖出" + paren(pm, when), not mode
     if code == "HOLD":
         if held is None:
@@ -272,7 +294,8 @@ def _catalyst(meta: dict[str, Any], slot_date: date) -> str:
 
 
 class _Ticker:
-    def __init__(self, ticker: str, stages: dict[str, Any], brief: str | None, slot_date: date) -> None:
+    def __init__(self, ticker: str, stages: dict[str, Any], brief: str | None, slot_date: date,
+                 entry_final: str | None = None) -> None:
         self.ticker = ticker
         self.stages = stages
         meta, body, _errors = split_frontmatter(brief or "")
@@ -285,7 +308,14 @@ class _Ticker:
         self.has_brief = brief is not None
         self.body = body if brief is not None else ""
         self.decide = _decide_event(stages.get("decide"))
-        self.trigger = (stages.get("trigger") or {}).get("code")
+        trigger = stages.get("trigger") or {}
+        # A ticker that met the trigger but has no decision (budget guard,
+        # a failed run) is "triggered", never "not triggered" — other.
+        self.trigger = trigger.get("code") if trigger.get("outcome") != "passed" else (
+            "budget-dropped" if trigger.get("code") == "budget-dropped" else "triggered")
+        self.final = entry_final
+        execute = stages.get("execute")
+        self.execute = execute if isinstance(execute, dict) else None
 
     def head(self) -> str:
         score = f"{self.score:.1f}" if self.score is not None else "–"
@@ -343,7 +373,8 @@ def _tickers(config: PipelineConfig, session: str, slot_date: date) -> tuple[lis
             if not isinstance(stages, dict):
                 raise TypeError("stages")
             brief = _read(config.ticker_brief_dir / ticker / f"{slot_date.isoformat()}.md")
-            item = _Ticker(ticker, stages, brief, slot_date)
+            final = entry.get("final")
+            item = _Ticker(ticker, stages, brief, slot_date, final if isinstance(final, str) else None)
             if brief is None and item.decide is None:
                 continue
             out.append(item)
@@ -419,7 +450,10 @@ def _run_summary(prompt: str) -> str:
     # The call needs no tools (the CLI keeps web tools on): a summary that
     # searched or fetched may carry outside facts no screen can see.
     calls = envelope.get("_tool_calls") if isinstance(envelope.get("_tool_calls"), dict) else {}
-    if any(calls.get(field) for field in ("web_search_queries", "web_fetch_urls", "web_fetch_requests")):
+    from pipeline.claude_cli import _web_search_requests
+
+    if (any(calls.get(field) for field in ("web_search_queries", "web_fetch_urls", "web_fetch_requests"))
+            or _web_search_requests(envelope) > 0):  # a billed search may carry no query text
         raise RuntimeError("summary call used web tools")
     return json.dumps(output)
 
@@ -484,8 +518,7 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date) -> str:
         mode = _execution_mode(config) if session == "us" else None
     except Exception:
         settings, mode = None, "执行状态未知"
-    if executed and session == "us":
-        mode = "已执行"  # built after step 7 (a late retry, an inline execution)
+    executed = executed and session == "us"  # built after step 7 (a late retry, an inline execution)
     execution_time = config.sessions[session].execution_time if session in config.sessions else None
 
     analysed = sorted((t for t in tickers if t.decide is not None), key=lambda t: (-(t.score or -1), t.ticker))
@@ -506,11 +539,17 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date) -> str:
                 blocker = order_blocker(record, settings) if settings is not None else "unknown"
         except Exception:
             blocker = "unknown"
-        text, ordered = action_text(
-            t.decide.get("code"), details.get("pm_rating"), session=session,
-            held=None if held is None else t.ticker in held, blocker=blocker,
-            add_intent=bool(record is not None and record.plan is not None and record.plan.add_intent),
-            mode=mode, execution_time=execution_time)
+        if executed:
+            text = executed_text(t.decide.get("code"), details.get("pm_rating"), final=t.final, execute=t.execute)
+            ordered = False
+            if t.final == "order-live":
+                planned.append(f"{t.ticker} 已下单")
+        else:
+            text, ordered = action_text(
+                t.decide.get("code"), details.get("pm_rating"), session=session,
+                held=None if held is None else t.ticker in held, blocker=blocker,
+                add_intent=bool(record is not None and record.plan is not None and record.plan.add_intent),
+                mode=mode, execution_time=execution_time)
         if (record is not None and record.arm == "brief"
                 and (record.ticker_eval_verdict == "fail" or record.macro_eval_verdict == "fail")):
             text += "；简报未采用（评估 fail）"
@@ -531,14 +570,15 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date) -> str:
 
     head = [f"📊 研究摘要 · {SESSION_NAMES.get(session, session)} · {slot_date.isoformat()[5:]}"]
     if held is not None:
-        head.append("持仓：" + ("、".join(sorted(held)) if held else "无"))
+        head.append("持仓：" + ("、".join(sorted(held)) if held else "无"))  # now (after execution: with today's fills)
     if session == "cn":
         head.append("A股不下单")
     else:
         orders = "、".join(planned) if planned else ("" if undecided else "无")
         if undecided:
             orders += ("；" if orders else "") + "待定：" + "、".join(undecided) + "（持仓未知）"
-        head.append("计划下单" + (f"（{mode}）" if mode else "") + "：" + orders)
+        head.append(("已执行：" + ("、".join(planned) if planned else "无下单")) if executed else
+                    "计划下单" + (f"（{mode}）" if mode else "") + "：" + orders)
     lines = [" ｜ ".join(head), macro]
     if macro_summary:
         lines.append(f"  要点：{macro_summary}")

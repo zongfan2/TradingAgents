@@ -67,14 +67,21 @@ line) was hard to read: the user asked why a name with no position was
     (the adapter reads live broker state, so it may still order): the header
     lists it as `待定：X（持仓未知）`, never `计划下单：无`. A digest built after
     step 7 (the funnel snapshot's `execute_ran`: a late retry, an inline
-    execution) makes no pre-order claim: `看多/看空（已执行，见交易消息）`,
-    `不操作`. A brief-arm run whose ticker or macro evaluation failed adds
+    execution) makes no pre-order claim and tells each name's own adapter
+    outcome from its funnel entry: `final` `order-live` → `已下单，见交易消息`,
+    `order-dry` → `模拟单`, otherwise `未下单：<execute-stage reason>`; HOLD →
+    `不操作`; the header reads `已执行：X 已下单` (or `无下单`). A blocked SELL is
+    `看空，不下单（reason）` even with positions unknown (the adapter rejects
+    the row whatever the position). A brief-arm run whose ticker or macro evaluation failed adds
     `；简报未采用（评估 fail）` (the brief was withheld). PM ratings in words: Buy 强烈看多 · Overweight 看多 ·
     Hold 中性 · Underweight 看淡 · Sell 看空. An analysis error reads
     `分析出错` and **never** carries the error text (API error bodies).
   - **被拦下**: trigger code `eval-fail` — the brief failed evaluation and
     was not analysed.
-  - **未触发**: one line per trigger code (`core-unchanged`,
+  - **未触发**: one line per reason — a ticker that met the trigger but has
+    no decision is never "not triggered": `budget-dropped` →
+    `已触发，因预算上限未分析`, any other passed trigger without a decision →
+    `已触发但无分析结果（运行失败或被中止）`; then per trigger code (`core-unchanged`,
     `below-threshold` — not evaluated by the cost rule; the label shows the
     snapshot's trigger threshold in force —,
     `core-session-off`, else `其他`) listing ticker and score.
@@ -96,8 +103,8 @@ line) was hard to read: the user asked why a name with no position was
   (持有/减持/增持/评级/买入/卖出/加仓/减仓/建仓/清仓/做空/做多/下单/止损/
   HOLD/BUY/SELL), exceeds 60 characters, or holds a whole number its source
   (links removed) does not; only the names asked are used. A call that used
-  a web tool is discarded (the CLI keeps web tools on; outside facts would
-  pass every screen).
+  a web tool is discarded — by its tool-call fields or a billed search count
+  (the CLI keeps web tools on; outside facts would pass every screen).
   Any failure or a 45 s timeout: logged, and the digest goes out without
   them. A re-run whose digest key is already queued or sent builds nothing
   (no model call) and only flushes the outbox.
