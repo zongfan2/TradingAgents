@@ -41,8 +41,10 @@ The robust version below replaces this one-liner.
   (semiconductors / AI infrastructure first) with the move each caused;
   Geopolitics states an election or policy outcome's second-order sector
   effects; the Watchlist adds index futures and the largest pre-market
-  movers with their reasons; `mixed` only when opposing forces are of
-  similar size, else the dominant direction with the offsetting risk named.
+  movers with their reasons. (A "dominant direction instead of `mixed`"
+  rule was tried and dropped: on a re-collection of 11-05 it turned four
+  sections `bullish` on a −4.4% day — a forced call is worse than honest
+  uncertainty; an all-`mixed` brief is the evaluator's to flag.)
 - **R2 — Generate**: invoke the deep-search backend. The primary backend is
   selectable via config `collect_backend` (env `TRADINGAGENTS_COLLECT_BACKEND`),
   default `claude` per D20 — a hermetic web-only `claude -p` (`--safe-mode`,

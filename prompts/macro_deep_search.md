@@ -21,7 +21,10 @@ Caixin) over aggregators and commentary blogs.
    mega-caps and sector bellwethers — semiconductors and AI infrastructure
    above all (e.g. NVDA, AMD, AVGO, QCOM, TSM, MU, the hyperscalers) — with
    the after-hours or pre-market move each caused; search for them explicitly
-   (e.g. "after-hours earnings guidance <previous session date>").
+   (e.g. "after-hours earnings guidance <previous session date>", "<company>
+   earnings guidance after the bell"). Name each report you found with its
+   date, the guidance versus consensus and the move; if you found none, say
+   which names you searched.
 3. **Geopolitics & Trade** — conflicts, sanctions, tariffs, export controls,
    elections with market impact. For an election or policy outcome, state its
    second-order effects on the sectors it touches (regulation, energy, data
@@ -50,9 +53,6 @@ Caixin) over aggregators and commentary blogs.
   readings only.
 - Sections 1–6 each end with `**Impact**: bullish|bearish|neutral|mixed — <one-line rationale>`
   describing the marginal impact on global risk assets versus yesterday.
-  Use `mixed` only when the opposing forces are genuinely of similar size;
-  otherwise pick the direction that dominates and name the offsetting risk in
-  the rationale. Six `mixed` sections tell a reader nothing.
 - Total length 800–1500 words. Dense beats long.
 
 # Output format (exactly this, starting at the frontmatter)
