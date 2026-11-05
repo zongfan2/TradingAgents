@@ -20,9 +20,10 @@ import json
 import logging
 import re
 import subprocess
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from pipeline.common import session_for_ticker
 from pipeline.config import PipelineConfig
@@ -53,14 +54,22 @@ BLOCKER_NAMES = {
     "incomplete-plan": "计划不完整", "manual-trigger": "手动触发", "macro-eval-fail": "宏观简报评估 fail",
     "ticker-eval-fail": "简报评估 fail", "eval-missing": "缺少评估", "unknown": "下单待核实",
     # execute-stage codes (the adapter's own outcome, after step 7)
-    "stale-quote": "报价过期", "no-position": "无持仓", "maintain": "维持原仓", "budget": "超出风险限额",
+    "stale-quote": "报价过期", "no-position": "无持仓", "maintain": "维持原仓",
+    "total-risk": "总风险超限", "gross-exposure": "总敞口超限", "max-positions": "持仓数已满",
+    "max-orders-per-slot": "本时段下单数已满", "buying-power": "购买力不足",
+    "per-ticker-notional-cap": "单股金额超限", "guard-unavailable": "风控数据不可用",
+    "market-closed": "休市", "not-tradable": "不可交易", "zero-qty": "仓位计算为零",
+    "max-tranches": "加仓次数已满", "pyramid-up-only": "只在盈利时加仓", "add-spacing": "加仓间隔不足",
+    "cancel-failed": "撤单失败", "recovery-unavailable": "恢复数据不可用", "submit-error": "提交出错",
+    "adapter-error": "执行程序出错", "rejected": "券商拒单", "manual-shadowed": "被手动重跑取代",
+    "dedupe": "重复订单", "execution-window-passed": "执行时间已过，未执行",
 }
 #: Words a summary must not contain (the action is shown separately; the
 #: user asked why "HOLD" appeared for a name with no position).
 _FORBIDDEN = re.compile(r"持有|减持|增持|评级|买入|卖出|加仓|减仓|建仓|清仓|做空|做多|下单|止损|HOLD|BUY|SELL",
                         re.IGNORECASE)
 SUMMARY_MAX_CHARS = 60
-_NUMBER = re.compile(r"(?<![\d.])\d+(?:\.\d+)?(?![\d.])")
+_NUMBER = re.compile(r"(?<![\d.])\d+(?:\.\d+)?(?!\d)(?!\.\d)")  # "520." is 520
 #: The summary call: one small, cheap model; a tight timeout so the digest
 #: never waits long for it (DIGEST_DEADLINE_S in the orchestrator bounds all).
 DIGEST_SUMMARY_MODEL = "claude-haiku-5-5"
@@ -194,14 +203,20 @@ def _pm_read_the_brief(record: Any | None) -> bool:
             and record.ticker_eval_verdict in ("pass", "warn") and record.macro_eval_verdict != "fail")
 
 
-def order_blocker(record: Any | None, settings: Any) -> str | None:
+def order_blocker(record: Any | None, settings: Any, records: dict[str, Any] | None = None) -> str | None:
     """The execution adapter's own reason this decision places no order
     (its candidate filter, then its gate), "unknown" without a ledger row,
-    None for an order candidate."""
-    from pipeline.execution_adapter import blocking_reason, non_candidate_reason
+    None for an order candidate. Like the adapter, only the latest attempt
+    per (ticker, arm) of the slot counts: a later (manual) attempt shadows
+    this row, which step 7 then never handles."""
+    from pipeline.execution_adapter import _attempt_number, blocking_reason, non_candidate_reason
 
     if record is None:
         return "unknown"
+    for other in (records or {}).values():
+        if (other.date == record.date and other.session == record.session and other.ticker == record.ticker
+                and other.arm == record.arm and _attempt_number(other.run_id) > _attempt_number(record.run_id)):
+            return "manual-shadowed"
     return non_candidate_reason(record) or blocking_reason(record, settings)
 
 
@@ -222,8 +237,8 @@ def executed_text(code: str | None, rating: str | None, *, final: str | None,
     elif final == "order-dry":
         outcome = "模拟单"
     else:
-        reason = (execute or {}).get("code")
-        outcome = "未下单" + (f"：{BLOCKER_NAMES.get(str(reason), str(reason))}" if reason else "")
+        reason = BLOCKER_NAMES.get(str((execute or {}).get("code")))  # never a raw English code
+        outcome = "未下单" + (f"：{reason}" if reason else "")
     return lean + "（" + "；".join(part for part in (pm, outcome) if part) + "）"
 
 
@@ -254,7 +269,7 @@ def action_text(code: str | None, rating: str | None, *, session: str, held: boo
         return ("看多" if code == "BUY" else "看空") + "，不下单" + paren(pm, "A股不下单"), False
     if code == "BUY":
         if blocker:
-            return "看多，不下单" + paren(pm, BLOCKER_NAMES.get(blocker, blocker)), False
+            return "看多，不下单" + paren(pm, BLOCKER_NAMES.get(blocker, "不满足下单条件")), False
         if held is None:
             return "看多" + paren(pm, "持仓未知，是否下单待定"), None if not mode else False
         if held:
@@ -265,7 +280,7 @@ def action_text(code: str | None, rating: str | None, *, session: str, held: boo
     if code == "SELL":
         if blocker:  # the adapter rejects the row whatever the position
             return ("不买" + paren(pm, "无持仓，不做空")) if held is False else (
-                "看空，不下单" + paren(pm, BLOCKER_NAMES.get(blocker, blocker))), False
+                "看空，不下单" + paren(pm, BLOCKER_NAMES.get(blocker, "不满足下单条件"))), False
         if held is None:
             return "看空" + paren(pm, "持仓未知，是否下单待定"), None if not mode else False
         if not held:
@@ -495,7 +510,22 @@ def summaries(macro_text: str | None, items: dict[str, str]) -> tuple[str | None
 # ---------------------------------------------------------------------------
 
 
-def build_digest(config: PipelineConfig, session: str, slot_date: date) -> str:
+def _window_passed(execution_time: str | None, slot_date: date, now: datetime) -> bool:
+    """Whether the slot day's execute window (execution time + the
+    orchestrator's acceptance tolerance, New York) is over."""
+    if not execution_time:
+        return False
+    from pipeline.common import SESSION_TZ
+    from pipeline.config import parse_slot_time
+    from pipeline.orchestrator import SLOT_WINDOW_MINUTES
+
+    hour, minute = parse_slot_time(execution_time)
+    close = datetime(slot_date.year, slot_date.month, slot_date.day, hour, minute,
+                     tzinfo=ZoneInfo(SESSION_TZ["us"])) + timedelta(minutes=SLOT_WINDOW_MINUTES)
+    return now > close
+
+
+def build_digest(config: PipelineConfig, session: str, slot_date: date, now: datetime | None = None) -> str:
     """The digest text for one slot; never raises on a missing or partial input."""
     try:
         macro, macro_text = macro_read(config, session, slot_date)
@@ -519,6 +549,15 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date) -> str:
     except Exception:
         settings, mode = None, "执行状态未知"
     executed = executed and session == "us"  # built after step 7 (a late retry, an inline execution)
+    try:
+        late = (session == "us" and not executed and mode is None
+                and _window_passed(config.sessions["us"].execution_time, slot_date,
+                                   now or datetime.now(timezone.utc)))
+    except Exception:
+        late = False
+    if late:
+        # Step 7 did not run and its window is over: no order follows on its own.
+        mode = "执行时间已过，未执行"
     execution_time = config.sessions[session].execution_time if session in config.sessions else None
 
     analysed = sorted((t for t in tickers if t.decide is not None), key=lambda t: (-(t.score or -1), t.ticker))
@@ -536,7 +575,7 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date) -> str:
             if record is None and details.get("arm") == "feeds":
                 blocker = "feeds-arm"  # the feeds arm never trades, row or not
             else:
-                blocker = order_blocker(record, settings) if settings is not None else "unknown"
+                blocker = order_blocker(record, settings, records) if settings is not None else "unknown"
         except Exception:
             blocker = "unknown"
         if executed:

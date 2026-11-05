@@ -531,6 +531,7 @@ def test_a_brief_the_pm_never_read_is_never_summarized_as_its_reason(tmp_path, m
 @pytest.mark.parametrize(("summary", "source", "kept"), [
     ("股价目标 20 美元。", "catalyst on 2026-11-17 [r](https://x/120)", False),  # 20 only inside 2026 / a URL
     ("财报在11月17日。", "catalyst on 2026-11-17", True),
+    ("股价目标 520.", "catalyst on 2026-11-17", False),  # a sentence-ending period is not part of it
     ("建议买入。", "x", False), ("等待下单时机。", "x", False), ("不宜做空。", "x", False),
 ])
 def test_the_summary_screen(summary, source, kept):
@@ -611,3 +612,45 @@ def test_a_billed_search_without_query_text_also_discards(monkeypatch):
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="{}", stderr=""))
     with pytest.raises(RuntimeError, match="web tools"):
         rd.REAL_RUN_SUMMARY("prompt")
+
+
+@pytest.mark.unit
+def test_after_the_execution_window_no_timed_order_is_promised(tmp_path, live):
+    from datetime import datetime, timezone
+
+    from pipeline.config import SessionSchedule
+
+    cfg = PipelineConfig(state_dir=tmp_path, sessions={
+        "cn": SessionSchedule(), "us": SessionSchedule(execution_time="09:45")})
+    book(cfg)
+    write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "m — m.")},
+               tickers=[entry("NVDA", decide=decided(cfg, "NVDA", "BUY", "Overweight"))])
+    before = rd.build_digest(cfg, "us", DAY, now=datetime(2026, 11, 4, 12, 0, tzinfo=timezone.utc))  # 07:00 ET
+    assert "计划下单：NVDA 买入" in before and "09:45 ET 下单" in before
+    after = rd.build_digest(cfg, "us", DAY, now=datetime(2026, 11, 4, 15, 30, tzinfo=timezone.utc))  # 10:30 ET
+    assert "计划下单（执行时间已过，未执行）：无" in after and "09:45 ET 下单" not in after
+
+
+@pytest.mark.unit
+def test_a_later_manual_attempt_shadows_the_scheduled_decision(tmp_path, live):
+    cfg = config(tmp_path)
+    book(cfg)
+    decide = decided(cfg, "NVDA", "BUY", "Overweight")
+    write_decision(cfg, ticker="NVDA", n=2, trigger="manual", plan=BUY_PLAN, date_iso=DAY.isoformat())
+    write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "m — m.")}, tickers=[entry("NVDA", decide=decide)])
+    text = rd.build_digest(cfg, "us", DAY)
+    assert "• NVDA 7.0 财报 11-17 → 看多，不下单（PM 看多；被手动重跑取代）" in text and "计划下单：无" in text
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("code", ["stale-quote", "no-position", "maintain", "total-risk", "gross-exposure",
+                                  "max-positions", "max-orders-per-slot", "buying-power", "per-ticker-notional-cap",
+                                  "guard-unavailable", "market-closed", "not-tradable", "zero-qty", "max-tranches",
+                                  "pyramid-up-only", "add-spacing", "cancel-failed", "recovery-unavailable",
+                                  "submit-error", "adapter-error", "rejected", "manual-shadowed", "dedupe",
+                                  "some-new-code"])
+def test_execute_stage_reasons_read_in_chinese(code):
+    import re
+
+    text = rd.executed_text("BUY", "Overweight", final="excluded", execute={"code": code})
+    assert text.startswith("看多（PM 看多；未下单") and not re.search(r"[a-z]+-[a-z]+", text), text

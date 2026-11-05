@@ -69,10 +69,16 @@ line) was hard to read: the user asked why a name with no position was
     step 7 (the funnel snapshot's `execute_ran`: a late retry, an inline
     execution) makes no pre-order claim and tells each name's own adapter
     outcome from its funnel entry: `final` `order-live` → `已下单，见交易消息`,
-    `order-dry` → `模拟单`, otherwise `未下单：<execute-stage reason>`; HOLD →
+    `order-dry` → `模拟单`, otherwise `未下单：<execute-stage reason in
+    Chinese>` (an unmapped code reads plain `未下单`, never the raw code); HOLD →
     `不操作`; the header reads `已执行：X 已下单` (or `无下单`). A blocked SELL is
     `看空，不下单（reason）` even with positions unknown (the adapter rejects
-    the row whatever the position). A brief-arm run whose ticker or macro evaluation failed adds
+    the row whatever the position). Like the adapter, only the latest
+    attempt per (ticker, arm) of the slot counts: a later (manual) attempt
+    shadows the scheduled row → `被手动重跑取代`. Past the slot day's execute
+    window (execution time + the orchestrator's 15-minute tolerance, New
+    York) with step 7 not run (a late manual slot, a slot that overran) the
+    mode is `执行时间已过，未执行`: no timed order is promised. A brief-arm run whose ticker or macro evaluation failed adds
     `；简报未采用（评估 fail）` (the brief was withheld). PM ratings in words: Buy 强烈看多 · Overweight 看多 ·
     Hold 中性 · Underweight 看淡 · Sell 看空. An analysis error reads
     `分析出错` and **never** carries the error text (API error bodies).
