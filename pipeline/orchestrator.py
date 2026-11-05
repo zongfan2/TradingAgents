@@ -943,9 +943,15 @@ class Orchestrator:
             # outcome must be recorded in the status file — before step 6.
             eval_thread.join()
             run_steps(_POST_BARRIER_STEPS)
-            return self._finalize()
+            result = self._finalize()
         finally:
             release_slot_lock(lock)
+        # After the lock is released: "slot finished and lock held" means an
+        # execute run (execute_slot), so nothing may wait while holding it.
+        # A single-component run must not take the day's digest.
+        if self._only is None:
+            self._send_research_digest()
+        return result
 
     # -- one component ------------------------------------------------------
 
@@ -1122,10 +1128,10 @@ class Orchestrator:
 
     def _send_research_digest(self) -> None:
         """specs/research-digest.md: the slot's research to the trades group,
-        once per slot day, after the slot is recorded finished. Imported
-        lazily, guarded, and bounded by DIGEST_DEADLINE_S (the trades store
-        lock has no timeout): it never changes the slot's outcome nor holds
-        the slot lock for long. It is marked pending first (no lock): one
+        once per slot day, after the slot is recorded finished and its lock
+        released. Imported lazily, guarded, and bounded by DIGEST_DEADLINE_S
+        (the trades store lock has no timeout): it never changes the slot's
+        outcome. It is marked pending first (no lock): one
         not queued in time is retried by the hourly watchdog."""
 
         try:
@@ -1196,8 +1202,6 @@ class Orchestrator:
             details=self._execution_orders,
         )
         self.status.finish_slot(to_utc_iso(self.clock()))
-        if self._only is None:  # a single-component run must not take the day's digest
-            self._send_research_digest()
         return 1 if problems else 0
 
 

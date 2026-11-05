@@ -2135,11 +2135,19 @@ def test_a_stuck_digest_never_holds_the_slot_end(tmp_path, monkeypatch):
 
     release = _threading.Event()
     monkeypatch.setattr(orchestrator, "DIGEST_DEADLINE_S", 0.2)
-    monkeypatch.setattr(research_digest, "send_digest", lambda *a: release.wait(5))
     config = make_config(tmp_path, lark_trades_webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/abc")
     write_eval(config, "us", SLOT_DATE)
+    lock_free = []
+
+    def blocked(*a):
+        # The slot lock is already released while the digest waits.
+        lock_free.append(not orchestrator.slot_lock_path(config, "us", SLOT_DATE).exists())
+        release.wait(5)
+
+    monkeypatch.setattr(research_digest, "send_digest", blocked)
     try:
         assert run_slot(config, "us", FakeRunner({})) == 0
+        assert lock_free == [True]
         assert read_status(config, "us")["slot"]["finished_at"]  # recorded before the digest
         # Not queued in time: marked pending for the hourly watchdog.
         assert (config.state_dir / "trade_notify" / "research_pending" / f"us_{SLOT_DATE.isoformat()}").exists()
@@ -2157,3 +2165,4 @@ def test_the_hourly_watchdog_retries_pending_digests(tmp_path, monkeypatch):
     config = make_config(tmp_path, lark_trades_webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/abc")
     orchestrator._hourly_trade_notifications(config, NOW)
     assert calls == [NOW.date()]
+

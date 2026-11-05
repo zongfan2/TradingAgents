@@ -450,13 +450,17 @@ right after the end-of-slot summary): the macro brief's per-section read
 and every ticker brief with its catalyst, impact line, eval verdict and
 decision (specs/research-digest.md). It is built from the slot's files (no
 model call) and sent once per slot day, only by a full slot run (never by
-`--only`). A Lark delivery failure shows up as `trade notification
-research:<session>:<date> not sent` (retried at the next send, dropped with
-an error after 10 failures over 2 hours), a local failure as `research
-digest … not sent` or `research digest failed`, a slot end that could not
-queue it in 60 s as `research digest not queued … the hourly watchdog
-retries it`, in
-`scheduler.<session>.err.log`.
+`--only`). Where a missing one shows up:
+
+- `scheduler.<session>.err.log` (the slot's own attempt): `research digest
+  … not sent` / `research digest failed` (a local failure), `research
+  digest not queued within 60s — the hourly watchdog retries it`, and
+  `trade notification research:<session>:<date> not sent` (Lark refused it;
+  it stays queued).
+- `scheduler.watchdog.err.log` and `scheduler.trade-monitor.err.log`
+  (later retries of the queue and of pending digests): the same lines, plus
+  `trade notification research:… dropped after 10 failed sends` and
+  `research digest for <session> <date> dropped: not queued within 3 days`.
 
 ## 7b. LLM provider ladder (Claude → OpenAI → DeepSeek)
 

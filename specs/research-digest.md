@@ -52,7 +52,9 @@ group** — it is low-frequency (one message per slot, two a day).
 
 At the end of every **full** slot run (never a single-component `--only`
 run, which would take the day's key with a partial slot), after the ops
-end-of-slot summary and after the slot is recorded finished, through
+end-of-slot summary, after the slot is recorded finished and after the slot
+lock is released (a finished slot whose lock is held means an execute run to
+`execute_slot`, so nothing waits while holding it), through
 the trades outbox (`trade_notify.enqueue`, specs/trade-notifications.md T3)
 under the key `research:<session>:<date>`: exactly once per slot day (a
 re-run, `--from-step`, or the us execution reopen never sends it again), and
@@ -67,6 +69,18 @@ there (one older than 3 days is dropped with an error). Once queued, a Lark
 failure is the outbox's to retry. The us digest goes
 out at slot end (05:30 ET), so its BUY decisions precede the 09:45 order
 messages.
+
+## Prior art (specs/README.md rule 6)
+
+No new survey was done, and none is claimed. The digest adds no external
+integration and no new delivery mechanism. It is a formatter over files the
+pipeline already writes, delivered through the trades outbox, whose prior
+art (alpaca-py, freqtrade's per-event notifications, the transactional
+outbox) is recorded in specs/trade-notifications.md. The one new piece, the
+pending mark retried by the hourly watchdog, is that outbox's own pattern
+applied one step earlier: the intent is persisted before the step that can
+fail (here, getting the store lock) and a periodic job finishes it, with an
+age bound so it cannot retry forever.
 
 ## Acceptance criteria
 

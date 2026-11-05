@@ -168,9 +168,10 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date) -> str:
     raw = _read(snapshot_path(config.state_dir, session, slot_date))
     if raw is not None:
         try:
-            snapshot = json.loads(raw)
+            parsed = json.loads(raw)
         except json.JSONDecodeError:
-            snapshot = {}
+            parsed = None
+        snapshot = parsed if isinstance(parsed, dict) else {}
     rows = [row for entry in snapshot.get("tickers") or [] if isinstance(entry, dict)
             if (row := ticker_line(config, entry, slot_date, session)) is not None]
     rows.sort(key=lambda row: row[0])

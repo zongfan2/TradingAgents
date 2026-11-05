@@ -123,8 +123,9 @@ def test_missing_inputs_still_give_a_digest(tmp_path):
     assert text.splitlines() == ["📊 研究摘要 · 美股 · 2026-11-04", "宏观：无简报", "个股：无简报"]
     cfg = config(tmp_path)
     (cfg.state_dir / "funnel" / "us").mkdir(parents=True)
-    (cfg.state_dir / "funnel" / "us" / f"{DAY}.json").write_text("{not json", encoding="utf-8")
-    assert "个股：无简报" in rd.build_digest(cfg, "us", DAY)
+    for corrupt in ("{not json", "[]", "3", '{"tickers": {"MU": 1}}'):
+        (cfg.state_dir / "funnel" / "us" / f"{DAY}.json").write_text(corrupt, encoding="utf-8")
+        assert "个股：无简报" in rd.build_digest(cfg, "us", DAY), corrupt
 
 
 @pytest.mark.unit
