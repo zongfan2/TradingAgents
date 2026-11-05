@@ -513,7 +513,7 @@ LARK_TIMEOUT_S = 10.0
 #: POST runs on a daemon thread that is abandoned past this.
 LARK_DEADLINE_S = 15.0
 #: How long a slot end waits for the research digest (lock + build + send).
-DIGEST_DEADLINE_S = 60.0
+DIGEST_DEADLINE_S = 90.0
 
 
 class LarkError(RuntimeError):

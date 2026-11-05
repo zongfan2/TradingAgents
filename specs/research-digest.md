@@ -13,42 +13,67 @@ group** — it is low-frequency (one message per slot, two a day).
 
 ## Design
 
-### D1 — Content (Chinese labels; brief text quoted as written)
+### D1 — Content (v2, 2026-11-06)
+
+The first version (per-ticker lines with English impact rationales cut at
+110 characters, raw `HOLD（PM …）`, a bare `未评估` / `评估 warn` on every
+line) was hard to read: the user asked why a name with no position was
+"HOLD", why briefs were "未评估", and found the lines incomplete. v2:
 
 ```
-📊 研究摘要 · 美股 · 2026-11-04
-宏观（评估 warn）：利率 偏空 · 增长 分歧 · 地缘 分歧 · 流动性 分歧 · 大宗 分歧 · 中国/亚洲 分歧
-个股 15 只，分析 2 只：
-• HUM 8.0 earnings 2026-11-06 · 中性 — <impact rationale>｜评估 warn｜分析 HOLD（PM Hold）
-• LITE 8.0 earnings 2026-11-05 · 分歧 — <impact rationale>｜评估 fail
-• FN 2.0 earnings 2026-11-02 · 偏多 — <impact rationale>｜未评估
+📊 研究摘要 · 美股 · 11-05 ｜ 持仓：无 ｜ 计划下单：无
+宏观（评估 warn）：6 个板块均为分歧
+  要点：<one Chinese sentence>
+已分析（2）
+• HUM 8.0 财报 11-06 → 不买（PM 看淡；无持仓，不做空）
+  <one Chinese sentence>
+被拦下（1）
+• LITE 9.0 财报 11-05 → 简报评估 fail，未分析
+  <one Chinese sentence>
+未触发（12）
+• 近几日已分析且无新变化，不重复：SPCX 5.0 · MU 4.5 · …
+• 机会池分数 <7，未评估：FN 4.0 · CHRW 2.0 · FTNT 2.0
 ```
 
-- **Macro**: the revision-bound eval verdict of `<date>.<session>.md`
-  (`未评估` without one) and the `**Impact**` word of each of sections 1–6
-  (bullish 偏多 · bearish 偏空 · neutral 中性 · mixed 分歧).
-- **Tickers**: every ticker of the slot's own session (a wrong-session
-  nominee is skipped: brief paths carry no session) in the funnel snapshot that has a brief
-  for the slot's date (written now, or already there when a slot re-fires)
-  or a decision (a core ticker is analysed even when its collection failed:
-  `（无简报）`) — catalyst score, type and window (`none`/`other` omitted),
-  the final `**Impact**` line (rationale cut to 110 characters), the
-  funnel's eval stage (`评估 pass|warn|fail`, else `未评估`), and the
-  decision of the arm that trades: the decide stage keeps a paired ticker's
-  strongest arm, so the brief arm's latest event is read when there is one
-  (a feeds-only decision reads `feeds 对照 …`). `BUY|SELL|HOLD（PM rating）`;
-  a BUY/SELL adds `，计划无效` when its plan is invalid and `，不下单` when it
-  cannot become an order (cn, the feeds arm, or `execute_eligible` false — absent, as on
-  a stage rebuilt from files, is unknown and says nothing); an analysis error
-  reads `分析 出错` and **never** carries the error text (it holds API error
-  bodies). Analysed names first, then by catalyst score.
-- Macro sections are found by the contract's heading rule (a line starting
-  `##` and whitespace), so a body without a blank line after the frontmatter
-  loses nothing.
-- Built only from files the slot already wrote — no model call, no cost. A
-  missing or unreadable input gives a shorter digest (`宏观：无简报`,
-  `宏观：简报无法读取`, `个股：无简报`, a malformed row skipped), never an
-  exception.
+- **Header**: positions from the trades book (`trade_notify/entries.json`;
+  the segment is left out when there is no book) and the planned orders
+  (us) or `A股不下单` (cn).
+- **Macro**: the revision-bound eval verdict and each of sections 1–6's
+  Impact direction (one phrase when all six agree), found by the contract's
+  heading rule.
+- **Tickers** — every ticker of the slot's own session (a wrong-session
+  nominee is skipped: brief paths carry no session) with a brief for the
+  slot date or a decision; a malformed row is skipped, never the digest —
+  grouped by outcome:
+  - **已分析**: the decision of the arm that trades (the brief arm's latest
+    decide event when there is one; the stage keeps a paired ticker's
+    strongest arm) in plain words. `HOLD` only means "no order":
+    `不买` without a position (`；无持仓，不做空` when the PM view is
+    Underweight/Sell — the account is long-only), `继续持有` with one;
+    `BUY` → `买入`/`加仓（… 09:45 ET 下单）`; `SELL` → `卖出` with a
+    position, `不买（…不做空）` without; a BUY/SELL that cannot become an
+    order reads `看多/看空，不下单（A股不下单 | 对照分析 | 计划无效 |
+    不满足下单条件）` — only an explicit `execute_eligible: false`, never
+    an absent one. PM ratings in words: Buy 强烈看多 · Overweight 看多 ·
+    Hold 中性 · Underweight 看淡 · Sell 看空. An analysis error reads
+    `分析出错` and **never** carries the error text (API error bodies).
+  - **被拦下**: trigger code `eval-fail` — the brief failed evaluation and
+    was not analysed.
+  - **未触发**: one line per trigger code (`core-unchanged`,
+    `below-threshold` — not evaluated by the cost rule —,
+    `core-session-off`, else `其他`) listing ticker and score.
+  - Catalyst type and window in Chinese (`MM-DD`, ranges `~`); a window
+    wholly before the slot date already happened and is dropped.
+- **Chinese summaries**: one call for the whole digest on
+  `DIGEST_SUMMARY_MODEL` (Haiku, effort low, ladder-routed like every
+  pipeline call, logged as component `research_digest`; measured ≈ $0.002
+  and 8 s), schema-bound JSON. Input: the macro brief's Impact rationales
+  and watchlist, and for each analysed/blocked name its Impact line, the
+  first two sections and — when analysed — the PM view in words with the
+  plan's conviction and invalidation (never the internal HOLD/BUY/SELL).
+  The prompt forbids new facts and the words 持有/减持/增持/评级/HOLD. Only
+  summaries for the names asked are used. Any failure or a 45 s timeout:
+  logged, and the digest goes out without them.
 
 ### D2 — Delivery
 
@@ -62,8 +87,7 @@ under the key `research:<session>:<date>`: exactly once per slot day (a
 re-run, `--from-step`, or the us execution reopen never sends it again), and
 never ahead of a queued trade message. Off when notifications are disabled
 or the trades webhook is unset. Imported lazily, guarded, and bounded
-(60 s: the trades store lock has no timeout, the slot lock must not wait on
-it): a digest failure is logged and never changes the slot's outcome. The
+(90 s: the summary call plus the trades store lock, which has no timeout): a digest failure is logged and never changes the slot's outcome. The
 slot end first marks the digest pending
 (`trade_notify/research_pending/<session>_<date>`, a plain file, no lock);
 queuing it clears the mark, and the hourly watchdog retries any mark still
