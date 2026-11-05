@@ -297,3 +297,21 @@ def test_the_skip_reason_shows_the_move_as_judged():
     run_, skipped = select(["AAA"], [row("AAA", "2026-08-06")], snapshot(), score=5.0,
                            move=lambda *_: (4.96, 7.96))
     assert run_ == [] and "price moved 7.96% since (max session 4.96%)" in skipped[0][2]
+
+
+@pytest.mark.unit
+def test_prices_are_read_only_for_a_ticker_that_would_be_skipped():
+    seen = []
+
+    def price(ticker, since, slot_date):
+        seen.append(ticker)
+        return 0.0, 0.0
+
+    rows = [row("HLD", "2026-08-06"), row("TOD", "2026-08-07"), row("BUY", "2026-08-06", "BUY"),
+            row("OLD", "2026-07-31"), row("HIG", "2026-08-06"), row("EVF", "2026-08-06"), row("SKP", "2026-08-06")]
+    score = {"HLD": 5.0, "TOD": 5.0, "BUY": 5.0, "OLD": 5.0, "HIG": 8.0, "SKP": 5.0,
+             "EVF": ar.BriefInfo("fail", catalyst_score=5.0)}
+    run_, skipped = select(["HLD", "TOD", "BUY", "OLD", "HIG", "EVF", "SKP"], rows, snapshot("HLD"),
+                           score=score, move=price)
+    assert run_ == ["HLD", "TOD", "BUY", "OLD", "HIG", "EVF"] and [s[0] for s in skipped] == ["SKP"]
+    assert seen == ["SKP"]  # no fetch for held / decided today / non-HOLD / stale / high score / eval fail
