@@ -452,15 +452,21 @@ decision (specs/research-digest.md). It is built from the slot's files (no
 model call) and sent once per slot day, only by a full slot run (never by
 `--only`). Where a missing one shows up:
 
-- `scheduler.<session>.err.log` (the slot's own attempt): `research digest
-  … not sent` / `research digest failed` (a local failure), `research
-  digest not queued within 60s — the hourly watchdog retries it`, and
-  `trade notification research:<session>:<date> not sent` (Lark refused it;
-  it stays queued).
-- `scheduler.watchdog.err.log` and `scheduler.trade-monitor.err.log`
-  (later retries of the queue and of pending digests): the same lines, plus
-  `trade notification research:… dropped after 10 failed sends` and
-  `research digest for <session> <date> dropped: not queued within 3 days`.
+- `scheduler.<session>.err.log` — the slot's own attempt:
+  `research digest for <session> <date> not sent` and `research digest
+  failed` (a local failure), `research digest not queued within 60s — the
+  hourly watchdog retries it`, `research digest not started` (no thread
+  could start; also retried), `research digest: skipped a malformed funnel
+  row` (that row only), and `trade notification research:<session>:<date>
+  not sent` (Lark refused it; it stays queued).
+- `scheduler.watchdog.err.log` — the hourly retry: `research digest retry
+  failed`, `research digest for <session> <date> not sent`, `research
+  digest: skipped a malformed funnel row`, `research digest for <session>
+  <date> dropped: not queued within 3 days`, and the queue's
+  `trade notification research:… not sent` / `… dropped after 10 failed
+  sends`.
+- `scheduler.trade-monitor.err.log` — the listener flushes the same queue,
+  so only the `trade notification research:… not sent` / `… dropped` lines.
 
 ## 7b. LLM provider ladder (Claude → OpenAI → DeepSeek)
 

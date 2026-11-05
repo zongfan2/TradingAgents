@@ -269,3 +269,21 @@ def test_one_malformed_row_does_not_cost_the_others(tmp_path):
     write_slot(cfg, briefs={"MU": ticker_brief("MU", 4.5, "mixed — m.")},
                tickers=[{"ticker": "BAD", "stages": []}, entry("MU", evaluate="warn")])
     assert "• MU 4.5" in rd.build_digest(cfg, "us", DAY)
+
+
+@pytest.mark.unit
+def test_every_digest_log_line_is_in_the_runbook():
+    import re
+
+    root = Path(__file__).resolve().parents[1]
+    section = root.joinpath("RUNBOOK.md").read_text(encoding="utf-8").split("## 7a.")[1].split("## 7b.")[0]
+    section = " ".join(section.split())
+    sources = [root / "pipeline" / "research_digest.py", root / "pipeline" / "orchestrator.py"]
+    pieces = []
+    for source in sources:
+        for literal in re.findall(r'logger\.(?:warning|error)\(\s*"(research digest[^"]*)"', source.read_text()):
+            # Every literal piece between the format placeholders.
+            pieces += [p.strip(" :()") for p in re.split(r"%[-.0-9]*[sdf]", literal) if len(p.strip(" :()")) > 3]
+    assert len(pieces) >= 8
+    for piece in pieces:
+        assert piece in section, piece
