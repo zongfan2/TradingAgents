@@ -829,6 +829,15 @@ def enqueue(state_dir: str | Path, key: str, text: str, send: Sender | None) -> 
         return _flush(outbox, send, persist=store.save_outbox)
 
 
+def flush_outbox(state_dir: str | Path, send: Sender | None) -> int:
+    """Send what is already queued, head first, without the broker: a
+    queued non-trade message (the research digest) must not wait for the
+    broker to be healthy. Returns messages sent."""
+    store = SentStore(state_dir)
+    with store.exclusive():
+        return _flush(store.outbox(), send, persist=store.save_outbox)
+
+
 def _flush(
     outbox: list[dict[str, Any]],
     send: Sender | None,

@@ -445,6 +445,35 @@ cancel/expiry/reject within seconds; the hourly watchdog re-sends anything
 it missed and, after 16:15 ET on trading days, the daily report. It only
 reads the paper account. Check it: `~/.tradingagents/scheduler.trade-monitor.err.log`.
 
+The trades group also gets one **research digest** per slot (cn and us,
+right after the end-of-slot summary): the macro brief's per-section read
+and every ticker brief with its catalyst, impact line, eval verdict and
+decision (specs/research-digest.md). It is built from the slot's files (no
+model call) and sent once per slot day, only by a full slot run (never by
+`--only`). Where a missing one shows up: the slot's own attempt logs to
+`scheduler.<session>.err.log` and the hourly retry to
+`scheduler.watchdog.err.log`. Both run the same build-and-send path, so
+either log can show any of these lines:
+
+- `research digest for <session> <date> not sent` — a local failure; the
+  digest stays pending and is retried.
+- `research digest not queued within 60s — the hourly watchdog retries it`
+  / `research digest not started` — slot end only; retried.
+- `research digest not marked pending … — sending without a retry` — slot
+  end only; sent at once, but not retried if that send fails.
+- `research digest failed` — slot end only (the module could not load);
+  **not retried**: re-run the slot once fixed.
+- `research digest: macro brief unreadable` / `research digest: skipped a
+  malformed funnel row` — that line or row only; the digest still goes out.
+- `research digest retry failed` — watchdog only.
+- `research digest for <session> <date> dropped: not queued within 3 days`
+  — watchdog only; given up.
+- `trade notification research:<session>:<date> not sent` (Lark refused it,
+  it stays queued) / `… dropped after 10 failed sends` (given up).
+
+`scheduler.trade-monitor.err.log` (the listener flushes the same queue)
+can show only the last pair.
+
 ## 7b. LLM provider ladder (Claude → OpenAI → DeepSeek)
 
 With `TRADINGAGENTS_LLM_ROUTING=ladder` (specs/llm-provider-ladder.md) the

@@ -158,6 +158,12 @@ def _verdict(inputs: _Inputs, brief: Path) -> str:
     return "missing"
 
 
+def eval_verdict(config: PipelineConfig, brief: Path) -> str:
+    """The brief's revision-bound eval verdict (``pass``/``warn``/``fail``/
+    ``missing``) — :func:`_verdict` for callers outside a snapshot build."""
+    return _verdict(_Inputs(config), brief)
+
+
 def _catalyst_score(inputs: _Inputs, brief: Path) -> float | None:
     text = inputs.text(brief)
     if text is None:

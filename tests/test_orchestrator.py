@@ -2090,3 +2090,130 @@ def test_funnel_failure_is_a_warn_never_a_slot_failure(tmp_path, monkeypatch):
     assert "failures" not in summary
     log = orchestrator.orchestrator_log_path(config).read_text(encoding="utf-8")
     assert "| funnel | warn |" in log
+
+
+@pytest.mark.unit
+def test_the_slot_end_sends_the_research_digest_and_its_failure_changes_nothing(tmp_path, monkeypatch):
+    from pipeline import research_digest
+
+    config = make_config(tmp_path)
+    write_eval(config, "us", SLOT_DATE)
+    calls = []
+    monkeypatch.setattr(research_digest, "send_digest", lambda cfg, session, day: calls.append((session, day)))
+    assert run_slot(config, "us", FakeRunner({})) == 0
+    assert calls == [("us", SLOT_DATE)]
+
+    def boom(*a):
+        raise RuntimeError("digest broke")
+
+    monkeypatch.setattr(research_digest, "send_digest", boom)
+    config = make_config(tmp_path / "again")
+    write_eval(config, "cn", SLOT_DATE)
+    assert run_slot(config, "cn", FakeRunner({})) == 0  # the slot's outcome is unchanged
+    assert read_status(config, "cn")["slot"]["finished_at"]
+
+
+@pytest.mark.unit
+def test_an_only_run_does_not_take_the_days_digest(tmp_path, monkeypatch):
+    from pipeline import research_digest
+
+    config = make_config(tmp_path)
+    write_eval(config, "us", SLOT_DATE)
+    calls = []
+    monkeypatch.setattr(research_digest, "send_digest", lambda cfg, session, day: calls.append(session))
+    run_slot(config, "us", FakeRunner({}), only="pool_builder")
+    assert calls == []
+    run_slot(config, "us", FakeRunner({}))
+    assert calls == ["us"]
+
+
+@pytest.mark.unit
+def test_a_stuck_digest_never_holds_the_slot_end(tmp_path, monkeypatch):
+    import threading as _threading
+
+    from pipeline import research_digest
+
+    release = _threading.Event()
+    monkeypatch.setattr(orchestrator, "DIGEST_DEADLINE_S", 0.2)
+    config = make_config(tmp_path, lark_trades_webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/abc")
+    write_eval(config, "us", SLOT_DATE)
+    lock_free = []
+
+    def blocked(*a):
+        # The slot lock is already released while the digest waits.
+        lock_free.append(not orchestrator.slot_lock_path(config, "us", SLOT_DATE).exists())
+        release.wait(5)
+
+    monkeypatch.setattr(research_digest, "send_digest", blocked)
+    try:
+        assert run_slot(config, "us", FakeRunner({})) == 0
+        assert lock_free == [True]
+        assert read_status(config, "us")["slot"]["finished_at"]  # recorded before the digest
+        # Not queued in time: marked pending for the hourly watchdog.
+        assert (config.state_dir / "trade_notify" / "research_pending" / f"us_{SLOT_DATE.isoformat()}").exists()
+    finally:
+        release.set()
+
+
+@pytest.mark.unit
+def test_the_hourly_watchdog_retries_pending_digests(tmp_path, monkeypatch):
+    from pipeline import research_digest, trade_notify
+
+    calls = []
+    monkeypatch.setattr(trade_notify, "run_hourly", lambda **k: None)
+    monkeypatch.setattr(research_digest, "retry_pending", lambda cfg, today: calls.append(today))
+    monkeypatch.setattr(trade_notify, "flush_outbox", lambda state_dir, send: calls.append("flush"))
+    config = make_config(tmp_path, lark_trades_webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/abc")
+    orchestrator._hourly_trade_notifications(config, NOW)
+    assert calls == [NOW.date(), "flush"]
+
+
+
+@pytest.mark.unit
+def test_a_digest_thread_that_cannot_start_changes_nothing(tmp_path, monkeypatch):
+    real_thread = orchestrator.threading.Thread
+
+    def thread(*a, **k):
+        if k.get("name") == "research-digest":
+            raise RuntimeError("can't start new thread")
+        return real_thread(*a, **k)
+
+    monkeypatch.setattr(orchestrator.threading, "Thread", thread)
+    config = make_config(tmp_path, lark_trades_webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/abc")
+    write_eval(config, "us", SLOT_DATE)
+    assert run_slot(config, "us", FakeRunner({})) == 0
+    assert read_status(config, "us")["slot"]["finished_at"]
+    assert (config.state_dir / "trade_notify" / "research_pending" / f"us_{SLOT_DATE.isoformat()}").exists()
+
+
+@pytest.mark.unit
+def test_a_pending_mark_that_cannot_be_written_still_sends(tmp_path, monkeypatch):
+    from pipeline import research_digest
+
+    def no_disk(*a):
+        raise OSError("read-only")
+
+    calls = []
+    monkeypatch.setattr(research_digest, "mark_pending", no_disk)
+    monkeypatch.setattr(research_digest, "send_digest", lambda cfg, session, day: calls.append(session))
+    config = make_config(tmp_path, lark_trades_webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/abc")
+    write_eval(config, "us", SLOT_DATE)
+    assert run_slot(config, "us", FakeRunner({})) == 0
+    assert calls == ["us"]
+
+
+@pytest.mark.unit
+def test_a_refused_digest_is_resent_hourly_without_the_broker(tmp_path, monkeypatch):
+    from pipeline import trade_monitor, trade_notify
+    from pipeline.orchestrator import LarkError
+
+    def refuse(title, text):
+        raise LarkError("code 9499")
+
+    config = make_config(tmp_path, lark_trades_webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/abc")
+    trade_notify.enqueue(config.state_dir, "research:us:2026-01-05", "digest", refuse)
+    sent = []
+    monkeypatch.setattr(trade_monitor, "make_trades_sender", lambda cfg: lambda title, text: sent.append(text))
+    monkeypatch.setattr(trade_notify, "alpaca_keys", lambda: (_ for _ in ()).throw(RuntimeError("no keys")))
+    orchestrator._hourly_trade_notifications(config, NOW)
+    assert sent == ["digest"] and trade_notify.SentStore(config.state_dir).outbox() == []

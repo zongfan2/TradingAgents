@@ -512,6 +512,8 @@ LARK_TIMEOUT_S = 10.0
 #: Hard bound on the whole delivery (DNS included) as seen by the slot: the
 #: POST runs on a daemon thread that is abandoned past this.
 LARK_DEADLINE_S = 15.0
+#: How long a slot end waits for the research digest (lock + build + send).
+DIGEST_DEADLINE_S = 60.0
 
 
 class LarkError(RuntimeError):
@@ -851,6 +853,8 @@ class Orchestrator:
         self._execution_orders: str | None = None
         #: Set by run_slot: step 7 is left to the ``execute`` job.
         self._defer_execution = False
+        #: run_slot's --only component (None: the slot sequence ran).
+        self._only: str | None = None
         #: The execute job's pre-submit refresh counts (run_execution only).
         self._refresh_counts: dict[str, int] | None = None
 
@@ -889,6 +893,7 @@ class Orchestrator:
 
         Raises :class:`SlotLockHeld` when another invocation owns the slot.
         """
+        self._only = only
         selected = self._select(only, from_step)
         by_step = {c.step: c for c in selected}
         # Only an explicit --only execution_adapter runs step 7 inline when a
@@ -938,9 +943,15 @@ class Orchestrator:
             # outcome must be recorded in the status file — before step 6.
             eval_thread.join()
             run_steps(_POST_BARRIER_STEPS)
-            return self._finalize()
+            result = self._finalize()
         finally:
             release_slot_lock(lock)
+        # After the lock is released: "slot finished and lock held" means an
+        # execute run (execute_slot), so nothing may wait while holding it.
+        # A single-component run must not take the day's digest.
+        if self._only is None:
+            self._send_research_digest()
+        return result
 
     # -- one component ------------------------------------------------------
 
@@ -1114,6 +1125,44 @@ class Orchestrator:
         self._log_component("funnel", status, duration, error)
 
     # -- end of slot --------------------------------------------------------
+
+    def _send_research_digest(self) -> None:
+        """specs/research-digest.md: the slot's research to the trades group,
+        once per slot day, after the slot is recorded finished and its lock
+        released. Imported lazily, guarded, and bounded by DIGEST_DEADLINE_S
+        (the trades store lock has no timeout): it never changes the slot's
+        outcome. It is marked pending first (no lock): one
+        not queued in time is retried by the hourly watchdog."""
+
+        try:
+            from pipeline import research_digest
+        except Exception as exc:  # a broken module: nothing can send it, nothing retries
+            logger.warning("research digest failed: %s", type(exc).__name__)
+            return
+        if self.config.notifications_enabled and self.config.lark_trades_webhook_url:
+            try:
+                research_digest.mark_pending(self.config, self.session, self.slot_date)
+            except Exception as exc:  # still sent now, just without the retry mark
+                logger.warning("research digest not marked pending (%s) — sending without a retry",
+                               type(exc).__name__)
+
+        def send() -> None:
+            try:
+                research_digest.send_digest(self.config, self.session, self.slot_date)
+            except Exception as exc:
+                logger.warning("research digest failed: %s", type(exc).__name__)
+
+        try:
+            worker = threading.Thread(target=send, name="research-digest", daemon=True)
+            worker.start()
+            worker.join(DIGEST_DEADLINE_S)
+        except Exception as exc:  # e.g. no thread can start: the pending mark stands
+            logger.warning("research digest not started (%s) — the hourly watchdog retries it",
+                           type(exc).__name__)
+            return
+        if worker.is_alive():
+            logger.warning("research digest not queued within %.0fs — the hourly watchdog retries it",
+                           DIGEST_DEADLINE_S)
 
     def _finalize(self) -> int:
         self._build_funnel()
@@ -1959,8 +2008,17 @@ def _hourly_trade_notifications(config: PipelineConfig, now: datetime) -> None:
     from pipeline import trade_notify
     from pipeline.trade_monitor import make_trades_sender
 
-    trade_notify.run_hourly(state_dir=config.state_dir, send=make_trades_sender(config), now=now,
+    send = make_trades_sender(config)
+    trade_notify.run_hourly(state_dir=config.state_dir, send=send, now=now,
                             ledger_dir=config.ledger_dir)
+    try:
+        from pipeline import research_digest
+
+        research_digest.retry_pending(config, now.date())
+        # Broker-free: run_hourly flushes only once the broker is up.
+        trade_notify.flush_outbox(config.state_dir, send)
+    except Exception as exc:
+        logger.warning("research digest retry failed: %s", type(exc).__name__)
 
 
 def _alertable_days(session: str, at_time: str, now: datetime) -> list[date]:

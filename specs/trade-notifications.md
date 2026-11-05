@@ -22,6 +22,9 @@ own bot**, fills are notified **in real time** by an always-on listener.
   validated like the ops pair (https, no whitespace, secret needs a URL).
   Unset → trade notifications are off (nothing is sent anywhere; the ops
   channel is never flooded).
+  It also carries one research digest per slot (specs/research-digest.md);
+  the hourly watchdog also flushes the outbox without the broker
+  (`flush_outbox`), so a queued message never waits for broker health.
 
 Both use the existing signed `LarkWebhook` (URL/secret scrubbed from every
 error text, never logged).
