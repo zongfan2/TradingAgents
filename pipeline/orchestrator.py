@@ -1115,6 +1115,17 @@ class Orchestrator:
 
     # -- end of slot --------------------------------------------------------
 
+    def _send_research_digest(self) -> None:
+        """specs/research-digest.md: the slot's research to the trades group,
+        once per slot day. Imported lazily and guarded: it never changes the
+        slot's outcome."""
+        try:
+            from pipeline.research_digest import send_digest
+
+            send_digest(self.config, self.session, self.slot_date)
+        except Exception as exc:
+            logger.warning("research digest failed: %s", type(exc).__name__)
+
     def _finalize(self) -> int:
         self._build_funnel()
         components = self.status.components_snapshot()
@@ -1160,6 +1171,7 @@ class Orchestrator:
             dedup_key=("summary", (self.session, self.slot_date.isoformat()), "end-of-slot"),
             details=self._execution_orders,
         )
+        self._send_research_digest()
         self.status.finish_slot(to_utc_iso(self.clock()))
         return 1 if problems else 0
 

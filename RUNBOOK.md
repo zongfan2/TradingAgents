@@ -445,6 +445,13 @@ cancel/expiry/reject within seconds; the hourly watchdog re-sends anything
 it missed and, after 16:15 ET on trading days, the daily report. It only
 reads the paper account. Check it: `~/.tradingagents/scheduler.trade-monitor.err.log`.
 
+The trades group also gets one **research digest** per slot (cn and us,
+right after the end-of-slot summary): the macro brief's per-section read
+and every ticker brief with its catalyst, impact line, eval verdict and
+decision (specs/research-digest.md). It is built from the slot's files (no
+model call) and sent once per slot day; a missing one shows up as
+`research digest … not sent` in `scheduler.<session>.err.log`.
+
 ## 7b. LLM provider ladder (Claude → OpenAI → DeepSeek)
 
 With `TRADINGAGENTS_LLM_ROUTING=ladder` (specs/llm-provider-ladder.md) the

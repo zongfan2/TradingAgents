@@ -2090,3 +2090,24 @@ def test_funnel_failure_is_a_warn_never_a_slot_failure(tmp_path, monkeypatch):
     assert "failures" not in summary
     log = orchestrator.orchestrator_log_path(config).read_text(encoding="utf-8")
     assert "| funnel | warn |" in log
+
+
+@pytest.mark.unit
+def test_the_slot_end_sends_the_research_digest_and_its_failure_changes_nothing(tmp_path, monkeypatch):
+    from pipeline import research_digest
+
+    config = make_config(tmp_path)
+    write_eval(config, "us", SLOT_DATE)
+    calls = []
+    monkeypatch.setattr(research_digest, "send_digest", lambda cfg, session, day: calls.append((session, day)))
+    assert run_slot(config, "us", FakeRunner({})) == 0
+    assert calls == [("us", SLOT_DATE)]
+
+    def boom(*a):
+        raise RuntimeError("digest broke")
+
+    monkeypatch.setattr(research_digest, "send_digest", boom)
+    config = make_config(tmp_path / "again")
+    write_eval(config, "cn", SLOT_DATE)
+    assert run_slot(config, "cn", FakeRunner({})) == 0  # the slot's outcome is unchanged
+    assert read_status(config, "cn")["slot"]["finished_at"]
