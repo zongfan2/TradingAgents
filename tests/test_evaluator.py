@@ -262,7 +262,17 @@ def test_ticker_consistency_prompt_includes_catalyst_inflation_instruction(tmp_p
     # The macro brief's own consistency rule: an all-mixed read with no reason given.
     macro_prompt = " ".join(macro_runner.prompts[0].split())
     assert "every Impact line reads 'mixed'" in macro_prompt
-    assert "flag it under coverage with severity 'minor'" in macro_prompt  # never a verdict change by itself
+    assert "flag it under coverage with severity 'minor'" in macro_prompt
+    assert "This flag alone must not take any dimension score below 6." in macro_prompt
+
+
+@pytest.mark.unit
+def test_an_all_mixed_minor_flag_alone_keeps_a_pass():
+    from pipeline.contracts.evals import EvalScores, FlaggedClaim, compute_verdict
+
+    scores = EvalScores(factual_accuracy=8, citation_support=8, coverage=6, timeliness=8, consistency=8)
+    flag = FlaggedClaim(section="all", claim="every Impact line mixed", issue="no read", severity="minor")
+    assert compute_verdict(scores, [flag]) == "pass"
     assert "every Impact line reads 'mixed'" not in prompt
 
 
