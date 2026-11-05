@@ -47,11 +47,15 @@ def brief(score, verdict="pass"):
     return inspect
 
 
-def select(core, rows, positions, *, score=None, session="us", **settings):
+def flat(ticker, since, slot_date):
+    return 0.0, 0.0  # no price move since the HOLD
+
+
+def select(core, rows, positions, *, score=None, session="us", move=flat, **settings):
     return ar.select_core_runs(
         core, session=session, slot_date=FRIDAY,
         settings=ar.RunnerSettings(core_skip_unchanged=True, **settings),
-        decision_rows=rows, positions=positions, inspect_ticker=brief(score),
+        decision_rows=rows, positions=positions, inspect_ticker=brief(score), price_move=move,
     )
 
 
@@ -82,7 +86,8 @@ def test_unchanged_hold_is_skipped_and_every_doubt_runs():
     assert run_ == ["BBB", "CCC", "DDD", "EEE", "FFF", "HHH", "III", "JJJ", "KKK"]
     aaa = skipped[0]
     assert aaa[1] == "core-unchanged"
-    assert aaa[3] == {"last_decision_date": "2026-08-06", "age": 1, "score": 6.5, "threshold": 7.0}
+    assert aaa[3] == {"last_decision_date": "2026-08-06", "age": 1, "score": 6.5, "threshold": 7.0,
+                      "max_session_move_pct": 0.0, "total_move_pct": 0.0}
     assert "HOLD on 2026-08-06 (1 trading day(s) ago)" in aaa[2] and "eval pass" in aaa[2]
 
 
@@ -95,7 +100,7 @@ def test_age_counts_trading_days_across_the_weekend():
         ["AAA", "BBB"], session="us", slot_date=date(2026, 8, 10),
         settings=ar.RunnerSettings(core_skip_unchanged=True), decision_rows=rows,
         positions=snapshot(as_of=datetime(2026, 8, 7, 21, tzinfo=timezone.utc)),
-        inspect_ticker=brief(5.0),
+        inspect_ticker=brief(5.0), price_move=flat,
     )
     assert out[0] == ["BBB"] and [s[0] for s in out[1]] == ["AAA"]
 
@@ -214,3 +219,72 @@ def test_snapshot_shows_a_cost_cut_core_ticker_from_its_event_or_as_unknown(tmp_
     )
     events_path(config.state_dir, "cn", SLOT).unlink()  # a backfill without events
     assert trigger(funnel.build_snapshot(config, "cn", SLOT)) == ("info", None, "unknown")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("move", "runs"), [
+    ((4.9, 7.9), False),          # below both bars: still unchanged
+    ((5.0, 1.0), True),           # one session at the bar
+    ((3.0, 8.0), True),           # a slow grind to the total bar
+    (None, True),                 # unknown move is doubt
+])
+def test_a_price_move_since_the_hold_forces_a_run(move, runs):
+    seen = []
+
+    def price(ticker, since, slot_date):
+        seen.append((ticker, since, slot_date))
+        return move
+
+    run_, skipped = select(["AAA"], [row("AAA", "2026-08-05")], snapshot(), score=5.0, move=price)
+    assert (run_ == ["AAA"]) is runs and (skipped == []) is runs
+    assert seen == [("AAA", date(2026, 8, 5), FRIDAY)]  # sessions since the HOLD's day
+
+
+@pytest.mark.unit
+def test_a_failing_price_read_runs_the_ticker():
+    def boom(ticker, since, slot_date):
+        raise OSError("yfinance down")
+
+    assert select(["AAA"], [row("AAA", "2026-08-06")], snapshot(), score=5.0, move=boom)[0] == ["AAA"]
+
+
+def bars(*closes, start=date(2026, 7, 27)):
+    """Consecutive weekday closes from ``start``."""
+    from datetime import timedelta
+
+    out, day = [], start
+    for close in closes:
+        while day.weekday() >= 5:
+            day += timedelta(days=1)
+        out.append((day, close))
+        day += timedelta(days=1)
+    return out
+
+
+@pytest.mark.unit
+def test_price_move_since_reads_the_sessions_after_the_hold(monkeypatch):
+    from pipeline import price_tape
+
+    # 07-27 .. 08-06 (9 sessions); HOLD decided before the open on 08-04.
+    closes = bars(100, 100, 100, 100, 100, 100, 94, 95, 96.9)
+    monkeypatch.setattr(price_tape, "fetch_daily_closes", lambda t: closes)
+    largest, total = ar.price_move_since("AAA", date(2026, 8, 4), FRIDAY)
+    assert largest == pytest.approx(6.0) and total == pytest.approx(3.1)
+    # A tape behind the last weekday, or no session before the HOLD: unknown.
+    monkeypatch.setattr(price_tape, "fetch_daily_closes", lambda t: closes[:-1])
+    assert ar.price_move_since("AAA", date(2026, 8, 4), FRIDAY) is None
+    monkeypatch.setattr(price_tape, "fetch_daily_closes", lambda t: closes[6:])
+    assert ar.price_move_since("AAA", date(2026, 8, 4), FRIDAY) is None
+    # A gap among the sessions since (an unusable close) is unknown too.
+    gapped = closes[:7] + [(closes[7][0], float("nan"))] + closes[8:]
+    monkeypatch.setattr(price_tape, "fetch_daily_closes", lambda t: gapped)
+    assert ar.price_move_since("AAA", date(2026, 8, 4), FRIDAY) is None
+
+
+@pytest.mark.unit
+def test_by_default_a_core_skip_needs_real_price_data():
+    # The offline fixture makes every price read fail: no ticker is skipped.
+    out = ar.select_core_runs(
+        ["AAA"], session="us", slot_date=FRIDAY, settings=ar.RunnerSettings(core_skip_unchanged=True),
+        decision_rows=[row("AAA", "2026-08-06")], positions=snapshot(), inspect_ticker=brief(5.0))
+    assert out == (["AAA"], [])
