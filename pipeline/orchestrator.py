@@ -1149,9 +1149,14 @@ class Orchestrator:
             except Exception as exc:
                 logger.warning("research digest failed: %s", type(exc).__name__)
 
-        worker = threading.Thread(target=send, name="research-digest", daemon=True)
-        worker.start()
-        worker.join(DIGEST_DEADLINE_S)
+        try:
+            worker = threading.Thread(target=send, name="research-digest", daemon=True)
+            worker.start()
+            worker.join(DIGEST_DEADLINE_S)
+        except Exception as exc:  # e.g. no thread can start: the pending mark stands
+            logger.warning("research digest not started (%s) — the hourly watchdog retries it",
+                           type(exc).__name__)
+            return
         if worker.is_alive():
             logger.warning("research digest not queued within %.0fs — the hourly watchdog retries it",
                            DIGEST_DEADLINE_S)

@@ -172,8 +172,16 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date) -> str:
         except json.JSONDecodeError:
             parsed = None
         snapshot = parsed if isinstance(parsed, dict) else {}
-    rows = [row for entry in snapshot.get("tickers") or [] if isinstance(entry, dict)
-            if (row := ticker_line(config, entry, slot_date, session)) is not None]
+    entries = snapshot.get("tickers")
+    rows = []
+    for entry in entries if isinstance(entries, list) else []:
+        try:
+            row = ticker_line(config, entry, slot_date, session)
+        except Exception as exc:  # one malformed row never costs the digest
+            logger.warning("research digest: skipped a malformed funnel row (%s)", type(exc).__name__)
+            continue
+        if row is not None:
+            rows.append(row)
     rows.sort(key=lambda row: row[0])
     analysed = sum(1 for order, _line in rows if not order[0])
     lines.append(f"个股 {len(rows)} 只，分析 {analysed} 只：" if rows else "个股：无简报")

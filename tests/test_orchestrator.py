@@ -2166,3 +2166,20 @@ def test_the_hourly_watchdog_retries_pending_digests(tmp_path, monkeypatch):
     orchestrator._hourly_trade_notifications(config, NOW)
     assert calls == [NOW.date()]
 
+
+
+@pytest.mark.unit
+def test_a_digest_thread_that_cannot_start_changes_nothing(tmp_path, monkeypatch):
+    real_thread = orchestrator.threading.Thread
+
+    def thread(*a, **k):
+        if k.get("name") == "research-digest":
+            raise RuntimeError("can't start new thread")
+        return real_thread(*a, **k)
+
+    monkeypatch.setattr(orchestrator.threading, "Thread", thread)
+    config = make_config(tmp_path, lark_trades_webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/abc")
+    write_eval(config, "us", SLOT_DATE)
+    assert run_slot(config, "us", FakeRunner({})) == 0
+    assert read_status(config, "us")["slot"]["finished_at"]
+    assert (config.state_dir / "trade_notify" / "research_pending" / f"us_{SLOT_DATE.isoformat()}").exists()

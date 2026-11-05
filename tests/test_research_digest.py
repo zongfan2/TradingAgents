@@ -123,9 +123,13 @@ def test_missing_inputs_still_give_a_digest(tmp_path):
     assert text.splitlines() == ["📊 研究摘要 · 美股 · 2026-11-04", "宏观：无简报", "个股：无简报"]
     cfg = config(tmp_path)
     (cfg.state_dir / "funnel" / "us").mkdir(parents=True)
-    for corrupt in ("{not json", "[]", "3", '{"tickers": {"MU": 1}}'):
+    for corrupt in ("{not json", "[]", "3", '{"tickers": {"MU": 1}}', '{"tickers": 3}',
+                    '{"tickers": [{"ticker": "MU", "stages": []}]}',
+                    '{"tickers": [{"ticker": "MU", "stages": {"decide": 1}}]}',
+                    '{"tickers": [{"ticker": "MU", "stages": {"decide": {"code": "BUY", "details": 1}}}]}'):
         (cfg.state_dir / "funnel" / "us" / f"{DAY}.json").write_text(corrupt, encoding="utf-8")
-        assert "个股：无简报" in rd.build_digest(cfg, "us", DAY), corrupt
+        text = rd.build_digest(cfg, "us", DAY)
+        assert text.startswith("📊 研究摘要") and "宏观：无简报" in text, corrupt
 
 
 @pytest.mark.unit
@@ -257,3 +261,11 @@ def test_an_old_pending_digest_is_dropped_with_an_error(tmp_path, caplog):
         assert rd.retry_pending(cfg, date(2026, 11, 4)) == 0
     assert "research digest for cn 2026-10-30 dropped" in caplog.text
     assert not list((tmp_path / "trade_notify" / "research_pending").iterdir())
+
+
+@pytest.mark.unit
+def test_one_malformed_row_does_not_cost_the_others(tmp_path):
+    cfg = config(tmp_path)
+    write_slot(cfg, briefs={"MU": ticker_brief("MU", 4.5, "mixed — m.")},
+               tickers=[{"ticker": "BAD", "stages": []}, entry("MU", evaluate="warn")])
+    assert "• MU 4.5" in rd.build_digest(cfg, "us", DAY)
