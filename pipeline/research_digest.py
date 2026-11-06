@@ -97,7 +97,7 @@ _UNSAFE = re.compile(
     re.IGNORECASE)
 #: Domain-like tokens (ASCII, so CJK neighbours do not hide one); only a
 #: numeric exchange symbol (0700.HK, 600256.SS) is not a link.
-_DOMAIN = re.compile(r"(?<![A-Za-z0-9.])(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?![A-Za-z.])")  # whole multi-label hosts
+_DOMAIN = re.compile(r"(?<![A-Za-z0-9.])(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?![A-Za-z])(?!\.[A-Za-z])")  # whole hosts
 _SYMBOL = re.compile(r"\d+\.(?:HK|SS|SZ|BJ)", re.IGNORECASE)
 _NUMBER = re.compile(r"(?<![\d.])\d+(?:\.\d+)?(?!\d)(?!\.\d)")  # "520." is 520
 #: The summary call: one small, cheap model; a tight timeout so the digest
@@ -693,7 +693,11 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
                 blocker = order_blocker(record, settings, records) if settings is not None else "unknown"
         except Exception:
             blocker = "unknown"
-        if not executed and session != "cn" and blocker == "unknown" and details.get("arm") == "feeds" and brief_row:
+        if executed and session != "cn" and details.get("arm") == "feeds" and brief_row and t.final != "order-live":
+            # After step 7 too: the brief arm's decision event was lost, so the
+            # shown (feeds) outcome says nothing about the brief arm's order.
+            text, ordered = "下单结果待核实（简报一路的记录缺失）", None
+        elif not executed and session != "cn" and blocker == "unknown" and details.get("arm") == "feeds" and brief_row:
             # The brief arm's event was lost: whatever the feeds arm decided,
             # step 7 reads the brief arm's ledger row itself.
             if mode in ("模拟", "执行已暂停"):

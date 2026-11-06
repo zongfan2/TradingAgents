@@ -93,7 +93,9 @@ line) was hard to read: the user asked why a name with no position was
     intent row) reads `下单结果待核实`; an `order-live` name whose latest
     decision is HOLD/ERROR reads `已下单，见交易消息（最新分析：…）`; a feeds-arm
     decide stage while the ledger has the brief arm's row (its event was
-    lost) reads `下单待核实（简报一路的记录缺失）` whatever the feeds arm decided
+    lost) reads `下单待核实（简报一路的记录缺失）` whatever the feeds arm decided —
+    after step 7 `下单结果待核实（简报一路的记录缺失）` unless the name has a live
+    order on record —
     (under 模拟 / 执行已暂停 `不下单（mode）`: no live order can follow);
     the greatest later ledger attempt (the decision step 7 reads, unseen by
     this digest) — judged by the adapter's own rules: manual →

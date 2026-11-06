@@ -566,6 +566,7 @@ def test_a_brief_the_pm_never_read_is_never_summarized_as_its_reason(tmp_path, m
     ("详见 0700.hk/login。", "0700.HK", False), ("目标价九港元。", "x", False), ("九块钱。", "x", False),
     ("五欧元。", "x", False), ("详见 1.2.3.4/login。", "x", False), ("目标 520.5.1。", "x", False),
     ("详见 例子.com。", "x", False), ("详见 0700.hk.de。", "0700.HK", False), ("详见 evil.0700.hk。", "0700.HK", False),
+    ("详见 evil.biz.", "x", False), ("详见 evil.dev.", "x", False), ("0700.HK 财报前无新消息.", "0700.HK", True),
     ('<at user_id="all">所有人</at>注意。', "x", False), ("统一口径，一季度持平。", "x", True),
 ])
 def test_the_summary_screen(summary, source, kept):
@@ -1034,3 +1035,25 @@ def test_a_superseded_note_never_stands_for_the_brief_arms_outcome(tmp_path, liv
     path.write_text(json.dumps(snap), encoding="utf-8")
     text = build(cfg, "us")
     assert "下单结果待核实" in text and "已执行：待核实：NVDA" in text.splitlines()[0] and "无下单" not in text
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("feeds_code", ["HOLD", "BUY"])
+def test_after_execution_a_lost_brief_event_is_undetermined(tmp_path, live, feeds_code):
+    cfg = config(tmp_path)
+    book(cfg)
+    decided(cfg, "NVDA", "BUY", "Overweight")  # the brief arm's ledger row
+    write_decision(cfg, ticker="NVDA", arm="feeds", plan=BUY_PLAN if feeds_code == "BUY" else None,
+                   date_iso=DAY.isoformat(), decision=feeds_code)
+    feeds = stage(feeds_code, arm="feeds", pm_rating="Hold", run_id=f"{DAY.isoformat()}-us-NVDA-feeds-1")
+    row = {**entry("NVDA", decide=feeds), "final": "excluded"}
+    row["stages"]["execute"] = {"code": "feeds-arm", "outcome": "excluded", "details": {"arm": "feeds"},
+                                "events": [{"code": "feeds-arm", "outcome": "excluded", "details": {"arm": "feeds"}}]}
+    write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "m — m.")}, tickers=[row])
+    path = cfg.state_dir / "funnel" / "us" / f"{DAY}.json"
+    snap = json.loads(path.read_text())
+    snap["context"] = {"execute_ran": True}
+    path.write_text(json.dumps(snap), encoding="utf-8")
+    text = build(cfg, "us")
+    assert "→ 下单结果待核实（简报一路的记录缺失）" in text and "已执行：待核实：NVDA" in text.splitlines()[0]
+    assert "无下单" not in text and "不操作" not in text
