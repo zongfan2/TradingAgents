@@ -770,3 +770,18 @@ def test_after_execution_an_unread_input_keeps_the_executed_header(tmp_path, liv
     path.write_text(json.dumps(snap), encoding="utf-8")
     head = build(cfg, "us").splitlines()[0]
     assert "已执行：NVDA 已下单；待核实（决策数据未读到）" in head and "计划下单" not in head
+
+
+@pytest.mark.unit
+def test_after_execution_an_unread_row_never_reads_as_no_order(tmp_path, live):
+    cfg = config(tmp_path)
+    book(cfg)
+    write_slot(cfg, briefs={"TSLA": ticker_brief("TSLA", 7.0, "m — m.")}, tickers=[
+        {**entry("TSLA", decide=decided(cfg, "TSLA", "HOLD", "Hold", plan=None)), "final": "excluded"},
+        {"ticker": "BAD", "stages": "not-a-dict"}])
+    path = cfg.state_dir / "funnel" / "us" / f"{DAY}.json"
+    snap = json.loads(path.read_text())
+    snap["context"] = {"execute_ran": True}
+    path.write_text(json.dumps(snap), encoding="utf-8")
+    head = build(cfg, "us").splitlines()[0]
+    assert "已执行：待核实（决策数据未读到）" in head and "无下单" not in head

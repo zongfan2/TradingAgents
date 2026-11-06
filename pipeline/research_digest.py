@@ -658,7 +658,7 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
             orders += ("；" if orders else "") + "待核实（决策数据未读到）"
         if undecided:
             orders += ("；" if orders else "") + "待核实：" + "、".join(undecided)
-        done = "、".join(planned) if planned else ("" if undecided else "无下单")
+        done = "、".join(planned) if planned else ("" if undecided or unread else "无下单")
         if undecided:
             done += ("；" if done else "") + "待核实：" + "、".join(undecided)
         if executed and unread:
