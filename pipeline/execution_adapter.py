@@ -940,9 +940,9 @@ class _SubmitRun:
     """One submit invocation: broker snapshot + running S6/S9 state.
 
     Rule order per candidate (spec R1 "applies S1–S9 in order"): S5 blocking →
-    S8 market day → S4 dedupe/recovery → S8 per-ticker guards → S9 position
-    rules → sizing → S6 caps → S9 buying power/total risk → S3-checked
-    submission.
+    S8 market day → S4 dedupe/recovery → S8 per-ticker guards → S9 maintain
+    → S8a entry zone → S9 add-on rules → sizing → S6 caps → S9 buying
+    power/total risk → S3-checked submission.
     """
 
     def __init__(
