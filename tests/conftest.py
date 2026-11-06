@@ -52,6 +52,20 @@ def _offline_price_tape(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _offline_digest_summaries(monkeypatch):
+    """Tests are offline: the research digest's summary call never runs a
+    model (a test that needs summaries injects its own ``_run_summary``)."""
+    from pipeline import research_digest
+
+    monkeypatch.setattr(research_digest, "REAL_RUN_SUMMARY", research_digest._run_summary, raising=False)
+
+    def offline(prompt):
+        raise RuntimeError("digest summaries are offline in tests")
+
+    monkeypatch.setattr(research_digest, "_run_summary", offline)
+
+
+@pytest.fixture(autouse=True)
 def _dummy_api_keys(monkeypatch):
     for env_var in _API_KEY_ENV_VARS:
         # `or` not a .get default: an env var present but empty (e.g. a key left

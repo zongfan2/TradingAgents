@@ -449,10 +449,13 @@ it missed and, after 16:15 ET on trading days, the daily report. It only
 reads the paper account. Check it: `~/.tradingagents/scheduler.trade-monitor.err.log`.
 
 The trades group also gets one **research digest** per slot (cn and us,
-right after the end-of-slot summary): the macro brief's per-section read
-and every ticker brief with its catalyst, impact line, eval verdict and
-decision (specs/research-digest.md). It is built from the slot's files (no
-model call) and sent once per slot day, only by a full slot run (never by
+right after the end-of-slot summary), in Chinese: positions and planned
+orders, the macro read, and every ticker grouped as analysed (the action in
+plain words), blocked, triggered but not analysed, or not triggered (with
+the reason)
+(specs/research-digest.md). It is built from the slot's files plus one
+small summary call (Haiku, ≈ $0.002) and sent once per slot day, only by a
+full slot run (never by
 `--only`). Where a missing one shows up: the slot's own attempt logs to
 `scheduler.<session>.err.log` and the hourly retry to
 `scheduler.watchdog.err.log`. Both run the same build-and-send path, so
@@ -460,7 +463,7 @@ either log can show any of these lines:
 
 - `research digest for <session> <date> not sent` — a local failure; the
   digest stays pending and is retried.
-- `research digest not queued within 60s — the hourly watchdog retries it`
+- `research digest not queued within 90s — the hourly watchdog retries it`
   / `research digest not started` — slot end only; retried.
 - `research digest not marked pending … — sending without a retry` — slot
   end only; sent at once, but not retried if that send fails.
@@ -468,6 +471,9 @@ either log can show any of these lines:
   **not retried**: re-run the slot once fixed.
 - `research digest: macro brief unreadable` / `research digest: skipped a
   malformed funnel row` — that line or row only; the digest still goes out.
+- `research digest: Chinese summaries unavailable` — the one small model
+  call failed or timed out (45 s); the digest goes out without the 要点 /
+  per-name summary lines.
 - `research digest retry failed` — watchdog only.
 - `research digest for <session> <date> dropped: not queued within 3 days`
   — watchdog only; given up.

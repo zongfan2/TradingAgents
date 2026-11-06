@@ -518,7 +518,7 @@ ANALYSIS_ALERT_MIN_ERRORS = 3
 ANALYSIS_ERROR_WORDS = {"auth": "API key refused", "credit": "credits exhausted", "timeout": "timed out",
                         "other": "other errors"}
 #: How long a slot end waits for the research digest (lock + build + send).
-DIGEST_DEADLINE_S = 60.0
+DIGEST_DEADLINE_S = 90.0
 
 
 class LarkError(RuntimeError):
