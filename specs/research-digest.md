@@ -91,7 +91,9 @@ line) was hard to read: the user asked why a name with no position was
     intent row) reads `下单结果待核实`; an `order-live` name whose latest
     decision is HOLD/ERROR reads `已下单，见交易消息（最新分析：…）`; a feeds-arm
     decide stage while the ledger has the brief arm's row (its event was
-    lost) reads `下单待核实`; an unreadable execution switch or kill
+    lost) reads `下单待核实（简报一路的记录缺失）` whatever the feeds arm decided;
+    a later attempt that is not manual (unseen by this digest) reads
+    `下单待核实`, only a manual one `被手动重跑取代`; an unreadable execution switch or kill
     switch (`执行状态未知`) leaves BUY/SELL undetermined too; after execution
     the header keeps `已执行：` and appends `待核实（决策数据未读到）` when an
     input was unread. Undetermined names are listed in the
@@ -126,8 +128,8 @@ line) was hard to read: the user asked why a name with no position was
   screened: dropped if it contains a forbidden or action word
   (持有/减持/增持/评级/买入/买进/卖出/抛售/加仓/增仓/减仓/建仓/清仓/平仓/做空/做多/
   下单/止损/止盈/HOLD/BUY/SELL), exceeds 60 characters, or holds a whole number its source
-  (links removed) does not, or contains a link, markup (a Lark `<at>`
-  mention) or a figure in Chinese numerals; only the names asked are used. A call that used
+  (links removed) does not, or contains a link (incl. a bare domain), markup (a Lark `<at>`
+  mention) or a figure in Chinese numerals (incl. 百分之… / …成); only the names asked are used. A call that used
   a web tool is discarded — by its tool-call fields or a billed search count
   (the CLI keeps web tools on; outside facts would pass every screen).
   Any failure or a 45 s timeout: logged, and the digest goes out without

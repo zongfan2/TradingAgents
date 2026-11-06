@@ -85,7 +85,8 @@ UNKNOWN_STATE = "执行状态未知"
 UNDETERMINED_MODES = (LATE, INLINE_UNKNOWN, UNKNOWN_STATE)
 #: A link, markup (a Lark ``<at>`` mention) or a figure in Chinese numerals —
 #: none can be checked against the source, so none may reach the group.
-_UNSAFE = re.compile(r"https?://|www\.|<|>|[零〇一二两三四五六七八九十百千]+[万亿]|[零〇一二两三四五六七八九十百千万亿]+(?:美元|元|%|倍)")
+_UNSAFE = re.compile(r"https?://|www\.|<|>|\b[\w-]+\.(?:com|cn|net|org|io|co|hk|info|news)\b|百分之|"
+                     r"[零〇一二两三四五六七八九十百千]+[万亿成]|[零〇一二两三四五六七八九十百千万亿]+(?:美元|元|%|倍)")
 _NUMBER = re.compile(r"(?<![\d.])\d+(?:\.\d+)?(?!\d)(?!\.\d)")  # "520." is 520
 #: The summary call: one small, cheap model; a tight timeout so the digest
 #: never waits long for it (DIGEST_DEADLINE_S in the orchestrator bounds all).
@@ -233,7 +234,9 @@ def order_blocker(record: Any | None, settings: Any, records: dict[str, Any] | N
     for other in (records or {}).values():
         if (other.date == record.date and other.session == record.session and other.ticker == record.ticker
                 and other.arm == record.arm and _attempt_number(other.run_id) > _attempt_number(record.run_id)):
-            return "manual-shadowed"
+            # A later attempt is the decision step 7 reads: a manual one never
+            # executes here; any other is unseen by this digest — undetermined.
+            return "manual-shadowed" if other.trigger == "manual" else "unknown"
     return non_candidate_reason(record) or blocking_reason(record, settings)
 
 
@@ -631,7 +634,11 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
                 blocker = order_blocker(record, settings, records) if settings is not None else "unknown"
         except Exception:
             blocker = "unknown"
-        if executed:
+        if not executed and blocker == "unknown" and details.get("arm") == "feeds" and brief_row:
+            # The brief arm's event was lost: whatever the feeds arm decided,
+            # step 7 reads the brief arm's ledger row itself.
+            text, ordered = "下单待核实（简报一路的记录缺失）", None
+        elif executed:
             text = executed_text(t.decide.get("code"), details.get("pm_rating"), final=t.final, execute=t.execute)
             ordered = False
             if t.final == "order-live":

@@ -555,6 +555,7 @@ def test_a_brief_the_pm_never_read_is_never_summarized_as_its_reason(tmp_path, m
     ("建议买入。", "x", False), ("等待下单时机。", "x", False), ("不宜做空。", "x", False),
     ("建议抛售。", "x", False), ("可以增仓。", "x", False), ("应当平仓。", "x", False), ("宜买进。", "x", False),
     ("目标价五百亿美元。", "x", False), ("详见 https://example.com 。", "x", False),
+    ("涨幅达百分之五十。", "x", False), ("预计上涨五成。", "x", False), ("详见 example.com/x。", "x", False),
     ('<at user_id="all">所有人</at>注意。', "x", False), ("统一口径，一季度持平。", "x", True),
 ])
 def test_the_summary_screen(summary, source, kept):
@@ -792,16 +793,19 @@ def test_after_execution_an_unread_row_never_reads_as_no_order(tmp_path, live):
 
 
 @pytest.mark.unit
-def test_a_lost_brief_arm_event_never_reads_as_no_order(tmp_path, live):
+@pytest.mark.parametrize("feeds_code", ["BUY", "HOLD", "ERROR"])
+def test_a_lost_brief_arm_event_never_reads_as_no_order(tmp_path, live, feeds_code):
     cfg = config(tmp_path)
     book(cfg)
     decided(cfg, "NVDA", "BUY", "Overweight")  # the brief arm's ledger row
-    write_decision(cfg, ticker="NVDA", arm="feeds", plan=BUY_PLAN, date_iso=DAY.isoformat(), decision="BUY")
-    feeds_only = stage("BUY", arm="feeds", pm_rating="Overweight", plan_valid=True,
+    write_decision(cfg, ticker="NVDA", arm="feeds", plan=BUY_PLAN if feeds_code == "BUY" else None,
+                   date_iso=DAY.isoformat(), decision=feeds_code)
+    feeds_only = stage(feeds_code, arm="feeds", pm_rating="Overweight", plan_valid=True,
                        run_id=f"{DAY.isoformat()}-us-NVDA-feeds-1")
     write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "m — m.")}, tickers=[entry("NVDA", decide=feeds_only)])
     text = build(cfg, "us")
-    assert "→ 看多（PM 看多；下单待核实）" in text and "计划下单：待核实：NVDA" in text.splitlines()[0]
+    assert "→ 下单待核实（简报一路的记录缺失）" in text and "计划下单：待核实：NVDA" in text.splitlines()[0]
+    assert "不买" not in text and "不操作" not in text
 
 
 @pytest.mark.unit
@@ -851,3 +855,15 @@ def test_the_summary_call_is_bounded_and_every_failure_costs_only_the_summaries(
     assert calls[0][0][:2] == ("claude-haiku-5-5", "low") and calls[0][1] == {"role": "collect"}
     assert seen["timeout"] == rd.DIGEST_SUMMARY_TIMEOUT_S == 45.0 and seen["env"] == {"E": "1"}
     assert ("failed", "research_digest") in recorded and ("usage", "error") in recorded
+
+
+@pytest.mark.unit
+def test_a_later_scheduled_attempt_is_undetermined_not_shadowed(tmp_path, live):
+    cfg = config(tmp_path)
+    book(cfg)
+    decide = decided(cfg, "NVDA", "BUY", "Overweight")
+    write_decision(cfg, ticker="NVDA", n=2, plan=BUY_PLAN, date_iso=DAY.isoformat())  # scheduled attempt 2
+    write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "m — m.")}, tickers=[entry("NVDA", decide=decide)])
+    text = build(cfg, "us")
+    assert "→ 看多（PM 看多；下单待核实）" in text and "计划下单：待核实：NVDA" in text.splitlines()[0]
+    assert "被手动重跑取代" not in text
