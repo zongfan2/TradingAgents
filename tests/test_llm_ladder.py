@@ -997,3 +997,59 @@ def test_error_kinds(error, kind):
     from pipeline.llm_usage import error_kind
 
     assert error_kind(error) == kind
+
+
+class SpendingRefusal(RefusingChild):
+    """A key revoked mid-run: the refusal still bills what it spent."""
+
+    def __call__(self, spec, timeout):
+        env = dict(spec.env)
+        provider, model = env.get("TRADINGAGENTS_LLM_PROVIDER"), env.get("TRADINGAGENTS_DEEP_THINK_LLM")
+        if provider in self.refuse:
+            self.specs.append(spec)
+            return ar.ChildResult(1, None, AUTH_401, usage=usage_row(model, cost=0.3))
+        return super().__call__(spec, timeout)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("routing", "refuse"), [("claude", {"anthropic"}), ("claude-first", {"anthropic", "deepseek"})])
+def test_a_final_refusal_is_billed_once(tmp_path, routing, refuse):
+    from pipeline.llm_usage import month_spend
+
+    config, resolvers = _slot(tmp_path)
+    child = SpendingRefusal(refuse)
+    settings = ar.RunnerSettings(ab_pairing="off", llm_routing=routing, analysis_job_concurrency=1)
+    run(config, resolvers, child, settings=settings)
+    lines = [json.loads(line) for line in (config.state_dir / "llm_usage.jsonl").read_text().splitlines()]
+    assert len(lines) == len(child.specs)  # one line per attempt, never two
+    spent = month_spend(config.state_dir, MONTH, "anthropic") + month_spend(config.state_dir, MONTH, "deepseek")
+    assert spent == pytest.approx(0.3 * len(child.specs))
+
+
+@pytest.mark.unit
+def test_a_refusal_on_the_rung_reached_by_exhausted_credits_steps_down_again(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-proj-test")
+    config, resolvers = _slot(tmp_path)
+    confirm_balance(config.state_dir, MONTH, 71, NOW - timedelta(hours=1))
+
+    class CreditThenRefusal(UsageChild):
+        def __call__(self, spec, timeout):
+            env = dict(spec.env)
+            provider, model = env.get("TRADINGAGENTS_LLM_PROVIDER"), env.get("TRADINGAGENTS_DEEP_THINK_LLM")
+            if provider == "anthropic":
+                self.specs.append(spec)
+                return ar.ChildResult(1, None, "Error code: 400 - Your credit balance is too low",
+                                      usage=usage_row(model, cost=0.0))
+            if provider == "openai":
+                self.specs.append(spec)
+                return ar.ChildResult(1, None, AUTH_401, usage=usage_row(model, cost=0.0))
+            result = super().__call__(spec, timeout)
+            return ar.ChildResult(result.returncode, result.payload, result.error, usage=usage_row(model, cost=0.3))
+
+    child = CreditThenRefusal()
+    settings = ar.RunnerSettings(ab_pairing="off", llm_routing="ladder", analysis_job_concurrency=1)
+    outcome, _ = run(config, resolvers, child, settings=settings)
+    providers = [dict(s.env)["TRADINGAGENTS_LLM_PROVIDER"] for s in child.specs]
+    assert providers[:3] == ["anthropic", "openai", "deepseek"] and providers[3:] == ["deepseek"]
+    assert outcome.summary["errors"] == 0 and exhausted_marker(config.state_dir, MONTH).exists()
+    assert not exhausted_marker(config.state_dir, MONTH, "openai").exists()  # refused, not exhausted

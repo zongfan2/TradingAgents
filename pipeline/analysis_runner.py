@@ -1664,57 +1664,30 @@ def _run_job_impl(
             result = child_runner(spec, settings.run_timeout_seconds)
         except Exception as exc:  # R3: the slot never aborts on one ticker
             result = ChildResult(-1, None, f"child runner raised: {exc}")
+        # One loop for both rung failures, in any order (ladder L1 credits,
+        # L5 refused key): each pass leaves a provider this run will not use
+        # again; a retried attempt's usage is recorded here, the final one
+        # once below — never twice.
         exhausted_providers: set[str] = set()
-        while (
-            router is not None
-            and profile is not None
-            and result.returncode != 0
-            and is_auth_error(result.error)
-            and profile.provider not in exhausted_providers
-        ):
-            # ladder L5: the provider refused its key — skip it for the rest of
-            # the slot and rerun this run on the next rung (the month is not
-            # marked: a key is fixed by the operator, not by a new month).
-            refused = profile
-            exhausted_providers.add(refused.provider)
-            router.mark_auth_failed(refused.provider)
-            append_usage(
-                config.state_dir, run_id=None, date=date_iso, session=session,
-                ticker=job.ticker, arm=arm, profile=profile.name,
-                models=result.usage or {}, error=result.error, clock=clock,
-            )
-            profile = router.choose().profile
-            if profile.provider in exhausted_providers:
-                break  # nowhere left to go: the ERROR row records the refusal
-            logger.warning("%s: %s refused its API key — retrying on %s",
-                           job.ticker, refused.provider, profile.name)
-            run_digest = router.digest(profile)
-            spec = replace(spec, env=tuple(sorted(profile.env.items())))
-            try:
-                result = child_runner(spec, settings.run_timeout_seconds)
-            except Exception as exc:
-                result = ChildResult(-1, None, f"child runner raised: {exc}")
-        while (
-            profile is not None
-            and profile.provider in ("anthropic", "openai")
-            and result.returncode != 0
-            and is_credit_exhausted_error(result.error, profile.provider)
-        ):
-            # llm-cost R2 / ladder L1: the credits are gone — mark the month
-            # and rerun this run on the next rung (at most anthropic → openai
-            # → deepseek: each pass marks its provider, and DeepSeek never
-            # loops); only the final result is recorded.
-            month = clock().strftime("%Y-%m")
-            mark_exhausted(config.state_dir, month, result.error or "credits exhausted", profile.provider)
-            append_usage(
-                config.state_dir, run_id=None, date=date_iso, session=session,
-                ticker=job.ticker, arm=arm, profile=profile.name,
-                models=result.usage or {}, error=result.error, clock=clock,
-            )
-            exhausted = profile
-            exhausted_providers.add(exhausted.provider)
-            profile = router.choose().profile if settings.llm_routing == "ladder" else DEEPSEEK
-            # Never a rung this run already ran out on — even when the marker
+        while profile is not None and result.returncode != 0:
+            credit = profile.provider in ("anthropic", "openai") and is_credit_exhausted_error(
+                result.error, profile.provider)
+            refused_key = (router is not None and settings.llm_routing in ("ladder", "claude-first")
+                           and is_auth_error(result.error))
+            if not (credit or refused_key):
+                break
+            failed = profile
+            exhausted_providers.add(failed.provider)
+            if credit:
+                # llm-cost R2 / ladder L1: the credits are gone — mark the month.
+                month = clock().strftime("%Y-%m")
+                mark_exhausted(config.state_dir, month, result.error or "credits exhausted", failed.provider)
+            else:
+                # ladder L5: the key was refused — skip the provider for the rest
+                # of the slot only (a key is fixed by the operator, not a month).
+                router.mark_auth_failed(failed.provider)
+            profile = router.choose().profile if settings.llm_routing == "ladder" or refused_key else DEEPSEEK
+            # Never a rung this run already failed on — even when the marker
             # write failed and choose() would offer it again: step down.
             if profile.provider in exhausted_providers:
                 profile = (
@@ -1724,8 +1697,15 @@ def _run_job_impl(
                     and router.openai_usable()
                     else DEEPSEEK
                 )
-            logger.warning("%s: %s credits exhausted — retrying on %s",
-                           job.ticker, exhausted.provider, profile.name)
+            if profile.provider in exhausted_providers:
+                break  # nowhere left (DeepSeek, the floor, failed too): the ERROR row records it
+            append_usage(
+                config.state_dir, run_id=None, date=date_iso, session=session,
+                ticker=job.ticker, arm=arm, profile=failed.name,
+                models=result.usage or {}, error=result.error, clock=clock,
+            )
+            logger.warning("%s: %s %s — retrying on %s", job.ticker, failed.provider,
+                           "credits exhausted" if credit else "refused its API key", profile.name)
             run_digest = router.digest(profile)
             spec = replace(spec, env=tuple(sorted(profile.env.items())))
             try:
