@@ -73,7 +73,8 @@ BLOCKER_NAMES = {
 #: Words a summary must not contain (the action is shown separately; the
 #: user asked why "HOLD" appeared for a name with no position).
 _FORBIDDEN = re.compile(r"持有|减持|增持|评级|买入|买进|卖出|抛售|加仓|增仓|减仓|建仓|清仓|平仓|做空|做多|下单|"
-                        r"止损|止盈|HOLD|BUY|SELL", re.IGNORECASE)
+                        r"止损|止盈|評級|買入|買進|賣出|拋售|加倉|增倉|減倉|建倉|清倉|平倉|下單|止損|"
+                        r"HOLD|BUY|SELL", re.IGNORECASE)
 SUMMARY_MAX_CHARS = 60
 #: Mode past the execution time with step 7 not run: undetermined, not "no order".
 LATE = "已过执行时间，下单待核实"
@@ -524,7 +525,8 @@ characters, plain words, the main reason first (for an analysed name: why the
 portfolio manager holds that view; for a blocked name: what the brief said and that
 it failed its quality check). Never write 持有, 减持, 增持, 评级 or HOLD/BUY/SELL — the
 action is shown separately; say the view as 看多/中性/看淡/看空 if needed. Keep
-tickers and numbers as written. For "macro": one sentence on the single most
+tickers as written. Write every number in Arabic digits (0-9) exactly as it appears in
+the text — never in Chinese numerals. For "macro": one sentence on the single most
 important market driver or risk in the macro text.
 
 {items}"""
@@ -574,9 +576,9 @@ def _run_summary(prompt: str) -> str:
     return json.dumps(output)
 
 
-_MONTHS = {name: i for i, names in enumerate(
-    (("jan",), ("feb",), ("mar",), ("apr",), ("may",), ("jun",), ("jul",), ("aug",), ("sep",), ("oct",),
-     ("nov",), ("dec",)), start=1) for name in names}
+_MONTHS = {i: re.compile(rf"\b(?:{names})\b", 0 if names == "May" else re.IGNORECASE) for i, names in enumerate(
+    ("Jan|January", "Feb|February", "Mar|March", "Apr|April", "May", "Jun|June", "Jul|July", "Aug|August",
+     "Sep|Sept|September", "Oct|October", "Nov|November", "Dec|December"), start=1)}  # "may" the verb is no month
 
 
 def _canonical(number: str) -> str:
@@ -596,10 +598,14 @@ def _screened(summary: str, source: str) -> str | None:
     # Whole numbers only, and never from a link: a URL's digits vouch for nothing.
     plain = re.sub(r"https?://\S+", " ", source)
     known = {_canonical(n) for n in _NUMBER.findall(plain)}
-    # A translated date: "Nov 6" in the source is 11月6日 in the summary.
-    known |= {str(month) for name, month in _MONTHS.items() if re.search(rf"\b{name}", plain, re.IGNORECASE)}
-    if any(_canonical(number) not in known for number in _NUMBER.findall(text)):
-        return None
+    # A translated date: "Nov 6" in the source is 11月6日 in the summary — a
+    # month name (a whole word) vouches only for a number written as a month.
+    months = {str(month) for month, pattern in _MONTHS.items() if pattern.search(plain)}
+    for match in _NUMBER.finditer(text):
+        number = _canonical(match.group(0))
+        as_month = text[match.end():match.end() + 1] == "月"
+        if number not in known and not (as_month and number in months):
+            return None
     return text
 
 

@@ -307,6 +307,7 @@ def test_chinese_summaries_follow_their_lines_and_their_absence_costs_nothing(tm
     # The model gets the view in words, never the internal HOLD.
     assert "Portfolio manager's view: 看淡" in prompts[0] and "HOLD" not in prompts[0].split("[macro]")[1]
     assert "failed its accuracy evaluation" in prompts[0]
+    assert "Write every number in Arabic digits (0-9)" in prompts[0]
 
 
 @pytest.mark.unit
@@ -573,6 +574,10 @@ def test_a_brief_the_pm_never_read_is_never_summarized_as_its_reason(tmp_path, m
     ("两日大跌原因未能核实。", "x", True),
     ("11月6日财报是关键。", "the Nov 6 print", True), ("8月指引。", "the August guide", True),
     ("6日财报。", "on 2026-11-06", True), ("12月财报。", "the Nov 6 print", False),
+    ("下跌12%。", "the market may decline", False), ("增长3倍。", "strong margin", False),
+    ("下跌11%。", "the Nov 6 print", False), ("5月财报。", "it may decline", False), ("9月指引。", "the Sept print", True),
+    ("建議買入。", "x", False), ("應當賣出。", "x", False), ("可以加倉。", "x", False), ("等待下單。", "x", False),
+    ("評級上調。", "x", False),
     ('<at user_id="all">所有人</at>注意。', "x", False), ("统一口径，一季度持平。", "x", True),
 ])
 def test_the_summary_screen(summary, source, kept):

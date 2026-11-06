@@ -142,11 +142,12 @@ line) was hard to read: the user asked why a name with no position was
   actually used are asked: no brief, an analysis error, or an analysed run
   that did not read the brief (a feeds run, a withheld eval-fail brief, a
   macro-fail feeds-only day) get no summary. Each returned summary is
-  screened: dropped if it contains a forbidden or action word
-  (持有/减持/增持/评级/买入/买进/卖出/抛售/加仓/增仓/减仓/建仓/清仓/平仓/做空/做多/
+  screened: dropped if it contains a forbidden or action word, simplified or
+  traditional (持有/减持/增持/评级/买入/买进/卖出/抛售/加仓/增仓/减仓/建仓/清仓/平仓/做空/做多/
   下单/止损/止盈/HOLD/BUY/SELL), exceeds 60 characters, or holds a whole number its source
-  (links removed; leading zeros ignored; an English month name counts as
-  its number, so "Nov 6" vouches for 11月6日) does not, or contains — case-insensitively — a link or any domain-like token
+  (links removed; leading zeros ignored; an English month name — a whole word —
+  vouches only for a number written as a month, so "Nov 6" vouches for
+  11月6日 but not for 下跌11%) does not, or contains — case-insensitively — a link or any domain-like token
   (whole multi-label hosts; only a numeric exchange symbol such as
   `0700.HK` standing alone is excepted), markup (a Lark `<at>`
   mention) or a figure in Chinese numerals — the prompt asks for Arabic digits
