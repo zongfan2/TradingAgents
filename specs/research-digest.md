@@ -36,7 +36,8 @@ line) was hard to read: the user asked why a name with no position was
 ```
 
 - **Header**: positions from the trades book (`trade_notify/entries.json`;
-  with no book, or one that does not parse, positions are **unknown** — the
+  with no book, one that does not parse, or a row it cannot read,
+  positions are **unknown** — the
   segment is left out and no line claims 无持仓) and the planned orders
   (us) or `A股不下单` (cn).
 - **Macro**: the revision-bound eval verdict and each of sections 1–6's
@@ -139,7 +140,8 @@ line) was hard to read: the user asked why a name with no position was
   mention) or a figure in Chinese numerals (two or more numeral
   characters incl. traditional 萬/億, 百分之… / …分之…, …成, …个百分点, a
   numeral before any currency unit: 美元/美分/港元/港币/欧元/日元/英镑/人民币/
-  元/块/角/毛), or a host with a path, even a numeric one; only the names asked are used. A call that used
+  元/块/角/毛), or a host with a path, even a numeric one, an IP-like or multi-dot
+  figure, or a common TLD in any script; only the names asked are used. A call that used
   a web tool is discarded — by its tool-call fields or a billed search count
   (the CLI keeps web tools on; outside facts would pass every screen).
   Any failure or a 45 s timeout: logged, and the digest goes out without

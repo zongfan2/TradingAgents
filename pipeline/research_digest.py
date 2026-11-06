@@ -90,6 +90,8 @@ _UNSAFE = re.compile(
     # any domain-like token (ASCII, so CJK neighbours do not hide it), except
     # an exchange suffix such as 0700.HK / 600256.SS
     r"|[A-Za-z0-9-]\.[A-Za-z]{2,}/"  # a host with a path, numeric or not
+    r"|\d+(?:\.\d+){2,}"  # an IP-like host or a dotted figure the number check cannot read
+    r"|(?<!\d)\.(?:com|net|org|cn|io|ai|ly|me|co|info|news|top|xyz)(?![A-Za-z])"  # a host in any script
     r"|百分之|分之|[零〇一二两三四五六七八九十百千万亿萬億]{2,}|[零〇一二两三四五六七八九十百千]+[万亿萬億成]"
     r"|[零〇一二两三四五六七八九十百千万亿萬億]+(?:美元|美分|港元|港币|欧元|日元|英镑|人民币|元|块|角|毛|%|倍|个百分点)",
     re.IGNORECASE)
@@ -180,11 +182,15 @@ def _held(config: PipelineConfig) -> set[str] | None:
 
     book = Entries(config.state_dir)
     try:
-        if not isinstance(json.loads(book.path.read_text(encoding="utf-8")), dict):
-            return None
+        raw = json.loads(book.path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
-    return set(book.load())
+    if not isinstance(raw, dict):
+        return None
+    held = set(book.load())
+    if any(not str(symbol).startswith("_") and symbol not in held for symbol in raw):
+        return None  # a row the book could not read: its position is unknown, not none
+    return held
 
 
 def _records(config: PipelineConfig) -> dict[str, Any]:

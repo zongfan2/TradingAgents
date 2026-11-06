@@ -207,7 +207,7 @@ def test_unknown_positions_are_never_read_as_none(tmp_path, live):
     cfg = config(tmp_path)
     write_slot(cfg, briefs={"MU": ticker_brief("MU", 4.5, "mixed — m.")},
                tickers=[entry("MU", decide=decided(cfg, "MU", "SELL", "Sell", plan=SELL_PLAN))])
-    for state in (None, "{not json", b"\xff\xfe"):
+    for state in (None, "{not json", b"\xff\xfe", '{"MU": {"avg": "x", "qty": 5}}'):
         path = cfg.state_dir / "trade_notify" / "entries.json"
         if state is not None:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -562,7 +562,8 @@ def test_a_brief_the_pm_never_read_is_never_summarized_as_its_reason(tmp_path, m
     ("0700.HK 财报前无新消息。", "0700.HK", True), ("600256.SS 走势平稳。", "600256.SS", True),
     ("详见 evil.hk/x。", "x", False), ("三分之一的收入。", "x", False), ("五億美元。", "x", False),
     ("详见 0700.hk/login。", "0700.HK", False), ("目标价九港元。", "x", False), ("九块钱。", "x", False),
-    ("五欧元。", "x", False),
+    ("五欧元。", "x", False), ("详见 1.2.3.4/login。", "x", False), ("目标 520.5.1。", "x", False),
+    ("详见 例子.com。", "x", False),
     ('<at user_id="all">所有人</at>注意。', "x", False), ("统一口径，一季度持平。", "x", True),
 ])
 def test_the_summary_screen(summary, source, kept):
