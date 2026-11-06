@@ -31,6 +31,42 @@ def prices_for(*tickers, moves=None):
     return out
 
 
+@pytest.fixture(autouse=True)
+def offline_broker(monkeypatch):
+    """No test reaches Alpaca: the developer's .env keys survive conftest."""
+    from pipeline import trade_notify
+
+    built = []
+
+    def refuse(*a, **k):
+        built.append(a)
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr(trade_notify, "AlpacaReadOnly", refuse)
+    monkeypatch.setattr(trade_notify, "alpaca_keys", lambda: ("key", "secret"))
+    return built
+
+
+class FakeBroker:
+    def __init__(self, trading=True):
+        self.trading = trading
+
+    def account(self):
+        return {"equity": "1010", "last_equity": "1000", "cash": "500", "buying_power": "900"}
+
+    def positions(self):
+        return [{"symbol": "NVDA", "qty": "2", "avg_entry_price": "100", "current_price": "103", "unrealized_pl": "6"}]
+
+    def fills_since(self, start):
+        return [{"symbol": "NVDA", "side": "buy", "qty": "2", "price": "100",
+                 "transaction_time": "2026-11-04T14:50:00Z"},
+                {"symbol": "MU", "side": "buy", "qty": "1", "price": "90",
+                 "transaction_time": "2026-11-05T14:50:00Z"}]  # another New York day
+
+    def is_trading_day(self, day):
+        return self.trading
+
+
 @pytest.fixture
 def archive(tmp_path, monkeypatch):
     root = tmp_path / "archive"
@@ -102,7 +138,7 @@ def review():
 def test_the_review_goes_to_the_trades_group_once_and_is_archived(tmp_path, archive, monkeypatch):
     cfg = config(tmp_path)
     slot(cfg)
-    monkeypatch.setattr(dr, "closes", lambda tickers, fetch=None: prices_for("NVDA", "FN"))
+    monkeypatch.setattr(dr, "closes", lambda tickers, fetch=None, **k: prices_for("NVDA", "FN"))
     sent, prompts = [], []
     text = dr.review_day(cfg, DAY, send=lambda title, t: sent.append(t),
                          runner=lambda prompt: prompts.append(prompt) or review())
@@ -118,7 +154,7 @@ def test_the_review_goes_to_the_trades_group_once_and_is_archived(tmp_path, arch
 def test_without_the_model_the_facts_still_go_out(tmp_path, archive, monkeypatch):
     cfg = config(tmp_path)
     slot(cfg)
-    monkeypatch.setattr(dr, "closes", lambda tickers, fetch=None: prices_for("NVDA", "FN", moves={"FN": 8.0}))
+    monkeypatch.setattr(dr, "closes", lambda tickers, fetch=None, **k: prices_for("NVDA", "FN", moves={"FN": 8.0}))
     sent = []
 
     def broken(prompt):
@@ -200,7 +236,7 @@ def test_a_broken_archive_or_macro_brief_still_sends_the_day(tmp_path, monkeypat
     blocker = tmp_path / "a-file"
     blocker.write_text("x")
     monkeypatch.setenv(dr.ARCHIVE_ENV, str(blocker / "archive"))  # an unwritable root
-    monkeypatch.setattr(dr, "closes", lambda tickers, fetch=None: prices_for("NVDA", "FN"))
+    monkeypatch.setattr(dr, "closes", lambda tickers, fetch=None, **k: prices_for("NVDA", "FN"))
     (cfg.macro_brief_dir / f"{DAY}.us.md").write_text("---\nas_of_date: 2026-13-45\n---\n")
     sent = []
     text = dr.review_day(cfg, DAY, send=lambda title, t: sent.append(t), runner=lambda prompt: review())
@@ -242,7 +278,7 @@ def test_re_archiving_never_replaces_good_files_with_empty_ones(tmp_path, archiv
 def test_a_malformed_or_unsafe_review_falls_back_to_the_facts(tmp_path, archive, monkeypatch, bad):
     cfg = config(tmp_path)
     slot(cfg)
-    monkeypatch.setattr(dr, "closes", lambda tickers, fetch=None: prices_for("NVDA", "FN"))
+    monkeypatch.setattr(dr, "closes", lambda tickers, fetch=None, **k: prices_for("NVDA", "FN"))
     sent = []
     text = dr.review_day(cfg, DAY, send=lambda title, t: sent.append(t), runner=lambda prompt: bad)
     assert "复盘模型不可用" in text and sent == [text] and "evil" not in text and "<at" not in text
@@ -281,7 +317,7 @@ def test_the_usage_archive_reads_the_log_the_writer_uses_and_includes_the_review
     slot(cfg)
     log = tmp_path / "custom-usage.jsonl"
     monkeypatch.setenv("TRADINGAGENTS_CLAUDE_USAGE_LOG", str(log))
-    monkeypatch.setattr(dr, "closes", lambda tickers, fetch=None: prices_for("NVDA", "FN"))
+    monkeypatch.setattr(dr, "closes", lambda tickers, fetch=None, **k: prices_for("NVDA", "FN"))
 
     def runner(prompt):
         log.write_text(json.dumps({"ts": "2026-11-04T22:10:00+00:00", "component": "daily_review"}) + "\n")
@@ -332,7 +368,7 @@ def test_an_unwritable_archive_leaves_the_day_for_the_retry(tmp_path, monkeypatc
     blocker = tmp_path / "a-file"
     blocker.write_text("x")
     monkeypatch.setenv(dr.ARCHIVE_ENV, str(blocker / "archive"))
-    monkeypatch.setattr(dr, "closes", lambda tickers, fetch=None: prices_for("NVDA", "FN"))
+    monkeypatch.setattr(dr, "closes", lambda tickers, fetch=None, **k: prices_for("NVDA", "FN"))
     monkeypatch.setattr(dr, "_run_review", lambda prompt: review())
     monkeypatch.setattr(trade_monitor, "make_trades_sender", lambda c: None)
     assert dr.run(cfg, DAY) == 1
@@ -361,3 +397,171 @@ def test_the_price_reads_share_a_budget():
 
     out = dr.closes({f"T{i}" for i in range(20)}, fetch=slow, budget_s=0.12)
     assert 0 < len(out) < 20  # the rest skipped, the review goes on
+
+
+@pytest.mark.unit
+def test_an_empty_or_row_less_ledger_never_empties_the_archive(tmp_path, archive):
+    cfg = config(tmp_path)
+    slot(cfg)
+    dr.archive_day(cfg, DAY, prices=prices_for("NVDA", "FN"))
+    dest = archive / "decisions" / DAY.isoformat() / "decisions.jsonl"
+    kept = dest.read_bytes()
+    assert kept
+    ledger = cfg.ledger_dir / "decisions.jsonl"
+    for truncated in ("", json.dumps({"date": "2026-10-01", "ticker": "X"}) + "\n", "garbage\n"):
+        ledger.write_text(truncated)
+        counts = dr.archive_day(cfg, DAY, prices=prices_for("NVDA", "FN"))
+        assert dest.read_bytes() == kept and counts["decisions:missing"] == 1
+
+
+@pytest.mark.unit
+def test_benchmarks_and_the_days_names_are_read_before_older_ones(tmp_path):
+    cfg = config(tmp_path)
+    slot(cfg)  # DAY: NVDA, FN
+    old = config(tmp_path)
+    funnel = old.state_dir / "funnel" / "us"
+    older = DAY.replace(day=1)
+    (funnel / f"{older.isoformat()}.json").write_text(json.dumps(
+        {"tickers": [{"ticker": f"A{i:02d}"} for i in range(30)]}))
+    read = []
+
+    def fetch(ticker):
+        read.append(ticker)
+        return [(DAY, 1.0)]
+
+    stats = {}
+    dr.history_prices(cfg, DAY, fetch=fetch, stats=stats)
+    assert read[:3] == list(dr.BENCHMARKS.values()) and set(read[3:5]) == {"NVDA", "FN"}
+    assert stats == {"skipped": 0, "failed": 0}
+    stats = {}
+    out = dr.closes(set(read), fetch=lambda t: [], first=read, stats=stats)
+    assert out == {} and stats["failed"] == len(read)
+
+
+@pytest.mark.unit
+def test_a_truncated_price_read_is_a_fact_and_in_the_message(tmp_path, archive, monkeypatch):
+    cfg = config(tmp_path)
+    slot(cfg)
+
+    def partial(tickers, fetch=None, budget_s=0, *, first=(), stats=None):
+        stats.update(skipped=7, failed=1)
+        return prices_for("NVDA", "FN")
+
+    monkeypatch.setattr(dr, "closes", partial)
+    prompts = []
+    text = dr.review_day(cfg, DAY, send=None, runner=lambda prompt: prompts.append(prompt) or review())
+    assert '"price_reads": {"skipped": 7, "failed": 1}' in prompts[0]
+    assert "行情读取不完整：跳过 7 只、失败 1 只" in text
+
+
+@pytest.mark.unit
+def test_a_retry_after_an_archive_failure_reuses_the_queued_review(tmp_path, monkeypatch):
+    cfg = config(tmp_path)
+    slot(cfg)
+    blocker = tmp_path / "a-file"
+    blocker.write_text("x")
+    monkeypatch.setenv(dr.ARCHIVE_ENV, str(blocker / "archive"))
+    monkeypatch.setattr(dr, "closes", lambda tickers, fetch=None, **k: prices_for("NVDA", "FN"))
+    sent = []
+    first, archived = dr.review_day(cfg, DAY, send=lambda title, t: sent.append(t), runner=lambda p: review(),
+                                    return_archived=True)
+    assert not archived and sent == [first]
+    root = tmp_path / "archive"
+    monkeypatch.setenv(dr.ARCHIVE_ENV, str(root))
+
+    def again(prompt):
+        raise AssertionError("no second model call")
+
+    text, archived = dr.review_day(cfg, DAY, send=lambda title, t: sent.append(t), runner=again,
+                                   return_archived=True)
+    assert archived and text == first and sent == [first]
+    assert (root / "reviews" / DAY.isoformat() / "review.md").read_text() == first + "\n"
+
+
+@pytest.mark.unit
+def test_a_past_day_run_takes_no_broker_snapshot(tmp_path, archive, monkeypatch, offline_broker):
+    from pipeline import trade_monitor, trade_notify
+
+    cfg = config(tmp_path)
+    slot(cfg)
+    monkeypatch.setattr(dr, "closes", lambda tickers, fetch=None, **k: prices_for("NVDA", "FN"))
+    monkeypatch.setattr(dr, "_run_review", lambda prompt: review())
+    monkeypatch.setattr(trade_monitor, "make_trades_sender", lambda c: None)
+    broker = FakeBroker()
+    monkeypatch.setattr(trade_notify, "AlpacaReadOnly", lambda *a: broker)
+    snapshots = []
+    monkeypatch.setattr(broker, "account", lambda: snapshots.append(1) or {})
+    assert dr.run(cfg, DAY) == 0  # DAY is in the past
+    assert snapshots == [] and not (archive / "broker").exists()
+
+
+@pytest.mark.unit
+def test_a_market_holiday_is_archived_not_reviewed(tmp_path, archive, monkeypatch):
+    from pipeline import trade_monitor, trade_notify
+
+    cfg = config(tmp_path)
+    slot(cfg)
+    monkeypatch.setattr(dr, "closes", lambda tickers, fetch=None, **k: prices_for("NVDA", "FN"))
+    sent = []
+    monkeypatch.setattr(trade_monitor, "make_trades_sender", lambda c: lambda title, t: sent.append(t))
+    monkeypatch.setattr(trade_notify, "AlpacaReadOnly", lambda *a: FakeBroker(trading=False))
+
+    def never(prompt):
+        raise AssertionError("no model call on a holiday")
+
+    monkeypatch.setattr(dr, "_run_review", never)
+    assert dr.run(cfg, DAY) == 0
+    assert sent == [] and dr._marks(cfg, DAY)[1].exists()
+    assert (archive / "funnel" / DAY.isoformat() / "us.json").exists()
+    assert not (archive / "reviews" / DAY.isoformat()).exists()
+
+
+@pytest.mark.unit
+def test_an_undone_day_is_picked_up_after_midnight_within_the_look_back(tmp_path):
+    cfg = config(tmp_path)
+    slot(cfg)  # Wednesday DAY
+    spawned = []
+    runner = lambda cfg, day: spawned.append(day)  # noqa: E731
+    thursday = datetime(2026, 11, 5, 0, 30, tzinfo=dr.NY)
+    assert dr.maybe_start(cfg, thursday, runner=runner) and spawned == [DAY]
+    assert not dr.maybe_start(cfg, thursday.replace(hour=1), runner=runner)  # started < 2 h ago
+    sunday = datetime(2026, 11, 8, 12, tzinfo=dr.NY)  # 4 days on: past the look-back
+    assert not dr.maybe_start(config(tmp_path), sunday, runner=runner) and len(spawned) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad", ["见 360.hk/x", "见 例子.com/x", "见 1.2.3.4/x", "<at id=1>", "</a>", "<!-- x -->"])
+def test_hosts_and_tags_are_screened(bad):
+    with pytest.raises(ValueError):
+        dr.checked_review({**review(), "summary": bad})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("ok", ["超额<SPY", "NVDA<SPY 2 天", "n<10", "<A股>"])
+def test_comparisons_pass_the_screen(ok):
+    assert dr.checked_review({**review(), "summary": ok})["summary"] == ok
+
+
+@pytest.mark.unit
+def test_the_broker_snapshot_is_archived_and_in_the_facts(tmp_path, archive):
+    cfg = config(tmp_path)
+    slot(cfg)
+    broker = FakeBroker()
+    counts = dr.archive_day(cfg, DAY, broker=broker, prices=prices_for("NVDA", "FN"))
+    folder = archive / "broker" / DAY.isoformat()
+    assert json.loads((folder / "account.json").read_text())["equity"] == "1010"
+    assert json.loads((folder / "positions.json").read_text())[0]["symbol"] == "NVDA"
+    assert [f["symbol"] for f in json.loads((folder / "fills.json").read_text())] == ["NVDA"]  # New York day only
+    assert counts["broker"] == 3
+    facts = dr.build_facts(cfg, DAY, prices=prices_for("NVDA", "FN"), broker=broker)
+    assert facts["account"]["equity"] == "1010" and facts["positions"][0]["qty"] == "2"
+    assert [f["symbol"] for f in facts["fills"]] == ["NVDA"]
+
+    def down(*a):
+        raise ConnectionError("down")
+
+    broken = FakeBroker()
+    broken.account = broken.positions = broken.fills_since = down
+    counts = dr.archive_day(cfg, DAY, broker=broken, prices=prices_for("NVDA", "FN"))
+    assert counts["broker:missing"] == 3
+    assert json.loads((folder / "account.json").read_text())["equity"] == "1010"  # kept

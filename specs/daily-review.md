@@ -37,12 +37,15 @@ US trading date `day`, into `<root>/<category>/<day>/…` (root: env
 Every write is atomic and idempotent: re-archiving a day rewrites the same
 content. A missing or unreadable input is skipped and counted
 (`<category>:missing`) and **never replaces an archived file with an empty
-one** (a missing or unreadable ledger or usage log, an empty source file, a
-failed price fetch, a date older than the data window); `closes.csv` is
+one** (a missing or unreadable ledger or usage log, an empty or row-less
+read of one — a truncated ledger —, an empty source file, a failed price
+fetch, a date older than the data window); `closes.csv` is
 merged — a partial refetch refreshes rows, never drops one. A root that
 cannot be written (a missing drive) leaves the day without a done mark, so
 the stuck retry archives it later (the message, already queued, is not
-resent). The review archives after its model call, so the day's
+resent): the review as queued (facts, review, text) is kept in
+`state_dir/daily_review/<date>.queued.json` before the send, and a retry
+re-queues and archives that same text — no second model call. The review archives after its model call, so the day's
 `daily_review` usage row is included, and reuses the facts' closes.
 `python -m pipeline.daily_review archive --since D [--until D]` backfills.
 
@@ -62,6 +65,9 @@ prompt):
 - every funnel entry of the session, a brief-less one too (a failed
   collection, a watch name), with its layer and collect code;
 - analysis errors by kind (`llm_usage.error_kind`) and the day's fills;
+- `price_reads`: how many price reads were skipped (budget spent) or
+  failed — a truncated read is a fact in the prompt and a warning line in
+  the message, never a quiet null;
 - a rolling scoreboard over the last 20 us sessions with a snapshot: the
   **decision day's own session** excess return (the pre-market decision's
   day — it includes the overnight gap before the 09:45 execution) by brief
@@ -95,11 +101,18 @@ never lost.
 The hourly watchdog (`_hourly_trade_notifications`, guarded) calls
 `maybe_start`: once the New York clock is past 17:00 on a weekday whose us
 funnel snapshot exists, it runs the review **inline** (its log is the watchdog's): the
-price reads share a 240 s budget (tickers left are skipped, their moves
-null) and the model call has its own 300 s timeout, inside the watchdog
+price reads share a 240 s budget, read benchmarks first, then the day's
+names, then the scoreboard window newest first (tickers left are skipped,
+counted in `price_reads`) and the model call has its own 300 s timeout, inside the watchdog
 task's 15-minute limit. It runs whether or not a trades webhook exists. Marks
 `state_dir/daily_review/<date>.started|done`: a started run older than 2 h is
-retried, a done day never re-runs; the done mark is written once the message
+retried, a done day never re-runs, and a day left undone (the host off all
+evening, the drive missing past midnight) is still picked up for 3 days
+(Monday reaches Friday), oldest first; a weekday the broker's calendar calls
+a market holiday is archived and marked done without a model call or a
+message (no calendar: the weekday rule stands). The read-only broker is
+built for the calendar; its account/positions/fills snapshot is taken only
+when the day is today; the done mark is written once the message
 is queued (or when no trades channel is configured — the review is then only
 archived, with a warning). By hand, `python -m pipeline.daily_review run
 --date D` loads the repo `.env` first, like every job.
@@ -139,4 +152,6 @@ archived, with a warning). By hand, `python -m pipeline.daily_review run
    failure before the send still sends the facts; the archive never
    replaces a file with an empty one (a missing or empty source, a partial
    price refetch — closes are merged, never dropped).
-7. Tests are offline.
+7. Tests are offline (the broker is replaced in every test).
+8. A retry never calls the model again for a queued day; a holiday sends
+   nothing; a day undone at midnight is still reviewed within 3 days.

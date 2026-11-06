@@ -50,7 +50,15 @@ SEVERITIES = ("高", "中", "低")
 #: any scheme, www., a markdown link, an HTML/Lark tag — a plain comparison
 #: ("超额>2%", "n<10") is fine — and any domain-like host (research_digest's
 #: rule: only a numeric exchange symbol such as 0700.HK passes).
-_UNSAFE_TEXT = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://|www\.|\]\(|<\s*/?\s*[A-Za-z!]", re.IGNORECASE)
+_UNSAFE_TEXT = re.compile(
+    r"[A-Za-z][A-Za-z0-9+.-]*://|www\.|\]\("
+    # a tag (an HTML or Lark element name, or <!): NVDA<SPY is a comparison
+    r"|<\s*/?\s*(?:a|at|b|i|u|s|p|br|hr|em|font|img|div|span|script|style|iframe|svg|link|meta|form)\b|<\s*!"
+    # research_digest's host rules: a host with a path (numeric or not), an
+    # IP-like host, a common TLD in any script
+    r"|[A-Za-z0-9-]\.[A-Za-z]{2,}/|\d+(?:\.\d+){2,}"
+    r"|(?<!\d)\.(?:com|net|org|cn|io|ai|ly|me|co|info|news|top|xyz)(?![A-Za-z])",
+    re.IGNORECASE)
 
 
 def archive_root(config: PipelineConfig | None = None) -> Path:
@@ -107,27 +115,37 @@ def _day_tickers(config: PipelineConfig, day: date) -> dict[str, set[str]]:
 PRICE_BUDGET_S = 240.0
 
 
-def closes(tickers: set[str], fetch=None, budget_s: float = PRICE_BUDGET_S) -> dict[str, list[tuple[date, float]]]:
+def closes(tickers: set[str], fetch=None, budget_s: float = PRICE_BUDGET_S, *, first=(),
+           stats: dict | None = None) -> dict[str, list[tuple[date, float]]]:
     """ticker -> clean daily closes (the price tape's source); a ticker whose
-    read fails is left out (never an empty series)."""
+    read fails is left out (never an empty series). ``first`` (in order) is
+    read before the rest, so a spent budget skips the oldest names, never the
+    benchmarks or the day's; ``stats`` receives the skipped and failed counts."""
     import time as _time
 
     from pipeline import price_tape
 
-    out = {}
+    order = [t for t in dict.fromkeys(first) if t in tickers] + sorted(set(tickers) - set(first))
+    out, failed, skipped = {}, 0, 0
     deadline = _time.monotonic() + budget_s
-    for ticker in sorted(tickers):
+    for i, ticker in enumerate(order):
         if _time.monotonic() > deadline:
-            logger.warning("daily review: price budget spent — %d tickers skipped", len(tickers) - len(out))
+            skipped = len(order) - i
+            logger.warning("daily review: price budget spent — %d tickers skipped", skipped)
             break
         try:
             bars = (fetch or price_tape.fetch_daily_closes)(ticker)
         except Exception as exc:
             logger.warning("daily review: closes for %s unavailable (%s)", ticker, type(exc).__name__)
+            failed += 1
             continue
         series = [(d, c) for d, c in bars if c == c and c > 0]
         if series:
             out[ticker] = series
+        else:
+            failed += 1
+    if stats is not None:
+        stats.update(skipped=skipped, failed=failed)
     return out
 
 
@@ -169,10 +187,11 @@ def _copy(src: Path, dest: Path, counts: dict[str, int], category: str) -> None:
 
 
 def _write(dest: Path, text: str | None, counts: dict[str, int], category: str) -> None:
-    """Write ``text``; None means the input could not be read: the archived
-    file is kept as it is and the category counts as missing."""
-    if text is None:
-        counts[f"{category}:missing"] += 1
+    """Write ``text``; None means the input could not be read, and an empty
+    text never replaces a non-empty archived file: the archived file is then
+    kept as it is and the category counts as missing."""
+    if text is None or (not text and dest.exists() and dest.stat().st_size):
+        counts[f"{category}:missing"] += 1  # an empty read (a truncated ledger) never empties the archive
         return
     dest.parent.mkdir(parents=True, exist_ok=True)
     atomic_write(dest, text)
@@ -238,7 +257,7 @@ def _archive_into(config, day, root, iso, counts, *, broker, fetch, prices) -> N
            counts, "llm_usage")
     if prices is None:
         tickers = set().union(*_day_tickers(config, day).values()) | set(BENCHMARKS.values())
-        prices = closes(tickers, fetch)
+        prices = closes(tickers, fetch, first=BENCHMARKS.values())
     rows = [[iso, ticker, f"{close:.4f}", "" if (c := day_change(series, day)) is None else f"{c:.2f}"]
             for ticker, series in sorted(prices.items()) for d, close in series if d == day]
     dest = root / "prices" / iso / "closes.csv"
@@ -387,22 +406,27 @@ def _error_kinds(config: PipelineConfig, day: date) -> dict[str, int]:
     return dict(out)
 
 
-def history_prices(config: PipelineConfig, day: date, fetch=None) -> dict:
-    """Closes for the day's names, the scoreboard window's and the benchmarks."""
-    tickers: set[str] = set(BENCHMARKS.values())
+def history_prices(config: PipelineConfig, day: date, fetch=None, stats: dict | None = None) -> dict:
+    """Closes for the benchmarks, the day's names, then the scoreboard
+    window's, newest day first (a spent budget skips the oldest)."""
+    first: list[str] = list(BENCHMARKS.values())
     for back in range(60):
-        for names in _day_tickers(config, day - timedelta(days=back)).values():
-            tickers |= names
-    return closes(tickers, fetch)
+        for _session, names in sorted(_day_tickers(config, day - timedelta(days=back)).items(), reverse=True):
+            first += sorted(names)
+    return closes(set(first), fetch, first=first, stats=stats)
 
 
-def build_facts(config: PipelineConfig, day: date, *, prices: dict | None = None, broker=None) -> dict:
+def build_facts(config: PipelineConfig, day: date, *, prices: dict | None = None, broker=None,
+                price_stats: dict | None = None) -> dict:
     """The day's structured facts for the review (specs/daily-review.md R2)."""
     from pipeline import research_digest as rd
 
     if prices is None:
-        prices = history_prices(config, day)
+        price_stats = {}
+        prices = history_prices(config, day, stats=price_stats)
     facts: dict[str, Any] = {"date": day.isoformat()}
+    if price_stats:  # a truncated or failed price read is a fact, not a quiet null
+        facts["price_reads"] = {"skipped": price_stats.get("skipped", 0), "failed": price_stats.get("failed", 0)}
     for session in ("us", "cn"):
         names = _with_moves(_names(config, session, day), session, day, prices)
         try:
@@ -469,7 +493,8 @@ REVIEW_SCHEMA = {
 REVIEW_PROMPT = """你是一个交易研究流水线的复盘员。下面是 {date} 这一天的结构化事实（JSON），
 包括：美股（us）与 A股/港股（cn）每只股票的简报方向（impact: 偏多/偏空/中性/分歧）、催化剂分数、
 评估结论、触发代码、分析结论（decision: BUY/SELL/HOLD/ERROR）与 PM 评级、执行结果、
-当天涨跌（move_pct）和相对基准的超额（excess_pct；为 null 表示行情尚未更新，不是零）；
+当天涨跌（move_pct）和相对基准的超额（excess_pct；为 null 表示没有读到行情，不是零——
+price_reads 记录行情读取被跳过（skipped，时间预算用完）和失败（failed）的股票数，大于 0 时相关统计不完整，要在总结里说明）；
 brief_used 不为空表示分析用的是那一天的旧简报（当天简报缺失时按合约沿用前一天的）；
 未分析却大幅波动的股票（missed_moves）；宏观判断；分析出错的原因分类；账户、持仓与成交；
 以及最近 {sessions} 个交易日的滚动统计（决策当天的超额收益，按简报方向、按 PM 评级，含样本数）。
@@ -574,6 +599,9 @@ def render(day: date, facts: dict, review: dict | None) -> str:
     us = facts.get("us") or {}
     if us.get("benchmark_move_pct") is not None:
         lines.append(f"大盘：SPY {us['benchmark_move_pct']:+.2f}%")
+    reads = facts.get("price_reads") or {}
+    if reads.get("skipped") or reads.get("failed"):
+        lines.append(f"⚠️ 行情读取不完整：跳过 {reads.get('skipped', 0)} 只、失败 {reads.get('failed', 0)} 只，相关涨跌与统计缺失")
     if review is None:
         lines.append("复盘模型不可用，以下为当天事实：")
         for session, label in (("us", "美股"), ("cn", "A股/港股")):
@@ -599,25 +627,39 @@ def render(day: date, facts: dict, review: dict | None) -> str:
 def review_day(config: PipelineConfig, day: date, *, broker=None, send=None, runner=None,
                return_archived: bool = False):
     """Facts, review, deliver, archive; returns the text. Every step but the
-    send is guarded: whatever fails, the day's message is still queued."""
+    send is guarded: whatever fails, the day's message is still queued. The
+    review as queued is kept in state first, so a retry (the archive failed)
+    re-queues and archives that text — no second model call."""
     from pipeline import trade_notify
 
     prices: dict = {}
-    try:
-        prices = history_prices(config, day)
-        facts = build_facts(config, day, prices=prices, broker=broker)
-    except Exception as exc:
-        logger.warning("daily review: facts failed (%s)", type(exc).__name__)
-        facts = {"date": day.isoformat(), "error": type(exc).__name__}
-    review = None
-    if "error" not in facts:
+    saved = _load_queued(config, day)
+    if saved is not None:
+        facts, review, text = saved["facts"], saved["review"], saved["text"]
+    else:
+        price_stats: dict = {}
         try:
-            review = checked_review((runner or _run_review)(REVIEW_PROMPT.format(
-                date=day.isoformat(), sessions=facts["scoreboard"]["sessions"],
-                facts=json.dumps(facts, ensure_ascii=False, default=str))))
+            prices = history_prices(config, day, stats=price_stats)
+            facts = build_facts(config, day, prices=prices, broker=broker, price_stats=price_stats)
         except Exception as exc:
-            logger.warning("daily review: model unavailable (%s) — facts only", type(exc).__name__)
-    text = render(day, facts, review)
+            logger.warning("daily review: facts failed (%s)", type(exc).__name__)
+            facts = {"date": day.isoformat(), "error": type(exc).__name__}
+        review = None
+        if "error" not in facts:
+            try:
+                review = checked_review((runner or _run_review)(REVIEW_PROMPT.format(
+                    date=day.isoformat(), sessions=facts["scoreboard"]["sessions"],
+                    facts=json.dumps(facts, ensure_ascii=False, default=str))))
+            except Exception as exc:
+                logger.warning("daily review: model unavailable (%s) — facts only", type(exc).__name__)
+        text = render(day, facts, review)
+        try:
+            path = _queued_path(config, day)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            atomic_write(path, json.dumps({"facts": facts, "review": review, "text": text}, ensure_ascii=False,
+                                          default=str))
+        except OSError as exc:
+            logger.warning("daily review: queued review not kept (%s)", type(exc).__name__)
     if send is not None:
         trade_notify.enqueue(config.state_dir, f"review:{day.isoformat()}", text, send)
     archived = False
@@ -639,34 +681,55 @@ def review_day(config: PipelineConfig, day: date, *, broker=None, send=None, run
 # ---------------------------------------------------------------------------
 
 
+def _queued_path(config: PipelineConfig, day: date) -> Path:
+    return config.state_dir / "daily_review" / f"{day.isoformat()}.queued.json"
+
+
+def _load_queued(config: PipelineConfig, day: date) -> dict | None:
+    try:
+        saved = json.loads(_queued_path(config, day).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if isinstance(saved, dict) and isinstance(saved.get("text"), str) and isinstance(saved.get("facts"), dict):
+        return saved
+    return None
+
+
 def _marks(config: PipelineConfig, day: date) -> tuple[Path, Path]:
     base = config.state_dir / "daily_review"
     return base / f"{day.isoformat()}.started", base / f"{day.isoformat()}.done"
 
 
+#: A day left undone (the host off all evening, the drive missing past
+#: midnight) is still picked up this many days later — Monday reaches Friday.
+LOOKBACK_DAYS = 3
+
+
 def due(config: PipelineConfig, now: datetime) -> date | None:
-    """The New York date whose review is due now, else None: past
-    REVIEW_AFTER on a weekday with a us funnel snapshot, not done, and not
-    started within STUCK_AFTER."""
+    """The oldest New York date whose review is due now, else None: a
+    weekday within LOOKBACK_DAYS (today only past REVIEW_AFTER) with a us
+    funnel snapshot, not done, and not started within STUCK_AFTER."""
     from pipeline.funnel import snapshot_path
 
     local = now.astimezone(NY)
-    day = local.date()
-    if day.weekday() >= 5 or local.time() < REVIEW_AFTER:
-        return None
-    if not snapshot_path(config.state_dir, "us", day).exists():
-        return None
-    started, done = _marks(config, day)
-    if done.exists():
-        return None
-    if started.exists():
-        try:
-            at = datetime.fromisoformat(started.read_text(encoding="utf-8").strip())
-        except ValueError:
-            at = now - STUCK_AFTER
-        if now - at < STUCK_AFTER:
-            return None
-    return day
+    for back in range(LOOKBACK_DAYS, -1, -1):
+        day = local.date() - timedelta(days=back)
+        if day.weekday() >= 5 or (back == 0 and local.time() < REVIEW_AFTER):
+            continue
+        if not snapshot_path(config.state_dir, "us", day).exists():
+            continue
+        started, done = _marks(config, day)
+        if done.exists():
+            continue
+        if started.exists():
+            try:
+                at = datetime.fromisoformat(started.read_text(encoding="utf-8").strip())
+            except ValueError:
+                at = now - STUCK_AFTER
+            if now - at < STUCK_AFTER:
+                continue
+        return day
+    return None
 
 
 def maybe_start(config: PipelineConfig, now: datetime, *, runner=None) -> bool:
@@ -685,13 +748,28 @@ def maybe_start(config: PipelineConfig, now: datetime, *, runner=None) -> bool:
 def run(config: PipelineConfig, day: date) -> int:
     """Review ``day`` and deliver it. The done mark is written once the
     message is queued (or no trades channel exists) and the archive was
-    written; an unwritable archive leaves the day for the stuck retry."""
+    written; an unwritable archive leaves the day for the stuck retry. A
+    market holiday (the broker's calendar) is archived, never reviewed."""
     from pipeline import trade_notify
     from pipeline.trade_monitor import make_trades_sender
 
-    broker = None
+    broker = None  # read-only: the calendar for any day, the snapshot only for today
     with contextlib.suppress(Exception):
         broker = trade_notify.AlpacaReadOnly(*trade_notify.alpaca_keys())
+    _started, done = _marks(config, day)
+    trading = True
+    if broker is not None:
+        try:
+            trading = broker.is_trading_day(day)
+        except Exception as exc:  # no calendar: the weekday rule stands
+            logger.warning("daily review: calendar unavailable (%s)", type(exc).__name__)
+    if not trading:
+        logger.info("daily review: %s is a market holiday — archived, not reviewed", day)
+        if archive_day(config, day).get("error"):
+            return 1
+        done.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write(done, datetime.now(timezone.utc).isoformat())
+        return 0
     send = make_trades_sender(config) if config.notifications_enabled else None
     if send is None and config.notifications_enabled:
         logger.warning("daily review: no trades webhook configured — the review is archived, not sent")
@@ -701,7 +779,6 @@ def run(config: PipelineConfig, day: date) -> int:
         # The message is queued (key review:<day>, never resent); the archive
         # is retried by the next watchdog run after STUCK_AFTER.
         return 1
-    _started, done = _marks(config, day)
     done.parent.mkdir(parents=True, exist_ok=True)
     atomic_write(done, datetime.now(timezone.utc).isoformat())
     return 0

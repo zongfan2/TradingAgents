@@ -500,7 +500,10 @@ the Lark trades group: summary, issues with evidence, a strategy verdict
 strategy**: act on a proposal yourself. Copies land in
 `reviews/<date>/review.md` and `review.json`. Marks:
 `~/.tradingagents/daily_review/<date>.started|done` (a run stuck 2 h is
-retried). By hand: `python -m pipeline.daily_review run --date D`;
+retried; a day left undone is still picked up up to 3 days later; a market
+holiday is archived without a review). The review as queued is kept in
+`<date>.queued.json`, so a retry re-archives that text without a second
+model call — delete it to have `run --date D` write a fresh review. By hand: `python -m pipeline.daily_review run --date D`;
 backfill the archive only: `python -m pipeline.daily_review archive --since D`.
 
 ## 7b. LLM provider ladder (Claude → OpenAI → DeepSeek)
