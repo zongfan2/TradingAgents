@@ -1053,3 +1053,17 @@ def test_a_refusal_on_the_rung_reached_by_exhausted_credits_steps_down_again(tmp
     assert providers[:3] == ["anthropic", "openai", "deepseek"] and providers[3:] == ["deepseek"]
     assert outcome.summary["errors"] == 0 and exhausted_marker(config.state_dir, MONTH).exists()
     assert not exhausted_marker(config.state_dir, MONTH, "openai").exists()  # refused, not exhausted
+
+
+@pytest.mark.unit
+def test_with_every_key_refused_the_floor_never_climbs_back(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-proj-test")
+    config, resolvers = _slot(tmp_path)
+    confirm_balance(config.state_dir, MONTH, 71, NOW - timedelta(hours=1))
+    child = RefusingChild({"anthropic", "openai", "deepseek"})
+    settings = ar.RunnerSettings(ab_pairing="off", llm_routing="ladder", analysis_job_concurrency=1)
+    outcome, _ = run(config, resolvers, child, settings=settings)
+    providers = [dict(s.env)["TRADINGAGENTS_LLM_PROVIDER"] for s in child.specs]
+    assert providers == ["anthropic", "openai", "deepseek", "deepseek"]  # job 2: the floor, no climb to openai
+    assert outcome.summary["error_kinds"] == {"auth": 2}
+    assert sorted(r.preset for r in read_records(config)) == ["deepseek", "deepseek"]  # the profile that ran

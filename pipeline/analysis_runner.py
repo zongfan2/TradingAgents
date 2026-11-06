@@ -1224,6 +1224,10 @@ class _LlmRouter:
         with self._lock:
             self._auth_failed.add(provider)
 
+    def refused(self) -> set[str]:
+        with self._lock:
+            return set(self._auth_failed)
+
     def choose(self) -> RoutingDecision:
         decision = choose_profile(
             self.config.state_dir,
@@ -1687,18 +1691,23 @@ def _run_job_impl(
                 # of the slot only (a key is fixed by the operator, not a month).
                 router.mark_auth_failed(failed.provider)
             profile = router.choose().profile if settings.llm_routing == "ladder" or refused_key else DEEPSEEK
-            # Never a rung this run already failed on — even when the marker
-            # write failed and choose() would offer it again: step down.
-            if profile.provider in exhausted_providers:
+            # Never a rung this run already failed on, nor one that refused its
+            # key earlier this slot — even when the marker write failed and
+            # choose() would offer it again: step down.
+            blocked = exhausted_providers | (router.refused() if router is not None else set())
+            if profile.provider in blocked:
                 profile = (
                     OPENAI
                     if settings.llm_routing == "ladder"
-                    and "openai" not in exhausted_providers
+                    and "openai" not in blocked
                     and router.openai_usable()
                     else DEEPSEEK
                 )
-            if profile.provider in exhausted_providers:
-                break  # nowhere left (DeepSeek, the floor, failed too): the ERROR row records it
+            if profile.provider in blocked:
+                # Nowhere left (DeepSeek, the floor, failed too): the ERROR row
+                # records the attempt that actually ran, on its own profile.
+                profile = failed
+                break
             append_usage(
                 config.state_dir, run_id=None, date=date_iso, session=session,
                 ticker=job.ticker, arm=arm, profile=failed.name,
