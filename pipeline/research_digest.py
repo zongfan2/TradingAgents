@@ -20,7 +20,7 @@ import json
 import logging
 import re
 import subprocess
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -45,6 +45,7 @@ SKIP_REASONS = (
     ("core-session-off", "A股核心股本时段不分析"),
     ("budget-dropped", "已触发，因预算上限未分析"),
     ("triggered", "已触发但无分析结果（运行失败或被中止）"),
+    ("unrecorded", "无分析结果（原因未记录）"),
 )
 #: Execution-adapter codes for "no order" (non_candidate_reason /
 #: blocking_reason), in words.
@@ -62,13 +63,15 @@ BLOCKER_NAMES = {
     "max-tranches": "加仓次数已满", "pyramid-up-only": "只在盈利时加仓", "add-spacing": "加仓间隔不足",
     "cancel-failed": "撤单失败", "recovery-unavailable": "恢复数据不可用", "submit-error": "提交出错",
     "adapter-error": "执行程序出错", "rejected": "券商拒单", "manual-shadowed": "被手动重跑取代",
-    "dedupe": "重复订单", "execution-window-passed": "执行时间已过，未执行",
+    "dedupe": "重复订单",
 }
 #: Words a summary must not contain (the action is shown separately; the
 #: user asked why "HOLD" appeared for a name with no position).
 _FORBIDDEN = re.compile(r"持有|减持|增持|评级|买入|卖出|加仓|减仓|建仓|清仓|做空|做多|下单|止损|HOLD|BUY|SELL",
                         re.IGNORECASE)
 SUMMARY_MAX_CHARS = 60
+#: Mode past the execution time with step 7 not run: undetermined, not "no order".
+LATE = "已过执行时间，下单待核实"
 _NUMBER = re.compile(r"(?<![\d.])\d+(?:\.\d+)?(?!\d)(?!\.\d)")  # "520." is 520
 #: The summary call: one small, cheap model; a tight timeout so the digest
 #: never waits long for it (DIGEST_DEADLINE_S in the orchestrator bounds all).
@@ -236,6 +239,8 @@ def executed_text(code: str | None, rating: str | None, *, final: str | None,
         outcome = "已下单，见交易消息"
     elif final == "order-dry":
         outcome = "模拟单"
+    elif final != "excluded":  # unknown / pending: e.g. a submit killed after its intent row
+        outcome = "下单结果待核实"
     else:
         reason = BLOCKER_NAMES.get(str((execute or {}).get("code")))  # never a raw English code
         outcome = "未下单" + (f"：{reason}" if reason else "")
@@ -265,24 +270,30 @@ def action_text(code: str | None, rating: str | None, *, session: str, held: boo
         kept = [part for part in parts if part]
         return f"（{'；'.join(kept)}）" if kept else ""
 
+    if mode == LATE and code in ("BUY", "SELL") and blocker in (None, "unknown"):
+        return ("看多" if code == "BUY" else "看空") + paren(pm, LATE), None
     if session == "cn" and code in ("BUY", "SELL"):
         return ("看多" if code == "BUY" else "看空") + "，不下单" + paren(pm, "A股不下单"), False
     if code == "BUY":
+        if blocker == "unknown":  # no ledger row read: the adapter reads it itself
+            return "看多" + paren(pm, mode or "下单待核实"), None if not mode else False
         if blocker:
             return "看多，不下单" + paren(pm, BLOCKER_NAMES.get(blocker, "不满足下单条件")), False
         if held is None:
-            return "看多" + paren(pm, "持仓未知，是否下单待定"), None if not mode else False
+            return "看多" + paren(pm, mode or "持仓未知，是否下单待定"), None if not mode else False
         if held:
             if add_intent:
                 return "可能加仓" + paren(pm, mode or f"{at}按加仓规则"), not mode
             return "继续持有" + paren(pm, "不加仓"), False
         return "买入" + paren(pm, when), not mode
     if code == "SELL":
+        if blocker == "unknown":
+            return "看空" + paren(pm, mode or "下单待核实"), None if not mode else False
         if blocker:  # the adapter rejects the row whatever the position
             return ("不买" + paren(pm, "无持仓，不做空")) if held is False else (
                 "看空，不下单" + paren(pm, BLOCKER_NAMES.get(blocker, "不满足下单条件"))), False
         if held is None:
-            return "看空" + paren(pm, "持仓未知，是否下单待定"), None if not mode else False
+            return "看空" + paren(pm, mode or "持仓未知，是否下单待定"), None if not mode else False
         if not held:
             return "不买" + paren(pm, "无持仓，不做空"), False
         return "卖出" + paren(pm, when), not mode
@@ -326,8 +337,12 @@ class _Ticker:
         trigger = stages.get("trigger") or {}
         # A ticker that met the trigger but has no decision (budget guard,
         # a failed run) is "triggered", never "not triggered" — other.
-        self.trigger = trigger.get("code") if trigger.get("outcome") != "passed" else (
-            "budget-dropped" if trigger.get("code") == "budget-dropped" else "triggered")
+        if trigger.get("outcome") == "passed":
+            self.trigger = "budget-dropped" if trigger.get("code") == "budget-dropped" else "triggered"
+        else:
+            # A reconstructed stage with no code (no trigger event: the runner
+            # failed early, or a core name without a decision row).
+            self.trigger = trigger.get("code") or ("unrecorded" if trigger else None)
         self.final = entry_final
         execute = stages.get("execute")
         self.execute = execute if isinstance(execute, dict) else None
@@ -359,7 +374,8 @@ class _Ticker:
         return "\n".join(part for part in parts if part)
 
 
-def _tickers(config: PipelineConfig, session: str, slot_date: date) -> tuple[list[_Ticker], float | None, bool]:
+def _tickers(config: PipelineConfig, session: str, slot_date: date
+             ) -> tuple[list[_Ticker], float | None, bool, bool]:
     """Every ticker of the slot's own session (a wrong-session nominee is
     skipped: brief paths carry no session) with a brief for the slot's date
     or a decision; a malformed funnel row is skipped, never the digest."""
@@ -371,6 +387,7 @@ def _tickers(config: PipelineConfig, session: str, slot_date: date) -> tuple[lis
     except json.JSONDecodeError:
         parsed = None
     snapshot = parsed if isinstance(parsed, dict) else {}
+    readable = isinstance(snapshot.get("tickers"), list)
     entries = snapshot.get("tickers")
     try:
         threshold: float | None = float(snapshot["context"]["thresholds"]["trigger"])
@@ -395,7 +412,7 @@ def _tickers(config: PipelineConfig, session: str, slot_date: date) -> tuple[lis
             out.append(item)
         except Exception as exc:  # one malformed row never costs the digest
             logger.warning("research digest: skipped a malformed funnel row (%s)", type(exc).__name__)
-    return out, threshold, executed
+    return out, threshold, executed, readable
 
 
 # ---------------------------------------------------------------------------
@@ -511,18 +528,17 @@ def summaries(macro_text: str | None, items: dict[str, str]) -> tuple[str | None
 
 
 def _window_passed(execution_time: str | None, slot_date: date, now: datetime) -> bool:
-    """Whether the slot day's execute window (execution time + the
-    orchestrator's acceptance tolerance, New York) is over."""
+    """Whether the slot day's execution time (New York) has passed: the
+    execute job fires once then and skips a slot that has not finished, so
+    a digest built later cannot promise that order."""
     if not execution_time:
         return False
     from pipeline.common import SESSION_TZ
     from pipeline.config import parse_slot_time
-    from pipeline.orchestrator import SLOT_WINDOW_MINUTES
 
     hour, minute = parse_slot_time(execution_time)
-    close = datetime(slot_date.year, slot_date.month, slot_date.day, hour, minute,
-                     tzinfo=ZoneInfo(SESSION_TZ["us"])) + timedelta(minutes=SLOT_WINDOW_MINUTES)
-    return now > close
+    return now >= datetime(slot_date.year, slot_date.month, slot_date.day, hour, minute,
+                           tzinfo=ZoneInfo(SESSION_TZ["us"]))
 
 
 def build_digest(config: PipelineConfig, session: str, slot_date: date, now: datetime | None = None) -> str:
@@ -532,15 +548,21 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
     except Exception as exc:  # e.g. a damaged frontmatter date: the tickers still go out
         logger.warning("research digest: macro brief unreadable (%s)", type(exc).__name__)
         macro, macro_text = "宏观：简报无法读取", None
-    tickers, threshold, executed = _tickers(config, session, slot_date)
+    tickers, threshold, executed, readable = _tickers(config, session, slot_date)
     try:
         held = _held(config)
     except Exception:
         held = None
+    ledger_read = True
     try:
         records = _records(config)
+        path = config.ledger_dir / "decisions.jsonl"
+        if path.exists():
+            path.read_text(encoding="utf-8")  # load_decision_records reads [] on an unreadable file
     except Exception:
-        records = {}
+        records, ledger_read = {}, False
+    # A snapshot or a ledger that was not read: no line may say "no order".
+    unread = session == "us" and (not readable or not ledger_read)
     try:
         from pipeline.execution_adapter import load_settings
 
@@ -557,7 +579,7 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
         late = False
     if late:
         # Step 7 did not run and its window is over: no order follows on its own.
-        mode = "执行时间已过，未执行"
+        mode = LATE
     execution_time = config.sessions[session].execution_time if session in config.sessions else None
 
     analysed = sorted((t for t in tickers if t.decide is not None), key=lambda t: (-(t.score or -1), t.ticker))
@@ -583,6 +605,8 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
             ordered = False
             if t.final == "order-live":
                 planned.append(f"{t.ticker} 已下单")
+            elif t.decide.get("code") in ("BUY", "SELL") and t.final not in ("order-dry", "excluded"):
+                undecided.append(t.ticker)
         else:
             text, ordered = action_text(
                 t.decide.get("code"), details.get("pm_rating"), session=session,
@@ -613,10 +637,15 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
     if session == "cn":
         head.append("A股不下单")
     else:
-        orders = "、".join(planned) if planned else ("" if undecided else "无")
+        orders = "、".join(planned) if planned else ("" if undecided or unread else "无")
+        if unread:
+            orders += ("；" if orders else "") + "待核实（决策数据未读到）"
         if undecided:
-            orders += ("；" if orders else "") + "待定：" + "、".join(undecided) + "（持仓未知）"
-        head.append(("已执行：" + ("、".join(planned) if planned else "无下单")) if executed else
+            orders += ("；" if orders else "") + "待核实：" + "、".join(undecided)
+        done = "、".join(planned) if planned else ("" if undecided else "无下单")
+        if undecided:
+            done += ("；" if done else "") + "待核实：" + "、".join(undecided)
+        head.append(("已执行：" + done) if executed and not unread else
                     "计划下单" + (f"（{mode}）" if mode else "") + "：" + orders)
     lines = [" ｜ ".join(head), macro]
     if macro_summary:

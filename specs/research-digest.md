@@ -75,10 +75,18 @@ line) was hard to read: the user asked why a name with no position was
     `看空，不下单（reason）` even with positions unknown (the adapter rejects
     the row whatever the position). Like the adapter, only the latest
     attempt per (ticker, arm) of the slot counts: a later (manual) attempt
-    shadows the scheduled row → `被手动重跑取代`. Past the slot day's execute
-    window (execution time + the orchestrator's 15-minute tolerance, New
-    York) with step 7 not run (a late manual slot, a slot that overran) the
-    mode is `执行时间已过，未执行`: no timed order is promised. A brief-arm run whose ticker or macro evaluation failed adds
+    shadows the scheduled row → `被手动重跑取代`. At or past the slot day's
+    execution time (New York) with step 7 not run (a late manual slot, a
+    slot that overran — the execute job fires once then and skips an
+    unfinished slot) the mode is `已过执行时间，下单待核实` and BUY/SELL read
+    `看多/看空（已过执行时间，下单待核实）`, undetermined: no timed order is
+    promised, none is denied. **Unread inputs are never "no order"**: a
+    missing or unreadable funnel snapshot or ledger makes the header
+    `待核实（决策数据未读到）`; a decision with no ledger row read reads
+    `看多/看空（下单待核实）`; after execution a `final` other than
+    `order-live`/`order-dry`/`excluded` (e.g. a submit killed after its
+    intent row) reads `下单结果待核实`. Undetermined names are listed in the
+    header as `待核实：X`. A brief-arm run whose ticker or macro evaluation failed adds
     `；简报未采用（评估 fail）` (the brief was withheld). PM ratings in words: Buy 强烈看多 · Overweight 看多 ·
     Hold 中性 · Underweight 看淡 · Sell 看空. An analysis error reads
     `分析出错` and **never** carries the error text (API error bodies).
@@ -87,7 +95,8 @@ line) was hard to read: the user asked why a name with no position was
   - **未触发**: one line per reason — a ticker that met the trigger but has
     no decision is never "not triggered": `budget-dropped` →
     `已触发，因预算上限未分析`, any other passed trigger without a decision →
-    `已触发但无分析结果（运行失败或被中止）`; then per trigger code (`core-unchanged`,
+    `已触发但无分析结果（运行失败或被中止）`; a reconstructed trigger stage
+    with no code → `无分析结果（原因未记录）`; then per trigger code (`core-unchanged`,
     `below-threshold` — not evaluated by the cost rule; the label shows the
     snapshot's trigger threshold in force —,
     `core-session-off`, else `其他`) listing ticker and score.

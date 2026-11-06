@@ -134,7 +134,10 @@ def test_the_digest_groups_tickers_by_outcome_in_plain_words(tmp_path, live):
     ("BUY", "Overweight", True, {"add_intent": True}, "可能加仓（PM 看多；09:45 ET 按加仓规则）", True),
     ("BUY", "Overweight", None, {}, "看多（PM 看多；持仓未知，是否下单待定）", None),
     ("BUY", "Overweight", False, {"blocker": "action-mismatch"}, "看多，不下单（PM 看多；计划与结论不一致）", False),
-    ("BUY", "Overweight", False, {"blocker": "unknown"}, "看多，不下单（PM 看多；下单待核实）", False),
+    ("BUY", "Overweight", False, {"blocker": "unknown"}, "看多（PM 看多；下单待核实）", None),
+    ("BUY", "Overweight", None, {"mode": "模拟"}, "看多（PM 看多；模拟）", False),
+    ("SELL", "Sell", None, {"mode": "执行已暂停"}, "看空（PM 看空；执行已暂停）", False),
+    ("BUY", "Overweight", False, {"mode": rd.LATE}, "看多（PM 看多；已过执行时间，下单待核实）", None),
     ("BUY", "Overweight", False, {"mode": "模拟"}, "买入（PM 看多；模拟）", False),
     ("BUY", "Overweight", False, {"mode": "执行已暂停"}, "买入（PM 看多；执行已暂停）", False),
     ("SELL", "Sell", True, {}, "卖出（PM 看空；09:45 ET 下单）", True),
@@ -198,7 +201,7 @@ def test_unknown_positions_are_never_read_as_none(tmp_path, live):
         assert "持仓：" not in text.splitlines()[0], state
         assert "• MU 4.5 财报 11-17 → 看空（PM 看空；持仓未知，是否下单待定）" in text, state
         assert "不买" not in text and "无持仓" not in text
-        assert "计划下单：待定：MU（持仓未知）" in text.splitlines()[0]  # never "无" on an unread book
+        assert "计划下单：待核实：MU" in text.splitlines()[0]  # never "无" on an unread book
 
 
 @pytest.mark.unit
@@ -616,7 +619,7 @@ def test_a_billed_search_without_query_text_also_discards(monkeypatch):
 
 @pytest.mark.unit
 def test_after_the_execution_window_no_timed_order_is_promised(tmp_path, live):
-    from datetime import datetime, timezone
+    from datetime import datetime, timedelta, timezone
 
     from pipeline.config import SessionSchedule
 
@@ -627,8 +630,11 @@ def test_after_the_execution_window_no_timed_order_is_promised(tmp_path, live):
                tickers=[entry("NVDA", decide=decided(cfg, "NVDA", "BUY", "Overweight"))])
     before = rd.build_digest(cfg, "us", DAY, now=datetime(2026, 11, 4, 12, 0, tzinfo=timezone.utc))  # 07:00 ET
     assert "计划下单：NVDA 买入" in before and "09:45 ET 下单" in before
-    after = rd.build_digest(cfg, "us", DAY, now=datetime(2026, 11, 4, 15, 30, tzinfo=timezone.utc))  # 10:30 ET
-    assert "计划下单（执行时间已过，未执行）：无" in after and "09:45 ET 下单" not in after
+    for minute in (50, 90):  # 09:50 ET (inside the old tolerance band) and 10:30 ET
+        now = datetime(2026, 11, 4, 14, 45, tzinfo=timezone.utc) + timedelta(minutes=minute - 45)
+        after = rd.build_digest(cfg, "us", DAY, now=now)
+        assert "计划下单（已过执行时间，下单待核实）：待核实：NVDA" in after, minute
+        assert "09:45 ET 下单" not in after and "→ 看多（PM 看多；已过执行时间，下单待核实）" in after
 
 
 @pytest.mark.unit
@@ -654,3 +660,46 @@ def test_execute_stage_reasons_read_in_chinese(code):
 
     text = rd.executed_text("BUY", "Overweight", final="excluded", execute={"code": code})
     assert text.startswith("看多（PM 看多；未下单") and not re.search(r"[a-z]+-[a-z]+", text), text
+
+
+@pytest.mark.unit
+def test_unread_decision_inputs_never_read_as_no_order(tmp_path, live, monkeypatch):
+    cfg = config(tmp_path)
+    book(cfg)
+    decided(cfg, "NVDA", "BUY", "Overweight")
+    write_slot(cfg, briefs={}, tickers=[])
+    (cfg.state_dir / "funnel" / "us" / f"{DAY}.json").write_text("{corrupt", encoding="utf-8")
+    head = rd.build_digest(cfg, "us", DAY).splitlines()[0]
+    assert "计划下单：待核实（决策数据未读到）" in head and "计划下单：无" not in head
+    write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "m — m.")},
+               tickers=[entry("NVDA", decide=stage("BUY", arm="brief", pm_rating="Overweight",
+                                                   run_id=f"{DAY.isoformat()}-us-NVDA-brief-1"))])
+    monkeypatch.setattr(rd, "_records", lambda c: (_ for _ in ()).throw(OSError("ledger")))
+    text = rd.build_digest(cfg, "us", DAY)
+    assert "• NVDA 7.0 财报 11-17 → 看多（PM 看多；下单待核实）" in text
+    assert "待核实（决策数据未读到）" in text.splitlines()[0] and "计划下单：无" not in text.splitlines()[0]
+
+
+@pytest.mark.unit
+def test_an_unknown_execution_outcome_is_never_read_as_no_order(tmp_path, live):
+    cfg = config(tmp_path)
+    book(cfg)
+    write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "m — m.")},
+               tickers=[{**entry("NVDA", decide=decided(cfg, "NVDA", "BUY", "Overweight")), "final": "unknown"}])
+    path = cfg.state_dir / "funnel" / "us" / f"{DAY}.json"
+    snap = json.loads(path.read_text())
+    snap["context"] = {"execute_ran": True}
+    path.write_text(json.dumps(snap), encoding="utf-8")
+    text = rd.build_digest(cfg, "us", DAY)
+    assert "→ 看多（PM 看多；下单结果待核实）" in text and "已执行：待核实：NVDA" in text.splitlines()[0]
+    assert "未下单" not in text and "无下单" not in text
+
+
+@pytest.mark.unit
+def test_an_unrecorded_trigger_has_its_own_label(tmp_path):
+    cfg = config(tmp_path)
+    write_slot(cfg, briefs={"HUM": ticker_brief("HUM", 8.0, "m — m.")}, tickers=[
+        {"ticker": "HUM", "stages": {"collect": stage("written"),
+                                     "trigger": {"code": None, "outcome": "excluded",
+                                                 "reason": "met the trigger rules but has no decision row"}}}])
+    assert "• 无分析结果（原因未记录）：HUM 8.0" in rd.build_digest(cfg, "us", DAY)
