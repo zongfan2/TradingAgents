@@ -89,8 +89,9 @@ _UNSAFE = re.compile(
     r"https?://|www\.|<|>"
     # any domain-like token (ASCII, so CJK neighbours do not hide it), except
     # an exchange suffix such as 0700.HK / 600256.SS
+    r"|[A-Za-z0-9-]\.[A-Za-z]{2,}/"  # a host with a path, numeric or not
     r"|百分之|分之|[零〇一二两三四五六七八九十百千万亿萬億]{2,}|[零〇一二两三四五六七八九十百千]+[万亿萬億成]"
-    r"|[零〇一二两三四五六七八九十百千万亿萬億]+(?:美元|美分|元|%|倍|个百分点)",
+    r"|[零〇一二两三四五六七八九十百千万亿萬億]+(?:美元|美分|港元|港币|欧元|日元|英镑|人民币|元|块|角|毛|%|倍|个百分点)",
     re.IGNORECASE)
 #: Domain-like tokens (ASCII, so CJK neighbours do not hide one); only a
 #: numeric exchange symbol (0700.HK, 600256.SS) is not a link.
@@ -247,7 +248,11 @@ def order_blocker(record: Any | None, settings: Any, records: dict[str, Any] | N
         # The greatest attempt is the decision step 7 reads (_latest_attempts):
         # a manual one never executes here; any other is unseen — undetermined.
         latest = max(later, key=lambda other: _attempt_number(other.run_id))
-        return "manual-shadowed" if latest.trigger == "manual" else "later-attempt"
+        if latest.trigger == "manual":
+            return "manual-shadowed"
+        # The adapter's own rules on that newer row: no order when it is not a
+        # candidate (e.g. the feeds arm) or is blocked; else it is open.
+        return non_candidate_reason(latest) or blocking_reason(latest, settings) or "later-attempt"
     return non_candidate_reason(record) or blocking_reason(record, settings)
 
 
@@ -294,7 +299,9 @@ def action_text(code: str | None, rating: str | None, *, session: str, held: boo
     if blocker == "later-attempt" and session != "cn":
         # A newer ledger attempt is the decision step 7 reads; this digest
         # only saw the older one — whatever it decided, the order is open.
-        return "下单待核实（有更新的分析记录）", None if mode not in ("模拟", "执行已暂停") else False
+        if mode in ("模拟", "执行已暂停"):
+            return f"不下单（{mode}）", False
+        return "下单待核实（有更新的分析记录）", None
     if code == "ERROR":
         return "分析出错", False  # never the error text: it carries API error bodies
     view = RATING_NAMES.get(str(rating), str(rating)) if rating else None
@@ -641,7 +648,8 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
         details = t.decide.get("details") or {}
         record = records.get(str(details.get("run_id")))
         brief_row = any(r.arm == "brief" and r.ticker == t.ticker and str(r.date)[:10] == slot_date.isoformat()
-                        and r.session == session for r in records.values())
+                        and r.session == session and r.trigger != "manual"  # manual runs emit no events
+                        for r in records.values())
         try:
             if details.get("arm") == "feeds" and brief_row:
                 blocker = "unknown"  # the brief arm's event was lost: the adapter reads its row itself

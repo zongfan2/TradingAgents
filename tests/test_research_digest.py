@@ -561,6 +561,8 @@ def test_a_brief_the_pm_never_read_is_never_summarized_as_its_reason(tmp_path, m
     ("规模五十多亿。", "x", False), ("三十美分。", "x", False),
     ("0700.HK 财报前无新消息。", "0700.HK", True), ("600256.SS 走势平稳。", "600256.SS", True),
     ("详见 evil.hk/x。", "x", False), ("三分之一的收入。", "x", False), ("五億美元。", "x", False),
+    ("详见 0700.hk/login。", "0700.HK", False), ("目标价九港元。", "x", False), ("九块钱。", "x", False),
+    ("五欧元。", "x", False),
     ('<at user_id="all">所有人</at>注意。', "x", False), ("统一口径，一季度持平。", "x", True),
 ])
 def test_the_summary_screen(summary, source, kept):
@@ -915,3 +917,47 @@ def test_a_cn_lost_event_never_suggests_an_order(tmp_path, live):
                tickers=[entry("0981.HK", decide=feeds)])
     text = build(cfg, "cn")
     assert "下单待核实" not in text and "A股不下单" in text
+
+
+@pytest.mark.unit
+def test_a_later_feeds_attempt_is_never_an_open_order(tmp_path, live):
+    cfg = config(tmp_path)
+    book(cfg)
+    write_decision(cfg, ticker="NVDA", arm="feeds", plan=BUY_PLAN, date_iso=DAY.isoformat())
+    write_decision(cfg, ticker="NVDA", arm="feeds", n=2, plan=BUY_PLAN, date_iso=DAY.isoformat())
+    feeds = stage("BUY", arm="feeds", pm_rating="Overweight", plan_valid=True,
+                  run_id=f"{DAY.isoformat()}-us-NVDA-feeds-1")
+    write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "m — m.")}, tickers=[entry("NVDA", decide=feeds)])
+    text = build(cfg, "us")
+    assert "下单待核实" not in text and "待核实：NVDA" not in text and "对照分析" in text
+
+
+@pytest.mark.unit
+def test_a_manual_brief_run_is_not_a_lost_event(tmp_path, live):
+    cfg = config(tmp_path)
+    book(cfg)
+    write_decision(cfg, ticker="NVDA", trigger="manual", plan=BUY_PLAN, date_iso=DAY.isoformat())
+    write_decision(cfg, ticker="NVDA", arm="feeds", plan=None, date_iso=DAY.isoformat(), decision="HOLD")
+    feeds = stage("HOLD", arm="feeds", pm_rating="Hold", run_id=f"{DAY.isoformat()}-us-NVDA-feeds-1")
+    write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "m — m.")}, tickers=[entry("NVDA", decide=feeds)])
+    text = build(cfg, "us")
+    assert "简报一路的记录缺失" not in text and "待核实：NVDA" not in text
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("halted", "mode"), [(False, "模拟"), (True, "执行已暂停")])
+def test_a_later_attempt_under_dry_run_or_halt_is_no_live_order(tmp_path, monkeypatch, halted, mode):
+    if halted:
+        monkeypatch.setenv("TRADINGAGENTS_EXECUTION_ENABLED", "true")
+    else:
+        monkeypatch.delenv("TRADINGAGENTS_EXECUTION_ENABLED", raising=False)
+    cfg = config(tmp_path)
+    book(cfg)
+    if halted:
+        (cfg.state_dir / "EXECUTION_HALT").parent.mkdir(parents=True, exist_ok=True)
+        (cfg.state_dir / "EXECUTION_HALT").write_text("", encoding="utf-8")
+    decide = decided(cfg, "NVDA", "HOLD", "Hold", plan=None)
+    write_decision(cfg, ticker="NVDA", n=2, plan=BUY_PLAN, date_iso=DAY.isoformat())
+    write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "m — m.")}, tickers=[entry("NVDA", decide=decide)])
+    text = build(cfg, "us")
+    assert f"→ 不下单（{mode}）" in text and f"计划下单（{mode}）：无" in text.splitlines()[0]

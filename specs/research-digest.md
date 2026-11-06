@@ -93,10 +93,13 @@ line) was hard to read: the user asked why a name with no position was
     decide stage while the ledger has the brief arm's row (its event was
     lost) reads `下单待核实（简报一路的记录缺失）` whatever the feeds arm decided
     (under 模拟 / 执行已暂停 `不下单（mode）`: no live order can follow);
-    the greatest later ledger attempt, when it is not manual (the decision
-    step 7 reads, unseen by this digest), reads `下单待核实（有更新的分析记录）` whatever the
+    the greatest later ledger attempt (the decision step 7 reads, unseen by
+    this digest) — judged by the adapter's own rules: manual →
+    `被手动重跑取代`, not a candidate or blocked → that reason, else open — reads `下单待核实（有更新的分析记录）` whatever the
     shown event decided (BUY/SELL/HOLD/ERROR), only a manual one
-    `被手动重跑取代`; on cn neither suggests an order (A股不下单); an unreadable execution switch or kill
+    `被手动重跑取代`, and under 模拟 / 执行已暂停 `不下单（mode）`; on cn neither
+    suggests an order (A股不下单); only a scheduled brief row counts as a
+    lost brief-arm event (manual runs emit no events); an unreadable execution switch or kill
     switch (`执行状态未知`) leaves BUY/SELL undetermined too; after execution
     the header keeps `已执行：` and appends `待核实（决策数据未读到）` when an
     input was unread. Undetermined names are listed in the
@@ -134,7 +137,9 @@ line) was hard to read: the user asked why a name with no position was
   (links removed) does not, or contains — case-insensitively — a link or any domain-like token
   (only a numeric exchange symbol such as `0700.HK` excepted), markup (a Lark `<at>`
   mention) or a figure in Chinese numerals (two or more numeral
-  characters incl. traditional 萬/億, 百分之… / …分之…, …成, …个百分点, …美分 …); only the names asked are used. A call that used
+  characters incl. traditional 萬/億, 百分之… / …分之…, …成, …个百分点, a
+  numeral before any currency unit: 美元/美分/港元/港币/欧元/日元/英镑/人民币/
+  元/块/角/毛), or a host with a path, even a numeric one; only the names asked are used. A call that used
   a web tool is discarded — by its tool-call fields or a billed search count
   (the CLI keeps web tools on; outside facts would pass every screen).
   Any failure or a 45 s timeout: logged, and the digest goes out without
