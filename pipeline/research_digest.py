@@ -732,7 +732,11 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
             elif record is None and details.get("arm") == "feeds":
                 blocker = "feeds-arm"  # the feeds arm never trades, row or not
             else:
-                blocker = order_blocker(record, settings, records) if settings is not None else "unknown"
+                # Settings unread: still apply the adapter's rules (later attempts,
+                # its candidate filter) with its defaults; the mode says unknown.
+                from pipeline.execution_adapter import AdapterSettings
+
+                blocker = order_blocker(record, settings or AdapterSettings(), records)
         except Exception:
             blocker = "unknown"
         if executed and session != "cn" and details.get("arm") == "feeds" and brief_row and t.final != "order-live":

@@ -1099,3 +1099,16 @@ def test_a_summary_may_name_its_own_numeric_ticker(tmp_path, monkeypatch):
     monkeypatch.setattr(rd, "_run_summary", lambda p: json.dumps(
         {"macro": "", "tickers": [{"ticker": "0700.HK", "summary": "0700.HK 本周平静。"}]}))
     assert "  0700.HK 本周平静。" in build(cfg, "cn").splitlines()
+
+
+@pytest.mark.unit
+def test_an_unknown_execution_state_still_sees_a_newer_attempt(tmp_path, live, monkeypatch):
+    cfg = config(tmp_path)
+    book(cfg)
+    decide = decided(cfg, "NVDA", "HOLD", "Hold", plan=None)
+    write_decision(cfg, ticker="NVDA", n=2, plan=BUY_PLAN, date_iso=DAY.isoformat())
+    write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "m — m.")}, tickers=[entry("NVDA", decide=decide)])
+    monkeypatch.setattr(rd, "_execution_mode", lambda c: (_ for _ in ()).throw(OSError("halt file")))
+    text = build(cfg, "us")
+    assert "下单待核实（有更新的分析记录）" in text and "待核实：NVDA" in text.splitlines()[0]
+    assert "：无" not in text.splitlines()[0].split("｜")[-1]
