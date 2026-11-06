@@ -2356,3 +2356,45 @@ def test_s8a_the_mu_gap_down_would_have_been_skipped():
     gap = ea.Quote(bid=893.5, ask=893.92, timestamp=NOW)
     assert ea.entry_zone_reason(plan, gap) == "below-entry-zone"
     assert ea.entry_zone_reason(plan, ea.Quote(bid=929.0, ask=930.0, timestamp=NOW)) is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("quote", [ea.Quote(bid=float("nan"), ask=0.0, timestamp=NOW),
+                                   ea.Quote(bid=float("nan"), ask=float("nan"), timestamp=NOW),
+                                   ea.Quote(bid=100.0, ask=float("inf"), timestamp=NOW)])
+def test_s8a_a_non_finite_price_fails_closed(quote):
+    plan = ea.TradePlan.model_validate(BUY_PLAN)
+    assert ea.entry_zone_reason(plan, quote) == "guard-unavailable"
+
+
+GAPPED = ea.Quote(bid=96.0, ask=96.5, timestamp=NOW)  # zone [99, 100]
+
+
+@pytest.mark.unit
+def test_s8a_guards_add_ons_and_keeps_maintain_for_a_held_view_refresh(tmp_path):
+    config = make_config(tmp_path)
+    broker = addon_scenario(config)
+    broker.quotes["NVDA"] = GAPPED
+    submit_slot(config, broker, settings=live_settings())
+    assert broker.submitted == [] and read_orders(config)[-1]["reason"] == "below-entry-zone"
+
+    config2 = make_config(tmp_path / "maintain")
+    broker2 = addon_scenario(config2)
+    write_decision(config2, plan=BUY_PLAN, n=10)  # latest attempt: no add_intent
+    broker2.quotes["NVDA"] = GAPPED
+    submit_slot(config2, broker2, settings=live_settings())
+    assert broker2.submitted == [] and read_orders(config2)[-1]["reason"] == "maintain"
+
+
+@pytest.mark.unit
+def test_s8a_applies_to_the_manual_path_and_reaches_the_funnel(tmp_path):
+    config = make_config(tmp_path)
+    row = write_decision(config, n=1)
+    broker = FakeBroker(quotes={"NVDA": GAPPED})
+    submit_slot(config, broker, settings=live_settings(), run_id=row["run_id"], execute=True)
+    assert broker.submitted == [] and read_orders(config)[-1]["reason"] == "below-entry-zone"
+
+    config2 = make_config(tmp_path / "funnel")
+    write_decision(config2)
+    submit_slot(config2, FakeBroker(quotes={"NVDA": GAPPED}), settings=live_settings())
+    assert funnel_rows(config2) == [("NVDA", "excluded", "below-entry-zone")]

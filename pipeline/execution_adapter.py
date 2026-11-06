@@ -711,8 +711,13 @@ def entry_zone_reason(plan: TradePlan, quote: Quote | None) -> str | None:
     (fail-closed, like every S8 guard); else None."""
     if quote is None:
         return "guard-unavailable"
-    price = quote.ask if quote.ask and quote.ask > 0 else quote.bid
-    if not price or price <= 0:
+    def usable(value: float | None) -> bool:
+        return value is not None and math.isfinite(value) and value > 0
+
+    if any(value is not None and not math.isfinite(value) for value in (quote.ask, quote.bid)):
+        return "guard-unavailable"  # a NaN/inf field: the quote itself is corrupt
+    price = quote.ask if usable(quote.ask) else quote.bid
+    if not usable(price):
         return "guard-unavailable"
     if price < plan.entry_zone[0] * (1 - ENTRY_ZONE_GAP_TOLERANCE):
         logger.info("%s: ask %.2f below the entry zone %s — the plan's entry is gone",
@@ -1289,15 +1294,15 @@ class _SubmitRun:
         if guard_reason:
             self.skip(record, guard_reason, cid)
             return
+        position = self._position(ticker)
+        if position is not None and not plan.add_intent:
+            self.skip(record, "maintain", cid)  # a view refresh, never an entry attempt
+            return
         zone_reason = entry_zone_reason(plan, quote)
         if zone_reason:
             self.skip(record, zone_reason, cid)
             return
-        position = self._position(ticker)
         if position is not None:
-            if not plan.add_intent:
-                self.skip(record, "maintain", cid)
-                return
             addon_reason = self._addon_pre_reason(plan, position)
             if addon_reason:
                 self.skip(record, addon_reason, cid)
