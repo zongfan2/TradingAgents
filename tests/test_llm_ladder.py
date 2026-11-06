@@ -1073,3 +1073,47 @@ def test_with_every_key_refused_the_floor_never_climbs_back(tmp_path, monkeypatc
     assert providers == ["anthropic", "openai", "deepseek", "deepseek"]  # job 2: the floor, no climb to openai
     assert outcome.summary["error_kinds"] == {"auth": 2}
     assert sorted(r.preset for r in read_records(config)) == ["deepseek", "deepseek"]  # the profile that ran
+
+
+USAGE_LIMIT = ("run-one: Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', "
+               "'message': 'You have reached your specified API usage limits. You will regain access on "
+               "2026-12-01 at 00:00 UTC.'}}")
+
+
+@pytest.mark.unit
+def test_the_console_usage_limit_counts_as_exhausted_credits(tmp_path, monkeypatch):
+    from pipeline.llm_usage import error_kind, is_credit_exhausted_error
+
+    assert is_credit_exhausted_error(USAGE_LIMIT, "anthropic") and error_kind(USAGE_LIMIT) == "credit"
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-proj-test")
+    config, resolvers = _slot(tmp_path)
+    confirm_balance(config.state_dir, MONTH, 71, NOW - timedelta(hours=1))
+
+    class LimitedChild(UsageChild):
+        def __call__(self, spec, timeout):
+            env = dict(spec.env)
+            provider, model = env.get("TRADINGAGENTS_LLM_PROVIDER"), env.get("TRADINGAGENTS_DEEP_THINK_LLM")
+            if provider == "anthropic":
+                self.specs.append(spec)
+                return ar.ChildResult(1, None, USAGE_LIMIT, usage=usage_row(model, cost=0.0))
+            result = super().__call__(spec, timeout)
+            return ar.ChildResult(result.returncode, result.payload, result.error, usage=usage_row(model, cost=0.3))
+
+    child = LimitedChild()
+    settings = ar.RunnerSettings(ab_pairing="off", llm_routing="ladder", analysis_job_concurrency=1)
+    outcome, _ = run(config, resolvers, child, settings=settings)
+    providers = [dict(s.env)["TRADINGAGENTS_LLM_PROVIDER"] for s in child.specs]
+    assert providers == ["anthropic", "openai", "openai"]  # marked once, the slot moves on
+    assert exhausted_marker(config.state_dir, MONTH).exists() and outcome.summary["errors"] == 0
+
+
+@pytest.mark.unit
+def test_status_names_the_exhaustion_reason_and_how_to_lift_it(tmp_path, monkeypatch, capsys):
+    from pipeline import llm_budget
+
+    monkeypatch.setenv("TRADINGAGENTS_SKIP_DOTENV", "1")
+    monkeypatch.setenv("TRADINGAGENTS_STATE_DIR", str(tmp_path))
+    mark_exhausted(tmp_path, MONTH, USAGE_LIMIT)
+    assert llm_budget.main(["status"], now=NOW) == 0
+    out = capsys.readouterr().out
+    assert "reached your specified API usage limits" in out and "after topping up or raising the limit" in out

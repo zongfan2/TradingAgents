@@ -64,7 +64,11 @@ def main(argv: list[str] | None = None, now: datetime | None = None) -> int:
         return 0
     anthropic = month_spend(state_dir, month, "anthropic")
     print(f"month {month} (UTC)")
-    marker = " (credits exhausted)" if exhausted_marker(state_dir, month).exists() else ""
+    path = exhausted_marker(state_dir, month)
+    marker = ""
+    if path.exists():
+        reason = " ".join(path.read_text(encoding="utf-8", errors="replace").split())[:160]
+        marker = f" (credits exhausted: {reason} — delete {path} after topping up or raising the limit)"
     try:  # the budget the analysis runner gates on
         from pipeline.analysis_runner import load_settings
 

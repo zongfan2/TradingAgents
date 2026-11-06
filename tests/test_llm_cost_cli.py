@@ -271,3 +271,36 @@ def test_non_finite_cli_cost_never_poisons_the_budget(cli_env, bad):
     with open(log, "a", encoding="utf-8") as handle:
         handle.write('["not", "a", "row"]\n{"ts": 7, "billing": "anthropic-api", "billed_usd": 3}\n')
     assert month_spend(state, month, "anthropic") == pytest.approx(2.0)
+
+
+@pytest.mark.unit
+def test_the_console_usage_limit_switches_the_cli_too(cli_env, monkeypatch):
+    state, _log = cli_env
+    monkeypatch.setenv("TRADINGAGENTS_LLM_ROUTING", "claude-first")
+    assert claude_cli.cli_route() == "anthropic"
+    limit = ("You have reached your specified API usage limits. You will regain access on "
+             "2026-12-01 at 00:00 UTC.")
+    claude_cli.record_failed_call("ticker_collector", "claude-sonnet-5-5", "medium",
+                                  json.dumps(envelope(0.0, error=True, text=limit)))
+    month = datetime.now(timezone.utc).strftime("%Y-%m")
+    assert exhausted_marker(state, month).exists() and claude_cli.cli_route() == "deepseek"
+
+
+@pytest.mark.unit
+def test_once_analysis_sees_the_limit_the_cli_leaves_anthropic_whatever_its_own_text(cli_env, monkeypatch):
+    """The CLI need not reproduce Anthropic's sentence: the exhausted-month
+    marker an analysis run writes is shared state the CLI route reads."""
+    from pipeline import analysis_runner  # noqa: F401 — the writer's module
+    from pipeline.llm_usage import is_credit_exhausted_error, mark_exhausted
+
+    state, _log = cli_env
+    monkeypatch.setenv("TRADINGAGENTS_LLM_ROUTING", "claude-first")
+    assert claude_cli.cli_route() == "anthropic"
+    production = ("run-one: Error code: 400 - {'type': 'error', 'error': {'type': 'invalid_request_error', "
+                  "'message': 'You have reached your specified API usage limits. You will regain access on "
+                  "2026-12-01 at 00:00 UTC.'}, 'request_id': 'req_011CgmZJzkMpCUmSLmadcPXX'}")  # 2026-11-06
+    assert is_credit_exhausted_error(production, "anthropic")
+    month = datetime.now(timezone.utc).strftime("%Y-%m")
+    mark_exhausted(state, month, production)  # what the runner's credit path writes
+    claude_cli._reset_route_for_tests()
+    assert claude_cli.cli_route() == "deepseek"  # a collection call now routes past Anthropic

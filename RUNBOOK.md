@@ -410,9 +410,12 @@ thinking). `claude` / `deepseek` pin one profile; unset keeps the legacy
 single-provider env. Every run's tokens and cost land in
 `~/.tradingagents/llm_usage.jsonl`; the end-of-slot notification shows the
 slot's LLM cost and the month's Anthropic spend. If Anthropic answers
-"credit balance is too low", the runner writes
+"credit balance is too low" or "You have reached your specified API usage
+limits" (the console's own spend limit), the runner writes
 `~/.tradingagents/llm_budget/<YYYY-MM>.exhausted` and reruns that run on
-DeepSeek — delete the marker to go back to Claude after topping up.
+the next rung — delete the marker to go back to Claude after topping up or
+raising the console limit (otherwise Claude stays off until the next UTC
+month). `python -m pipeline.llm_budget status` shows the marker's reason.
 Run-volume cuts (same spec, R6): `TRADINGAGENTS_CORE_ANALYSIS_SESSIONS=us`
 makes cn slots catalyst-only (core tickers carry funnel code
 `core-session-off`); `TRADINGAGENTS_CORE_SKIP_UNCHANGED=on` skips a core
