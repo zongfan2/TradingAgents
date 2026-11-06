@@ -43,8 +43,12 @@ SKIP_REASONS = (
     ("core-unchanged", "近几日已分析且无新变化，不重复"),
     ("below-threshold", "机会池分数 <{threshold}，未评估"),
     ("core-session-off", "A股核心股本时段不分析"),
-    ("budget-dropped", "已触发，因预算上限未分析"),
-    ("triggered", "已触发但无分析结果（运行失败或被中止）"),
+)
+#: Triggered (or unrecorded) names without a decision: their own group,
+#: never under 未触发.
+UNANALYSED_REASONS = (
+    ("budget-dropped", "因预算上限未分析"),
+    ("triggered", "无分析结果（运行失败或被中止）"),
     ("unrecorded", "无分析结果（原因未记录）"),
 )
 #: Execution-adapter codes for "no order" (non_candidate_reason /
@@ -72,6 +76,8 @@ _FORBIDDEN = re.compile(r"持有|减持|增持|评级|买入|卖出|加仓|减�
 SUMMARY_MAX_CHARS = 60
 #: Mode past the execution time with step 7 not run: undetermined, not "no order".
 LATE = "已过执行时间，下单待核实"
+#: Inline step 7 (no execution time) left no outcome before this digest.
+INLINE_UNKNOWN = "下单结果待核实"
 _NUMBER = re.compile(r"(?<![\d.])\d+(?:\.\d+)?(?!\d)(?!\.\d)")  # "520." is 520
 #: The summary call: one small, cheap model; a tight timeout so the digest
 #: never waits long for it (DIGEST_DEADLINE_S in the orchestrator bounds all).
@@ -270,8 +276,8 @@ def action_text(code: str | None, rating: str | None, *, session: str, held: boo
         kept = [part for part in parts if part]
         return f"（{'；'.join(kept)}）" if kept else ""
 
-    if mode == LATE and code in ("BUY", "SELL") and blocker in (None, "unknown"):
-        return ("看多" if code == "BUY" else "看空") + paren(pm, LATE), None
+    if mode in (LATE, INLINE_UNKNOWN) and code in ("BUY", "SELL") and blocker in (None, "unknown"):
+        return ("看多" if code == "BUY" else "看空") + paren(pm, mode), None
     if session == "cn" and code in ("BUY", "SELL"):
         return ("看多" if code == "BUY" else "看空") + "，不下单" + paren(pm, "A股不下单"), False
     if code == "BUY":
@@ -412,6 +418,7 @@ def _tickers(config: PipelineConfig, session: str, slot_date: date
             out.append(item)
         except Exception as exc:  # one malformed row never costs the digest
             logger.warning("research digest: skipped a malformed funnel row (%s)", type(exc).__name__)
+            readable = False  # its decision is unseen: never "no order"
     return out, threshold, executed, readable
 
 
@@ -559,6 +566,8 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
         path = config.ledger_dir / "decisions.jsonl"
         if path.exists():
             path.read_text(encoding="utf-8")  # load_decision_records reads [] on an unreadable file
+        elif any(t.decide is not None for t in tickers):
+            ledger_read = False  # decisions exist but their ledger does not
     except Exception:
         records, ledger_read = {}, False
     # A snapshot or a ledger that was not read: no line may say "no order".
@@ -572,20 +581,23 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
         settings, mode = None, "执行状态未知"
     executed = executed and session == "us"  # built after step 7 (a late retry, an inline execution)
     try:
+        execution_at = config.sessions["us"].execution_time
         late = (session == "us" and not executed and mode is None
-                and _window_passed(config.sessions["us"].execution_time, slot_date,
-                                   now or datetime.now(timezone.utc)))
+                and (execution_at is None  # inline: step 7 already ran (or failed) before this digest
+                     or _window_passed(execution_at, slot_date, now or datetime.now(timezone.utc))))
     except Exception:
         late = False
     if late:
-        # Step 7 did not run and its window is over: no order follows on its own.
-        mode = LATE
+        # Step 7's chance has passed without an outcome on record: undetermined.
+        mode = LATE if execution_at is not None else INLINE_UNKNOWN
     execution_time = config.sessions[session].execution_time if session in config.sessions else None
 
     analysed = sorted((t for t in tickers if t.decide is not None), key=lambda t: (-(t.score or -1), t.ticker))
     blocked = sorted((t for t in tickers if t.decide is None and t.trigger == "eval-fail"),
                      key=lambda t: (-(t.score or -1), t.ticker))
-    rest = [t for t in tickers if t.decide is None and t.trigger != "eval-fail"]
+    unanalysed_codes = {code for code, _label in UNANALYSED_REASONS}
+    unanalysed = [t for t in tickers if t.decide is None and t.trigger in unanalysed_codes]
+    rest = [t for t in tickers if t.decide is None and t.trigger != "eval-fail" and t.trigger not in unanalysed_codes]
 
     actions: dict[str, str] = {}
     planned: list[str] = []
@@ -662,17 +674,22 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
             lines.append(f"{t.head()} → 简报评估 fail，未分析")
             if notes.get(t.ticker):
                 lines.append(f"  {notes[t.ticker]}")
+    def grouped(group: list[_Ticker], reasons: tuple, fallback: str | None) -> list[str]:
+        out = []
+        known = {code for code, _label in reasons}
+        for code, label in [*reasons, *([(None, fallback)] if fallback else [])]:
+            members = sorted((t for t in group if (t.trigger if t.trigger in known else None) == code),
+                             key=lambda t: (-(t.score or -1), t.ticker))
+            if members:
+                names = " · ".join(f"{t.ticker} {t.score:.1f}" if t.score is not None else t.ticker for t in members)
+                out.append(f"• {label.format(threshold=shown)}：{names}")
+        return out
+
+    shown = f"{threshold:g}" if threshold is not None else "触发线"
+    if unanalysed:
+        lines += ["", f"已触发未分析（{len(unanalysed)}）"] + grouped(unanalysed, UNANALYSED_REASONS, None)
     if rest:
-        lines += ["", f"未触发（{len(rest)}）"]
-        known = dict(SKIP_REASONS)
-        shown = f"{threshold:g}" if threshold is not None else "触发线"
-        for code, label in [*SKIP_REASONS, (None, "其他")]:
-            label = label.format(threshold=shown)
-            group = sorted((t for t in rest if (t.trigger if t.trigger in known else None) == code),
-                           key=lambda t: (-(t.score or -1), t.ticker))
-            if group:
-                names = " · ".join(f"{t.ticker} {t.score:.1f}" if t.score is not None else t.ticker for t in group)
-                lines.append(f"• {label}：{names}")
+        lines += ["", f"未触发（{len(rest)}）"] + grouped(rest, SKIP_REASONS, "其他")
     if not tickers:
         lines.append("个股：无简报")
     return "\n".join(lines)

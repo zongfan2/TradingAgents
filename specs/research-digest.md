@@ -58,14 +58,14 @@ line) was hard to read: the user asked why a name with no position was
     position; on a held name `继续持有（不加仓）` unless the plan sets
     `add_intent` (`可能加仓（按加仓规则）` — the adapter's add-on gates still
     apply); `看多（持仓未知，是否下单待定）` when positions are unknown. `SELL`
-    → `卖出` when held, `不买（…不做空）` when not, `看空（持仓未知）` when
-    unknown. A blocked BUY/SELL reads `看多/看空，不下单（<adapter reason>）`;
+    → `卖出` when held, `不买（…不做空）` when not, `看空（持仓未知，是否下单待定）`
+    when unknown. A blocked BUY/SELL reads `看多/看空，不下单（<adapter reason>）`;
     cn always `A股不下单`. Execution mode at build time: the kill switch
     (`EXECUTION_HALT`) → `执行已暂停`, `TRADINGAGENTS_EXECUTION_ENABLED` off →
     `模拟`, in the header and in place of `下单`; neither is listed as a
     planned live order. With positions unknown a BUY/SELL is **undetermined**
     (the adapter reads live broker state, so it may still order): the header
-    lists it as `待定：X（持仓未知）`, never `计划下单：无`. A digest built after
+    lists it as `待核实：X`, never `计划下单：无`. A digest built after
     step 7 (the funnel snapshot's `execute_ran`: a late retry, an inline
     execution) makes no pre-order claim and tells each name's own adapter
     outcome from its funnel entry: `final` `order-live` → `已下单，见交易消息`,
@@ -81,8 +81,11 @@ line) was hard to read: the user asked why a name with no position was
     unfinished slot) the mode is `已过执行时间，下单待核实` and BUY/SELL read
     `看多/看空（已过执行时间，下单待核实）`, undetermined: no timed order is
     promised, none is denied. **Unread inputs are never "no order"**: a
-    missing or unreadable funnel snapshot or ledger makes the header
-    `待核实（决策数据未读到）`; a decision with no ledger row read reads
+    missing or unreadable funnel snapshot, a funnel row that had to be
+    skipped, an unreadable ledger, or a missing ledger while decisions exist
+    makes the header `待核实（决策数据未读到）`; with step 7 inline (no
+    execution time) the digest is built after it, so a step 7 that left no
+    outcome reads `下单结果待核实`, never a coming order; a decision with no ledger row read reads
     `看多/看空（下单待核实）`; after execution a `final` other than
     `order-live`/`order-dry`/`excluded` (e.g. a submit killed after its
     intent row) reads `下单结果待核实`. Undetermined names are listed in the
@@ -92,11 +95,11 @@ line) was hard to read: the user asked why a name with no position was
     `分析出错` and **never** carries the error text (API error bodies).
   - **被拦下**: trigger code `eval-fail` — the brief failed evaluation and
     was not analysed.
-  - **未触发**: one line per reason — a ticker that met the trigger but has
-    no decision is never "not triggered": `budget-dropped` →
-    `已触发，因预算上限未分析`, any other passed trigger without a decision →
-    `已触发但无分析结果（运行失败或被中止）`; a reconstructed trigger stage
-    with no code → `无分析结果（原因未记录）`; then per trigger code (`core-unchanged`,
+  - **已触发未分析**: a ticker that met the trigger (or whose trigger stage
+    was reconstructed with no code) but has no decision — its own group,
+    never under 未触发: `budget-dropped` → `因预算上限未分析`, any other passed
+    trigger → `无分析结果（运行失败或被中止）`, no code → `无分析结果（原因未记录）`.
+  - **未触发**: one line per trigger code (`core-unchanged`,
     `below-threshold` — not evaluated by the cost rule; the label shows the
     snapshot's trigger threshold in force —,
     `core-session-off`, else `其他`) listing ticker and score.
