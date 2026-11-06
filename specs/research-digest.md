@@ -108,7 +108,9 @@ line) was hard to read: the user asked why a name with no position was
     header as `待核实：X` — including any scheduled BUY/SELL ledger row of the
     slot that the (valid) snapshot does not show (an older snapshot kept when
     a rebuild failed). After execution the reason is the brief arm's own
-    execute event (the stage may hold the feeds arm's). A brief-arm run whose ticker or macro evaluation failed adds
+    execute event (the stage may hold the feeds arm's); a brief-arm
+    decision whose execute stage holds only the feeds arm's outcome reads
+    `下单结果待核实` (the brief arm's outcome is unknown). A brief-arm run whose ticker or macro evaluation failed adds
     `；简报未采用（评估 fail）` (the brief was withheld). PM ratings in words: Buy 强烈看多 · Overweight 看多 ·
     Hold 中性 · Underweight 看淡 · Sell 看空. An analysis error reads
     `分析出错` and **never** carries the error text (API error bodies).

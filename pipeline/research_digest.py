@@ -402,7 +402,15 @@ class _Ticker:
             # its strongest outcome, which can be the feeds arm's skip.
             events = [e for e in execute.get("events") or [] if isinstance(e, dict)]
             brief = [e for e in events if isinstance(e.get("details"), dict) and e["details"].get("arm") == "brief"]
-            execute = brief[-1] if brief else execute
+            decided_arm = ((self.decide or {}).get("details") or {}).get("arm")
+            stage_arm = (execute.get("details") or {}).get("arm") if isinstance(execute.get("details"), dict) else None
+            if brief:
+                execute = brief[-1]
+            elif decided_arm == "brief" and (stage_arm == "feeds" or any(
+                    isinstance(e.get("details"), dict) and e["details"].get("arm") == "feeds" for e in events)):
+                # Only the feeds arm's outcome is recorded: the brief arm's is
+                # unknown (e.g. a submit killed after its intent row).
+                execute, self.final = None, "unknown"
         self.execute = execute
 
     def head(self) -> str:

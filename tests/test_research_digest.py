@@ -996,3 +996,20 @@ def test_after_execution_the_brief_arms_own_skip_reason_is_told(tmp_path, live):
     snap["context"] = {"execute_ran": True}
     path.write_text(json.dumps(snap), encoding="utf-8")
     assert "→ 看多（PM 看多；未下单：总风险超限）" in build(cfg, "us")
+
+
+@pytest.mark.unit
+def test_after_execution_a_missing_brief_arm_outcome_is_undetermined(tmp_path, live):
+    cfg = config(tmp_path)
+    book(cfg)
+    row = {**entry("NVDA", decide=decided(cfg, "NVDA", "BUY", "Overweight")), "final": "excluded"}
+    row["stages"]["execute"] = {"code": "feeds-arm", "outcome": "excluded", "details": {"arm": "feeds"},
+                                "events": [{"code": "feeds-arm", "details": {"arm": "feeds"}}]}
+    write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "m — m.")}, tickers=[row])
+    path = cfg.state_dir / "funnel" / "us" / f"{DAY}.json"
+    snap = json.loads(path.read_text())
+    snap["context"] = {"execute_ran": True}
+    path.write_text(json.dumps(snap), encoding="utf-8")
+    text = build(cfg, "us")
+    assert "→ 看多（PM 看多；下单结果待核实）" in text and "已执行：待核实：NVDA" in text.splitlines()[0]
+    assert "对照分析" not in text and "无下单" not in text
