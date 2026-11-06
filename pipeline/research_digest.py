@@ -33,6 +33,7 @@ from pipeline.contracts.briefs import MACRO_IMPACT_SECTIONS, split_frontmatter
 logger = logging.getLogger("pipeline.research_digest")
 
 SESSION_NAMES = {"cn": "A股/港股", "us": "美股"}
+MARKET_NAMES = {"cn": "A股/港股", "us": "美股"}
 IMPACT_NAMES = {"bullish": "偏多", "bearish": "偏空", "neutral": "中性", "mixed": "分歧"}
 MACRO_SECTION_NAMES = dict(zip(MACRO_IMPACT_SECTIONS, ("利率", "增长", "地缘", "流动性", "大宗", "中国/亚洲"), strict=True))
 CATALYST_NAMES = {"earnings": "财报", "product": "产品", "regulatory": "监管", "M&A": "并购",
@@ -43,7 +44,7 @@ RATING_NAMES = {"Buy": "强烈看多", "Overweight": "看多", "Hold": "中性",
 SKIP_REASONS = (
     ("core-unchanged", "近几日已分析且无新变化，不重复"),
     ("below-threshold", "机会池分数 <{threshold}，未评估"),
-    ("core-session-off", "A股核心股本时段不分析"),
+    ("core-session-off", "{market}核心股本时段不分析"),
 )
 #: Triggered (or unrecorded) names without a decision: their own group,
 #: never under 未触发.
@@ -822,7 +823,7 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
                              key=lambda t: (-(t.score or -1), t.ticker))
             if members:
                 names = " · ".join(f"{t.ticker} {t.score:.1f}" if t.score is not None else t.ticker for t in members)
-                out.append(f"• {label.format(threshold=shown)}：{names}")
+                out.append(f"• {label.format(threshold=shown, market=MARKET_NAMES.get(session, session))}：{names}")
         return out
 
     shown = f"{threshold:g}" if threshold is not None else "触发线"

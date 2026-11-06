@@ -95,7 +95,9 @@ line) was hard to read: the user asked why a name with no position was
     decide stage while the ledger has the brief arm's row (its event was
     lost) reads `下单待核实（简报一路的记录缺失）` whatever the feeds arm decided —
     after step 7 `下单结果待核实（简报一路的记录缺失）` unless the name has a live
-    order on record —
+    order on record, in every mode (the mode read at build time may differ
+    from the one step 7 ran under: a false 待核实 is safe, a false no-order
+    is not) —
     (under 模拟 / 执行已暂停 `不下单（mode）`: no live order can follow);
     the greatest later ledger attempt (the decision step 7 reads, unseen by
     this digest) — judged by the adapter's own rules: manual →
@@ -127,7 +129,7 @@ line) was hard to read: the user asked why a name with no position was
   - **未触发**: one line per trigger code (`core-unchanged`,
     `below-threshold` — not evaluated by the cost rule; the label shows the
     snapshot's trigger threshold in force —,
-    `core-session-off`, else `其他`) listing ticker and score.
+    `core-session-off` — naming the slot's own market —, else `其他`) listing ticker and score.
   - Catalyst type and window in Chinese (`MM-DD`, ranges `~`); a window
     wholly before the slot date already happened and is dropped.
 - **Chinese summaries**: one call for the whole digest on

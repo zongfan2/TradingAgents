@@ -1112,3 +1112,12 @@ def test_an_unknown_execution_state_still_sees_a_newer_attempt(tmp_path, live, m
     text = build(cfg, "us")
     assert "下单待核实（有更新的分析记录）" in text and "待核实：NVDA" in text.splitlines()[0]
     assert "：无" not in text.splitlines()[0].split("｜")[-1]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("session", "ticker", "market"), [("us", "MSFT", "美股"), ("cn", "0700.HK", "A股/港股")])
+def test_the_core_session_off_label_names_the_slots_market(tmp_path, session, ticker, market):
+    cfg = config(tmp_path)
+    write_slot(cfg, session, briefs={ticker: ticker_brief(ticker, 3.0, "m — m.")},
+               tickers=[entry(ticker, trigger="core-session-off")])
+    assert f"• {market}核心股本时段不分析：{ticker} 3.0" in build(cfg, session)
