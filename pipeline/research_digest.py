@@ -85,8 +85,14 @@ UNKNOWN_STATE = "执行状态未知"
 UNDETERMINED_MODES = (LATE, INLINE_UNKNOWN, UNKNOWN_STATE)
 #: A link, markup (a Lark ``<at>`` mention) or a figure in Chinese numerals —
 #: none can be checked against the source, so none may reach the group.
-#: Chinese numerals, everyday and formal/traditional (兩, 伍, 佰, 億 …).
+#: Chinese numerals, everyday and formal/traditional (兩, 伍, 佰, 億 …). The
+#: prompt asks for Arabic digits (checked against the source); this screen is
+#: the backstop for a figure written in numerals anyway — best effort: a
+#: numeral next to another, or before a measure/currency/unit word. Common
+#: non-numeric words are removed first so they never trip it.
 _NUMERALS = "零〇一二两兩三四五六七八九十百千万亿萬億壹贰貳叁參参肆伍陆陸柒捌玖拾佰仟"
+_NUMERAL_WORDS = re.compile("一季度|二季度|三季度|四季度|统一|一致|一些|一直|一般|一起|一定|一切|一样|一旦|"
+                            "进一步|之一|唯一|第一|万一|一方面|一度|不一|一时")
 _UNSAFE = re.compile(
     r"https?://|www\.|<|>"
     # any domain-like token (ASCII, so CJK neighbours do not hide it), except
@@ -94,9 +100,10 @@ _UNSAFE = re.compile(
     r"|[A-Za-z0-9-]\.[A-Za-z]{2,}/"  # a host with a path, numeric or not
     r"|\d+(?:\.\d+){2,}"  # an IP-like host or a dotted figure the number check cannot read
     r"|(?<!\d)\.(?:com|net|org|cn|io|ai|ly|me|co|info|news|top|xyz)(?![A-Za-z])"  # a host in any script
-    r"|百分之|分之|[" + _NUMERALS + r"]{2,}|[" + _NUMERALS + r"]\s?[成]"
-    # a numeral before any currency or unit word, a space between allowed
-    r"|[" + _NUMERALS + r"]\s?(?:[美港欧日澳英加新台]?(?:元|金|币|镑|圆)|美分|人民币|块|角|毛|%|倍|个百分点)",
+    r"|百分之|分之|[" + _NUMERALS + r"]{2,}"
+    # a numeral before a measure, currency or unit (a space between allowed)
+    r"|[" + _NUMERALS + r"]\s?(?:[美港欧日澳英加新台韩]?[元金币镑圆]|[分角块毛点倍成亿万萬億%股]"
+    r"|个?百分点|个?基点|卢布|法郎|比特币|美分|人民币)",
     re.IGNORECASE)
 #: Domain-like tokens (ASCII, so CJK neighbours do not hide one); only a
 #: numeric exchange symbol (0700.HK, 600256.SS) is not a link.
@@ -567,17 +574,31 @@ def _run_summary(prompt: str) -> str:
     return json.dumps(output)
 
 
+_MONTHS = {name: i for i, names in enumerate(
+    (("jan",), ("feb",), ("mar",), ("apr",), ("may",), ("jun",), ("jul",), ("aug",), ("sep",), ("oct",),
+     ("nov",), ("dec",)), start=1) for name in names}
+
+
+def _canonical(number: str) -> str:
+    """``06`` and ``6`` are the same number; decimals keep their digits."""
+    return number if "." in number else str(int(number))
+
+
 def _screened(summary: str, source: str) -> str | None:
     """The summary, or None when it breaks the rules the prompt states:
     a forbidden word, too long, or a number its source text does not have."""
     text = " ".join(summary.split())
-    if not text or len(text) > SUMMARY_MAX_CHARS or _FORBIDDEN.search(text) or _UNSAFE.search(text):
+    if (not text or len(text) > SUMMARY_MAX_CHARS or _FORBIDDEN.search(text)
+            or _UNSAFE.search(_NUMERAL_WORDS.sub("", text))):
         return None
     if any(not _SYMBOL.fullmatch(token) for token in _DOMAIN.findall(text)):
         return None
     # Whole numbers only, and never from a link: a URL's digits vouch for nothing.
-    known = set(_NUMBER.findall(re.sub(r"https?://\S+", " ", source)))
-    if any(number not in known for number in _NUMBER.findall(text)):
+    plain = re.sub(r"https?://\S+", " ", source)
+    known = {_canonical(n) for n in _NUMBER.findall(plain)}
+    # A translated date: "Nov 6" in the source is 11月6日 in the summary.
+    known |= {str(month) for name, month in _MONTHS.items() if re.search(rf"\b{name}", plain, re.IGNORECASE)}
+    if any(_canonical(number) not in known for number in _NUMBER.findall(text)):
         return None
     return text
 

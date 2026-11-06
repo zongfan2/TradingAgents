@@ -568,7 +568,11 @@ def test_a_brief_the_pm_never_read_is_never_summarized_as_its_reason(tmp_path, m
     ("详见 例子.com。", "x", False), ("详见 0700.hk.de。", "0700.HK", False), ("详见 evil.0700.hk。", "0700.HK", False),
     ("详见 evil.biz.", "x", False), ("详见 evil.dev.", "x", False), ("0700.HK 财报前无新消息.", "0700.HK", True),
     ("目标价九澳元。", "x", False), ("五美金。", "x", False), ("五 美元。", "x", False), ("规模兩億。", "x", False),
-    ("伍佰亿。", "x", False),
+    ("伍佰亿。", "x", False), ("目标价五韩元。", "x", False), ("五卢布。", "x", False), ("五比特币。", "x", False),
+    ("加息五个基点。", "x", False), ("一季度持平，进一步观察。", "x", True), ("市场预期一致。", "x", True),
+    ("两日大跌原因未能核实。", "x", True),
+    ("11月6日财报是关键。", "the Nov 6 print", True), ("8月指引。", "the August guide", True),
+    ("6日财报。", "on 2026-11-06", True), ("12月财报。", "the Nov 6 print", False),
     ('<at user_id="all">所有人</at>注意。', "x", False), ("统一口径，一季度持平。", "x", True),
 ])
 def test_the_summary_screen(summary, source, kept):

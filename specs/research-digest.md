@@ -145,14 +145,17 @@ line) was hard to read: the user asked why a name with no position was
   screened: dropped if it contains a forbidden or action word
   (持有/减持/增持/评级/买入/买进/卖出/抛售/加仓/增仓/减仓/建仓/清仓/平仓/做空/做多/
   下单/止损/止盈/HOLD/BUY/SELL), exceeds 60 characters, or holds a whole number its source
-  (links removed) does not, or contains — case-insensitively — a link or any domain-like token
+  (links removed; leading zeros ignored; an English month name counts as
+  its number, so "Nov 6" vouches for 11月6日) does not, or contains — case-insensitively — a link or any domain-like token
   (whole multi-label hosts; only a numeric exchange symbol such as
   `0700.HK` standing alone is excepted), markup (a Lark `<at>`
-  mention) or a figure in Chinese numerals (two or more numeral
-  characters incl. traditional 萬/億, 百分之… / …分之…, …成, …个百分点, a
-  numeral — everyday or formal/traditional (兩/伍/佰 …) — before any currency
-  or unit word, a space between allowed: …元/…金/…币/…镑/美分/块/角/毛/%/倍), or a host with a path, even a numeric one, an IP-like or multi-dot
-  figure, or a common TLD in any script; only the names asked are used. A call that used
+  mention) or a figure in Chinese numerals — the prompt asks for Arabic digits
+  (checked against the source); the numeral screen is a best-effort backstop:
+  a numeral (everyday or formal/traditional) next to another, or before a
+  measure/currency/unit (元/金/币/镑/分/角/块/毛/点/倍/成/亿/万/%/股, 百分点,
+  基点, 卢布, 法郎, 比特币, 美分), after removing common non-numeric words
+  (一季度, 一致, 进一步 …). A fail-closed "any numeral" rule was tried and
+  dropped: on real output it removed most summaries (两日 = two days); only the names asked are used. A call that used
   a web tool is discarded — by its tool-call fields or a billed search count
   (the CLI keeps web tools on; outside facts would pass every screen).
   Any failure or a 45 s timeout: logged, and the digest goes out without
