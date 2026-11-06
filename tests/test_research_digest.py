@@ -556,6 +556,10 @@ def test_a_brief_the_pm_never_read_is_never_summarized_as_its_reason(tmp_path, m
     ("建议抛售。", "x", False), ("可以增仓。", "x", False), ("应当平仓。", "x", False), ("宜买进。", "x", False),
     ("目标价五百亿美元。", "x", False), ("详见 https://example.com 。", "x", False),
     ("涨幅达百分之五十。", "x", False), ("预计上涨五成。", "x", False), ("详见 example.com/x。", "x", False),
+    ("HTTPS://EVIL.COM", "x", False), ("详见 EXAMPLE.COM。", "x", False), ("详见 evil.ai。", "x", False),
+    ("详见 bit.ly/x。", "x", False), ("详见example.com查看。", "x", False), ("下跌十五个百分点。", "x", False),
+    ("规模五十多亿。", "x", False), ("三十美分。", "x", False),
+    ("0700.HK 财报前无新消息。", "0700.HK", True), ("600256.SS 走势平稳。", "600256.SS", True),
     ('<at user_id="all">所有人</at>注意。', "x", False), ("统一口径，一季度持平。", "x", True),
 ])
 def test_the_summary_screen(summary, source, kept):
@@ -675,7 +679,7 @@ def test_a_later_manual_attempt_shadows_the_scheduled_decision(tmp_path, live):
                                   "guard-unavailable", "market-closed", "not-tradable", "zero-qty", "max-tranches",
                                   "pyramid-up-only", "add-spacing", "cancel-failed", "recovery-unavailable",
                                   "submit-error", "adapter-error", "rejected", "manual-shadowed", "dedupe",
-                                  "some-new-code"])
+                                  "below-entry-zone", "some-new-code"])
 def test_execute_stage_reasons_read_in_chinese(code):
     import re
 
@@ -858,12 +862,24 @@ def test_the_summary_call_is_bounded_and_every_failure_costs_only_the_summaries(
 
 
 @pytest.mark.unit
-def test_a_later_scheduled_attempt_is_undetermined_not_shadowed(tmp_path, live):
+@pytest.mark.parametrize("first", ["BUY", "HOLD", "ERROR"])
+def test_a_later_scheduled_attempt_is_undetermined_not_shadowed(tmp_path, live, first):
     cfg = config(tmp_path)
     book(cfg)
-    decide = decided(cfg, "NVDA", "BUY", "Overweight")
+    decide = decided(cfg, "NVDA", first, "Overweight", plan=BUY_PLAN if first == "BUY" else None)
     write_decision(cfg, ticker="NVDA", n=2, plan=BUY_PLAN, date_iso=DAY.isoformat())  # scheduled attempt 2
     write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "m — m.")}, tickers=[entry("NVDA", decide=decide)])
     text = build(cfg, "us")
-    assert "→ 看多（PM 看多；下单待核实）" in text and "计划下单：待核实：NVDA" in text.splitlines()[0]
-    assert "被手动重跑取代" not in text
+    assert "→ 下单待核实（有更新的分析记录）" in text and "计划下单：待核实：NVDA" in text.splitlines()[0]
+    assert "被手动重跑取代" not in text and "计划下单：无" not in text
+
+
+@pytest.mark.unit
+def test_a_cn_lost_event_never_suggests_an_order(tmp_path, live):
+    cfg = config(tmp_path)
+    write_decision(cfg, ticker="0981.HK", session="cn", plan=BUY_PLAN, date_iso=DAY.isoformat())
+    feeds = stage("BUY", arm="feeds", pm_rating="Overweight", plan_valid=True)
+    write_slot(cfg, "cn", briefs={"0981.HK": ticker_brief("0981.HK", 7.0, "m — m.")},
+               tickers=[entry("0981.HK", decide=feeds)])
+    text = build(cfg, "cn")
+    assert "下单待核实" not in text and "A股不下单" in text

@@ -68,7 +68,7 @@ BLOCKER_NAMES = {
     "max-tranches": "加仓次数已满", "pyramid-up-only": "只在盈利时加仓", "add-spacing": "加仓间隔不足",
     "cancel-failed": "撤单失败", "recovery-unavailable": "恢复数据不可用", "submit-error": "提交出错",
     "adapter-error": "执行程序出错", "rejected": "券商拒单", "manual-shadowed": "被手动重跑取代",
-    "dedupe": "重复订单",
+    "dedupe": "重复订单", "below-entry-zone": "价格已跌破入场区间", "later-attempt": "有更新的分析记录",
 }
 #: Words a summary must not contain (the action is shown separately; the
 #: user asked why "HOLD" appeared for a name with no position).
@@ -85,8 +85,14 @@ UNKNOWN_STATE = "执行状态未知"
 UNDETERMINED_MODES = (LATE, INLINE_UNKNOWN, UNKNOWN_STATE)
 #: A link, markup (a Lark ``<at>`` mention) or a figure in Chinese numerals —
 #: none can be checked against the source, so none may reach the group.
-_UNSAFE = re.compile(r"https?://|www\.|<|>|\b[\w-]+\.(?:com|cn|net|org|io|co|hk|info|news)\b|百分之|"
-                     r"[零〇一二两三四五六七八九十百千]+[万亿成]|[零〇一二两三四五六七八九十百千万亿]+(?:美元|元|%|倍)")
+_UNSAFE = re.compile(
+    r"https?://|www\.|<|>"
+    # any domain-like token (ASCII, so CJK neighbours do not hide it), except
+    # an exchange suffix such as 0700.HK / 600256.SS
+    r"|(?<![A-Za-z0-9])[A-Za-z0-9-]+\.(?!(?:HK|SS|SZ|BJ)(?![A-Za-z]))[A-Za-z]{2,}(?![A-Za-z])"
+    r"|百分之|[零〇一二两三四五六七八九十百千万亿]{2,}|[零〇一二两三四五六七八九十百千]+[万亿成]"
+    r"|[零〇一二两三四五六七八九十百千万亿]+(?:美元|美分|元|%|倍|个百分点)",
+    re.IGNORECASE)
 _NUMBER = re.compile(r"(?<![\d.])\d+(?:\.\d+)?(?!\d)(?!\.\d)")  # "520." is 520
 #: The summary call: one small, cheap model; a tight timeout so the digest
 #: never waits long for it (DIGEST_DEADLINE_S in the orchestrator bounds all).
@@ -236,7 +242,7 @@ def order_blocker(record: Any | None, settings: Any, records: dict[str, Any] | N
                 and other.arm == record.arm and _attempt_number(other.run_id) > _attempt_number(record.run_id)):
             # A later attempt is the decision step 7 reads: a manual one never
             # executes here; any other is unseen by this digest — undetermined.
-            return "manual-shadowed" if other.trigger == "manual" else "unknown"
+            return "manual-shadowed" if other.trigger == "manual" else "later-attempt"
     return non_candidate_reason(record) or blocking_reason(record, settings)
 
 
@@ -280,6 +286,10 @@ def action_text(code: str | None, rating: str | None, *, session: str, held: boo
     becomes an order is the execution adapter's call (``blocker``), and a
     BUY on a held name is an add-on only with the plan's ``add_intent``
     (otherwise the adapter maintains)."""
+    if blocker == "later-attempt" and session != "cn":
+        # A newer ledger attempt is the decision step 7 reads; this digest
+        # only saw the older one — whatever it decided, the order is open.
+        return "下单待核实（有更新的分析记录）", None if mode not in ("模拟", "执行已暂停") else False
     if code == "ERROR":
         return "分析出错", False  # never the error text: it carries API error bodies
     view = RATING_NAMES.get(str(rating), str(rating)) if rating else None
@@ -634,7 +644,7 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
                 blocker = order_blocker(record, settings, records) if settings is not None else "unknown"
         except Exception:
             blocker = "unknown"
-        if not executed and blocker == "unknown" and details.get("arm") == "feeds" and brief_row:
+        if not executed and session != "cn" and blocker == "unknown" and details.get("arm") == "feeds" and brief_row:
             # The brief arm's event was lost: whatever the feeds arm decided,
             # step 7 reads the brief arm's ledger row itself.
             text, ordered = "下单待核实（简报一路的记录缺失）", None
