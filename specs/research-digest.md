@@ -62,7 +62,7 @@ line) was hard to read: the user asked why a name with no position was
     → `卖出` when held, `不买（…不做空）` when not, `看空（持仓未知，是否下单待定）`
     when unknown. A blocked BUY/SELL reads `看多/看空，不下单（<adapter reason>）` (also a
     blocked SELL on a flat name);
-    cn always `A股不下单`. Execution mode at build time: the kill switch
+    cn always `A股不下单` (checked first: no unknown execution state applies to cn). Execution mode at build time: the kill switch
     (`EXECUTION_HALT`) → `执行已暂停`, `TRADINGAGENTS_EXECUTION_ENABLED` off →
     `模拟`, in the header and in place of `下单`; neither is listed as a
     planned live order. With positions unknown a BUY/SELL is **undetermined**
@@ -150,8 +150,8 @@ line) was hard to read: the user asked why a name with no position was
   `0700.HK` standing alone is excepted), markup (a Lark `<at>`
   mention) or a figure in Chinese numerals (two or more numeral
   characters incl. traditional 萬/億, 百分之… / …分之…, …成, …个百分点, a
-  numeral before any currency unit: 美元/美分/港元/港币/欧元/日元/英镑/人民币/
-  元/块/角/毛), or a host with a path, even a numeric one, an IP-like or multi-dot
+  numeral — everyday or formal/traditional (兩/伍/佰 …) — before any currency
+  or unit word, a space between allowed: …元/…金/…币/…镑/美分/块/角/毛/%/倍), or a host with a path, even a numeric one, an IP-like or multi-dot
   figure, or a common TLD in any script; only the names asked are used. A call that used
   a web tool is discarded — by its tool-call fields or a billed search count
   (the CLI keeps web tools on; outside facts would pass every screen).

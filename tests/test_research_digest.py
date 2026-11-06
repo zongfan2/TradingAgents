@@ -567,6 +567,8 @@ def test_a_brief_the_pm_never_read_is_never_summarized_as_its_reason(tmp_path, m
     ("五欧元。", "x", False), ("详见 1.2.3.4/login。", "x", False), ("目标 520.5.1。", "x", False),
     ("详见 例子.com。", "x", False), ("详见 0700.hk.de。", "0700.HK", False), ("详见 evil.0700.hk。", "0700.HK", False),
     ("详见 evil.biz.", "x", False), ("详见 evil.dev.", "x", False), ("0700.HK 财报前无新消息.", "0700.HK", True),
+    ("目标价九澳元。", "x", False), ("五美金。", "x", False), ("五 美元。", "x", False), ("规模兩億。", "x", False),
+    ("伍佰亿。", "x", False),
     ('<at user_id="all">所有人</at>注意。', "x", False), ("统一口径，一季度持平。", "x", True),
 ])
 def test_the_summary_screen(summary, source, kept):
@@ -1057,3 +1059,18 @@ def test_after_execution_a_lost_brief_event_is_undetermined(tmp_path, live, feed
     text = build(cfg, "us")
     assert "→ 下单结果待核实（简报一路的记录缺失）" in text and "已执行：待核实：NVDA" in text.splitlines()[0]
     assert "无下单" not in text and "不操作" not in text
+
+
+@pytest.mark.unit
+def test_cn_never_suggests_an_order_even_with_execution_state_unknown(tmp_path, monkeypatch):
+    text, ordered = rd.action_text("BUY", "Overweight", session="cn", held=False, blocker="unknown",
+                                   add_intent=False, mode=rd.UNKNOWN_STATE, execution_time=None)
+    assert "A股不下单" in text and ordered is False
+    from pipeline import execution_adapter
+
+    monkeypatch.setattr(execution_adapter, "load_settings", lambda *a: (_ for _ in ()).throw(OSError("env")))
+    cfg = config(tmp_path)
+    write_slot(cfg, "cn", briefs={"0981.HK": ticker_brief("0981.HK", 7.0, "m — m.")},
+               tickers=[entry("0981.HK", decide=stage("BUY", arm="brief", pm_rating="Overweight"))])
+    out = build(cfg, "cn")
+    assert "A股不下单" in out and "执行状态未知" not in out

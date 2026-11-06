@@ -85,6 +85,8 @@ UNKNOWN_STATE = "执行状态未知"
 UNDETERMINED_MODES = (LATE, INLINE_UNKNOWN, UNKNOWN_STATE)
 #: A link, markup (a Lark ``<at>`` mention) or a figure in Chinese numerals —
 #: none can be checked against the source, so none may reach the group.
+#: Chinese numerals, everyday and formal/traditional (兩, 伍, 佰, 億 …).
+_NUMERALS = "零〇一二两兩三四五六七八九十百千万亿萬億壹贰貳叁參参肆伍陆陸柒捌玖拾佰仟"
 _UNSAFE = re.compile(
     r"https?://|www\.|<|>"
     # any domain-like token (ASCII, so CJK neighbours do not hide it), except
@@ -92,8 +94,9 @@ _UNSAFE = re.compile(
     r"|[A-Za-z0-9-]\.[A-Za-z]{2,}/"  # a host with a path, numeric or not
     r"|\d+(?:\.\d+){2,}"  # an IP-like host or a dotted figure the number check cannot read
     r"|(?<!\d)\.(?:com|net|org|cn|io|ai|ly|me|co|info|news|top|xyz)(?![A-Za-z])"  # a host in any script
-    r"|百分之|分之|[零〇一二两三四五六七八九十百千万亿萬億]{2,}|[零〇一二两三四五六七八九十百千]+[万亿萬億成]"
-    r"|[零〇一二两三四五六七八九十百千万亿萬億]+(?:美元|美分|港元|港币|欧元|日元|英镑|人民币|元|块|角|毛|%|倍|个百分点)",
+    r"|百分之|分之|[" + _NUMERALS + r"]{2,}|[" + _NUMERALS + r"]\s?[成]"
+    # a numeral before any currency or unit word, a space between allowed
+    r"|[" + _NUMERALS + r"]\s?(?:[美港欧日澳英加新台]?(?:元|金|币|镑|圆)|美分|人民币|块|角|毛|%|倍|个百分点)",
     re.IGNORECASE)
 #: Domain-like tokens (ASCII, so CJK neighbours do not hide one); only a
 #: numeric exchange symbol (0700.HK, 600256.SS) is not a link.
@@ -319,10 +322,10 @@ def action_text(code: str | None, rating: str | None, *, session: str, held: boo
         kept = [part for part in parts if part]
         return f"（{'；'.join(kept)}）" if kept else ""
 
+    if session == "cn" and code in ("BUY", "SELL"):  # cn never orders, whatever else is unknown
+        return ("看多" if code == "BUY" else "看空") + "，不下单" + paren(pm, "A股不下单"), False
     if mode in UNDETERMINED_MODES and code in ("BUY", "SELL") and blocker in (None, "unknown"):
         return ("看多" if code == "BUY" else "看空") + paren(pm, mode), None
-    if session == "cn" and code in ("BUY", "SELL"):
-        return ("看多" if code == "BUY" else "看空") + "，不下单" + paren(pm, "A股不下单"), False
     if code == "BUY":
         if blocker == "unknown":  # no ledger row read: the adapter reads it itself
             return "看多" + paren(pm, mode or "下单待核实"), None if not mode else False
@@ -654,7 +657,7 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
         settings = load_settings()
         mode = _execution_mode(config) if session == "us" else None
     except Exception:
-        settings, mode = None, UNKNOWN_STATE
+        settings, mode = None, (UNKNOWN_STATE if session == "us" else None)
     executed = executed and session == "us"  # built after step 7 (a late retry, an inline execution)
     try:
         execution_at = config.sessions["us"].execution_time
