@@ -137,17 +137,17 @@ def test_the_watchdog_starts_the_review_once_after_the_close(tmp_path):
     spawned = []
     friday = DAY  # 2026-11-04 (a Wednesday); times below are New York
     at = lambda h, m=0: datetime(friday.year, friday.month, friday.day, h, m, tzinfo=dr.NY)  # noqa: E731
-    assert not dr.maybe_start(cfg, at(16, 59), spawn=spawned.append)  # before 17:00 ET
-    assert dr.maybe_start(cfg, at(17, 5), spawn=spawned.append) and spawned == [friday]
-    assert not dr.maybe_start(cfg, at(18), spawn=spawned.append)  # started < 2 h ago
-    assert dr.maybe_start(cfg, at(19, 30), spawn=spawned.append)  # stuck: retried
+    assert not dr.maybe_start(cfg, at(16, 59), runner=lambda cfg, day: spawned.append(day))  # before 17:00 ET
+    assert dr.maybe_start(cfg, at(17, 5), runner=lambda cfg, day: spawned.append(day)) and spawned == [friday]
+    assert not dr.maybe_start(cfg, at(18), runner=lambda cfg, day: spawned.append(day))  # started < 2 h ago
+    assert dr.maybe_start(cfg, at(19, 30), runner=lambda cfg, day: spawned.append(day))  # stuck: retried
     _started, done = dr._marks(cfg, friday)
     done.write_text("x")
-    assert not dr.maybe_start(cfg, at(21), spawn=spawned.append) and len(spawned) == 2
+    assert not dr.maybe_start(cfg, at(21), runner=lambda cfg, day: spawned.append(day)) and len(spawned) == 2
     saturday = datetime(2026, 11, 7, 23, tzinfo=timezone.utc)
-    assert not dr.maybe_start(cfg, saturday, spawn=spawned.append)
+    assert not dr.maybe_start(cfg, saturday, runner=lambda cfg, day: spawned.append(day))
     other = config(tmp_path / "empty")  # no us snapshot for the day: nothing to review
-    assert not dr.maybe_start(other, at(18), spawn=spawned.append)
+    assert not dr.maybe_start(other, at(18), runner=lambda cfg, day: spawned.append(day))
 
 
 @pytest.mark.unit
@@ -180,3 +180,111 @@ def test_the_digest_as_sent_is_kept_for_the_archive(tmp_path, monkeypatch):
 
 
 _ = BUY_PLAN  # the shared fixtures' plan shape
+
+
+@pytest.mark.unit
+def test_the_by_hand_run_loads_the_repo_env(tmp_path, monkeypatch):
+    from pipeline import orchestrator
+
+    loaded, ran = [], []
+    monkeypatch.setattr(orchestrator, "_load_repo_dotenv", lambda: loaded.append(1))
+    monkeypatch.setattr(dr, "run", lambda cfg, day: ran.append(day) or 0)
+    assert dr.main(["run", "--date", DAY.isoformat()]) == 0
+    assert loaded == [1] and ran == [DAY]
+
+
+@pytest.mark.unit
+def test_a_broken_archive_or_macro_brief_still_sends_the_day(tmp_path, monkeypatch):
+    cfg = config(tmp_path)
+    slot(cfg)
+    blocker = tmp_path / "a-file"
+    blocker.write_text("x")
+    monkeypatch.setenv(dr.ARCHIVE_ENV, str(blocker / "archive"))  # an unwritable root
+    monkeypatch.setattr(dr, "closes", lambda tickers, fetch=None: prices_for("NVDA", "FN"))
+    (cfg.macro_brief_dir / f"{DAY}.us.md").write_text("---\nas_of_date: 2026-13-45\n---\n")
+    sent = []
+    text = dr.review_day(cfg, DAY, send=lambda title, t: sent.append(t), runner=lambda prompt: review())
+    assert sent == [text] and "策略：继续观察" in text
+
+
+@pytest.mark.unit
+def test_a_brief_less_name_that_moved_is_a_missed_move(tmp_path):
+    cfg = config(tmp_path)
+    write_slot(cfg, briefs={}, tickers=[
+        entry("MSFT", collect="failed", evaluate="skipped-absent", trigger="core"),
+        {"ticker": "ORCL", "layer": "watch", "stages": {"collect": stage("not-collected-watch")}}])
+    facts = dr.build_facts(cfg, DAY, prices=prices_for("MSFT", "ORCL", moves={"MSFT": -17.0, "ORCL": 8.0}))
+    missed = {r["ticker"]: r for r in facts["us"]["missed_moves"]}
+    assert set(missed) == {"MSFT", "ORCL"} and missed["ORCL"]["collect"] == "not-collected-watch"
+
+
+@pytest.mark.unit
+def test_re_archiving_never_replaces_good_files_with_empty_ones(tmp_path, archive):
+    cfg = config(tmp_path)
+    slot(cfg)
+    dr.archive_day(cfg, DAY, prices=prices_for("NVDA", "FN"))
+    iso = DAY.isoformat()
+    kept = {p: p.read_bytes() for p in (archive / "decisions" / iso / "decisions.jsonl",
+                                        archive / "prices" / iso / "closes.csv")}
+    (cfg.ledger_dir / "decisions.jsonl").write_bytes(b"\xff\xfe broken")
+    counts = dr.archive_day(cfg, DAY, fetch=lambda t: (_ for _ in ()).throw(OSError("down")))
+    assert {p: p.read_bytes() for p in kept} == kept
+    assert counts["decisions:missing"] == 1 and counts["prices:missing"] == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bad", [
+    {**review(), "summary": None}, {**review(), "issues": ["x"]}, {**review(), "verdict": "全仓买入"},
+    {**review(), "summary": "详见 https://evil.example 。"}, {**review(), "watch": ['<at user_id="all">所有人</at>']},
+])
+def test_a_malformed_or_unsafe_review_falls_back_to_the_facts(tmp_path, archive, monkeypatch, bad):
+    cfg = config(tmp_path)
+    slot(cfg)
+    monkeypatch.setattr(dr, "closes", lambda tickers, fetch=None: prices_for("NVDA", "FN"))
+    sent = []
+    text = dr.review_day(cfg, DAY, send=lambda title, t: sent.append(t), runner=lambda prompt: bad)
+    assert "复盘模型不可用" in text and sent == [text] and "evil" not in text and "<at" not in text
+
+
+@pytest.mark.unit
+def test_a_review_call_that_used_the_web_is_rejected(monkeypatch):
+    import subprocess
+
+    from pipeline import claude_cli
+
+    envelope = {"structured_output": review(), "modelUsage": {"m": {"webSearchRequests": 1}}, "_tool_calls": {}}
+    monkeypatch.setattr(claude_cli, "claude_command", lambda *a, **k: ["claude"])
+    monkeypatch.setattr(claude_cli, "call_env", lambda command: None)
+    monkeypatch.setattr(claude_cli, "parse_envelope", lambda stdout: envelope)
+    monkeypatch.setattr(claude_cli, "record_usage", lambda *a, **k: None)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="{}", stderr=""))
+    with pytest.raises(RuntimeError, match="web tools"):
+        dr._run_review("prompt")
+
+
+@pytest.mark.unit
+def test_the_scoreboard_counts_decision_day_excess_by_impact_and_rating(tmp_path):
+    cfg = config(tmp_path)
+    slot(cfg)
+    board = dr.build_facts(cfg, DAY, prices=prices_for("NVDA", "FN", moves={"NVDA": 3.0, "FN": -2.0, "SPY": 1.0}))
+    sb = board["scoreboard"]
+    assert sb["sessions"] == 1
+    assert sb["impact"] == {"偏空": {"n": 1, "mean_excess_pct": 2.0}, "分歧": {"n": 1, "mean_excess_pct": -3.0}}
+    assert sb["pm_rating"] == {"Overweight": {"n": 1, "mean_excess_pct": 2.0}}
+
+
+@pytest.mark.unit
+def test_the_usage_archive_reads_the_log_the_writer_uses_and_includes_the_review(tmp_path, archive, monkeypatch):
+    cfg = config(tmp_path)
+    slot(cfg)
+    log = tmp_path / "custom-usage.jsonl"
+    monkeypatch.setenv("TRADINGAGENTS_CLAUDE_USAGE_LOG", str(log))
+    monkeypatch.setattr(dr, "closes", lambda tickers, fetch=None: prices_for("NVDA", "FN"))
+
+    def runner(prompt):
+        log.write_text(json.dumps({"ts": "2026-11-04T22:10:00+00:00", "component": "daily_review"}) + "\n")
+        return review()
+
+    dr.review_day(cfg, DAY, send=None, runner=runner)
+    rows = (archive / "llm_usage" / DAY.isoformat() / "cli.jsonl").read_text().splitlines()
+    assert [json.loads(r)["component"] for r in rows] == ["daily_review"]

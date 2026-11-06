@@ -17,6 +17,7 @@ import io
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 from collections import defaultdict
@@ -39,11 +40,14 @@ REVIEW_AFTER = time(17, 0)
 STUCK_AFTER = timedelta(hours=2)
 #: Sessions of history the rolling scoreboard reads.
 SCOREBOARD_SESSIONS = 20
-#: A move at least this large on the day makes a skipped name worth naming.
+#: A move at least this large on the day makes a non-analysed name worth naming.
 MISSED_MOVE_PCT = 5.0
 REVIEW_TIMEOUT_S = 300.0
 BENCHMARKS = {"us": "SPY", "cn": "000300.SS", "hk": "^HSI"}
 VERDICTS = ("需要优化", "继续观察", "暂不调整")
+SEVERITIES = ("高", "中", "低")
+#: Links or markup never reach the group (the review text is model output).
+_UNSAFE_TEXT = re.compile(r"https?://|www\.|<|>", re.IGNORECASE)
 
 
 def archive_root(config: PipelineConfig | None = None) -> Path:
@@ -53,6 +57,80 @@ def archive_root(config: PipelineConfig | None = None) -> Path:
 
 def _benchmark(ticker: str, session: str) -> str:
     return BENCHMARKS["hk"] if ticker.upper().endswith(".HK") else BENCHMARKS[session]
+
+
+# ---------------------------------------------------------------------------
+# Inputs
+# ---------------------------------------------------------------------------
+
+
+def _jsonl_rows(path: Path) -> list[dict] | None:
+    """The file's JSON-object rows; None when it cannot be read (a missing
+    file is an empty list — nothing was written that day)."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    except (OSError, UnicodeDecodeError):
+        return None
+    rows = []
+    for line in text.splitlines():
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def _snapshot(config: PipelineConfig, session: str, day: date) -> list[dict]:
+    from pipeline.funnel import snapshot_path
+
+    try:
+        snap = json.loads(snapshot_path(config.state_dir, session, day).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return []
+    entries = snap.get("tickers") if isinstance(snap, dict) else None
+    return [e for e in entries if isinstance(e, dict) and e.get("ticker")] if isinstance(entries, list) else []
+
+
+def _day_tickers(config: PipelineConfig, day: date) -> dict[str, set[str]]:
+    """session -> tickers of the day's funnel snapshots."""
+    return {session: {str(e["ticker"]) for e in _snapshot(config, session, day)} for session in ("cn", "us")}
+
+
+def closes(tickers: set[str], fetch=None) -> dict[str, list[tuple[date, float]]]:
+    """ticker -> clean daily closes (the price tape's source); a ticker whose
+    read fails is left out (never an empty series)."""
+    from pipeline import price_tape
+
+    out = {}
+    for ticker in sorted(tickers):
+        try:
+            bars = (fetch or price_tape.fetch_daily_closes)(ticker)
+        except Exception as exc:
+            logger.warning("daily review: closes for %s unavailable (%s)", ticker, type(exc).__name__)
+            continue
+        series = [(d, c) for d, c in bars if c == c and c > 0]
+        if series:
+            out[ticker] = series
+    return out
+
+
+def day_change(series: list[tuple[date, float]], day: date) -> float | None:
+    """% change of the session on ``day`` vs the previous close."""
+    for i, (d, close) in enumerate(series):
+        if d == day and i > 0:
+            return (close / series[i - 1][1] - 1) * 100
+    return None
+
+
+def _ny_date(stamp: object) -> date | None:
+    try:
+        return datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).astimezone(NY).date()
+    except (TypeError, ValueError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -67,89 +145,47 @@ def _copy(src: Path, dest: Path, counts: dict[str, int], category: str) -> None:
         counts[f"{category}:missing"] += 1
         return
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.exists() and dest.read_bytes() == data:
-        counts[category] += 1  # idempotent: the same content is already there
-        return
-    tmp = dest.with_name(dest.name + ".tmp")
-    tmp.write_bytes(data)
-    os.replace(tmp, dest)
+    if not (dest.exists() and dest.read_bytes() == data):
+        tmp = dest.with_name(dest.name + ".tmp")
+        tmp.write_bytes(data)
+        os.replace(tmp, dest)
     counts[category] += 1
 
 
-def _write(dest: Path, text: str, counts: dict[str, int], category: str) -> None:
+def _write(dest: Path, text: str | None, counts: dict[str, int], category: str) -> None:
+    """Write ``text``; None means the input could not be read: the archived
+    file is kept as it is and the category counts as missing."""
+    if text is None:
+        counts[f"{category}:missing"] += 1
+        return
     dest.parent.mkdir(parents=True, exist_ok=True)
     atomic_write(dest, text)
     counts[category] += 1
 
 
-def _jsonl_rows(path: Path) -> list[dict]:
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return []
-    rows = []
-    for line in text.splitlines():
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(row, dict):
-            rows.append(row)
-    return rows
+def _jsonl_text(rows: list[dict] | None) -> str | None:
+    return None if rows is None else "".join(json.dumps(r, ensure_ascii=False, default=str) + "\n" for r in rows)
 
 
-def _day_tickers(config: PipelineConfig, day: date) -> dict[str, set[str]]:
-    """session -> tickers of the day's funnel snapshots (and brief files)."""
-    from pipeline.funnel import snapshot_path
+def _usage_log() -> Path:
+    from pipeline.claude_cli import usage_log_path
 
-    out: dict[str, set[str]] = defaultdict(set)
-    for session in ("cn", "us"):
-        try:
-            snap = json.loads(snapshot_path(config.state_dir, session, day).read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        for entry in snap.get("tickers") or [] if isinstance(snap, dict) else []:
-            if isinstance(entry, dict) and entry.get("ticker"):
-                out[session].add(str(entry["ticker"]))
-    return out
-
-
-def closes(tickers: set[str], fetch=None) -> dict[str, list[tuple[date, float]]]:
-    """ticker -> clean daily closes (the price tape's source)."""
-    from pipeline import price_tape
-
-    out = {}
-    for ticker in sorted(tickers):
-        try:
-            bars = (fetch or price_tape.fetch_daily_closes)(ticker)
-        except Exception as exc:
-            logger.warning("daily review: closes for %s unavailable (%s)", ticker, type(exc).__name__)
-            continue
-        out[ticker] = [(d, c) for d, c in bars if c == c and c > 0]
-    return out
-
-
-def day_change(series: list[tuple[date, float]], day: date) -> float | None:
-    """% change of the session on ``day`` vs the previous close."""
-    for i, (d, close) in enumerate(series):
-        if d == day and i > 0:
-            return (close / series[i - 1][1] - 1) * 100
-    return None
+    return usage_log_path()
 
 
 def archive_day(config: PipelineConfig, day: date, *, broker=None, fetch=None,
                 prices: dict[str, list[tuple[date, float]]] | None = None) -> dict[str, int]:
     """Archive ``day`` under ``<root>/<category>/<day>/``; returns counts per
-    category (``<category>:missing`` for skipped inputs). Never raises on a
-    missing input."""
+    category (``<category>:missing`` for an input skipped or unreadable — an
+    archived file is never replaced by an empty one). Never raises on input."""
+    from pipeline.funnel import snapshot_path
+
     root, iso = archive_root(config), day.isoformat()
     counts: dict[str, int] = defaultdict(int)
     for session in ("cn", "us"):
         base = config.macro_brief_dir / f"{iso}.{session}"
         _copy(Path(f"{base}.md"), root / "macro_briefs" / iso / f"{session}.md", counts, "macro_briefs")
         _copy(Path(f"{base}.eval.json"), root / "macro_briefs" / iso / f"{session}.eval.json", counts, "macro_briefs")
-        from pipeline.funnel import snapshot_path
-
         _copy(snapshot_path(config.state_dir, session, day), root / "funnel" / iso / f"{session}.json", counts, "funnel")
         _copy(config.state_dir / "research_digest" / session / f"{iso}.txt",
               root / "digests" / iso / f"{session}.txt", counts, "digests")
@@ -159,30 +195,34 @@ def archive_day(config: PipelineConfig, day: date, *, broker=None, fetch=None,
             _copy(brief, root / "ticker_briefs" / iso / f"{ticker}.md", counts, "ticker_briefs")
             _copy(brief.with_name(f"{iso}.eval.json"), root / "ticker_briefs" / iso / f"{ticker}.eval.json",
                   counts, "ticker_briefs")
-    decisions = [r for r in _jsonl_rows(config.ledger_dir / "decisions.jsonl") if r.get("date") == iso]
+    decisions = _jsonl_rows(config.ledger_dir / "decisions.jsonl")
     _write(root / "decisions" / iso / "decisions.jsonl",
-           "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in decisions), counts, "decisions")
-    orders = [r for r in _jsonl_rows(config.ledger_dir / "orders.jsonl")
-              if str(r.get("client_order_id") or r.get("run_id") or "").startswith(iso)]
-    _write(root / "orders" / iso / "orders.jsonl",
-           "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in orders), counts, "orders")
-    cli = [r for r in _jsonl_rows(config.state_dir / "claude_usage.jsonl") if str(r.get("ts", "")).startswith(iso)]
-    analysis = [r for r in _jsonl_rows(config.state_dir / "llm_usage.jsonl") if r.get("date") == iso]
-    _write(root / "llm_usage" / iso / "cli.jsonl", "".join(json.dumps(r) + "\n" for r in cli), counts, "llm_usage")
-    _write(root / "llm_usage" / iso / "analysis.jsonl", "".join(json.dumps(r) + "\n" for r in analysis),
+           _jsonl_text(None if decisions is None else [r for r in decisions if r.get("date") == iso]),
+           counts, "decisions")
+    orders = _jsonl_rows(config.ledger_dir / "orders.jsonl")
+    _write(root / "orders" / iso / "orders.jsonl", _jsonl_text(None if orders is None else [
+        r for r in orders if str(r.get("client_order_id") or r.get("run_id") or "").startswith(iso)]),
+        counts, "orders")
+    cli = _jsonl_rows(_usage_log())
+    _write(root / "llm_usage" / iso / "cli.jsonl",
+           _jsonl_text(None if cli is None else [r for r in cli if _ny_date(r.get("ts")) == day]), counts, "llm_usage")
+    analysis = _jsonl_rows(config.state_dir / "llm_usage.jsonl")
+    _write(root / "llm_usage" / iso / "analysis.jsonl",
+           _jsonl_text(None if analysis is None else [r for r in analysis if r.get("date") == iso]),
            counts, "llm_usage")
     if prices is None:
         tickers = set().union(*_day_tickers(config, day).values()) | set(BENCHMARKS.values())
         prices = closes(tickers, fetch)
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    writer.writerow(["date", "ticker", "close", "change_pct"])
-    for ticker, series in sorted(prices.items()):
-        for d, close in series:
-            if d == day:
-                change = day_change(series, day)
-                writer.writerow([iso, ticker, f"{close:.4f}", "" if change is None else f"{change:.2f}"])
-    _write(root / "prices" / iso / "closes.csv", buf.getvalue(), counts, "prices")
+    rows = [[iso, ticker, f"{close:.4f}", "" if (c := day_change(series, day)) is None else f"{c:.2f}"]
+            for ticker, series in sorted(prices.items()) for d, close in series if d == day]
+    if rows:
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["date", "ticker", "close", "change_pct"])
+        writer.writerows(rows)
+        _write(root / "prices" / iso / "closes.csv", buf.getvalue(), counts, "prices")
+    else:  # no closes read (a network failure, a date older than the data): keep what is there
+        _write(root / "prices" / iso / "closes.csv", None, counts, "prices")
     if broker is not None:
         for name, read in (("account", broker.account), ("positions", broker.positions)):
             try:
@@ -195,21 +235,19 @@ def archive_day(config: PipelineConfig, day: date, *, broker=None, fetch=None,
             except Exception as exc:
                 logger.warning("daily review: broker %s unavailable (%s)", name, type(exc).__name__)
                 counts["broker:missing"] += 1
-        try:
-            start = datetime(day.year, day.month, day.day, tzinfo=NY).astimezone(timezone.utc)
-            fills = [f for f in broker.fills_since(start) if str(_fill_day(f)) == iso]
-            _write(root / "broker" / iso / "fills.json", json.dumps(fills, default=str, indent=1), counts, "broker")
-        except Exception as exc:
-            logger.warning("daily review: fills unavailable (%s)", type(exc).__name__)
-            counts["broker:missing"] += 1
+        fills = _fills(broker, day)
+        _write(root / "broker" / iso / "fills.json", None if fills is None else json.dumps(fills, default=str, indent=1),
+               counts, "broker")
     return dict(counts)
 
 
-def _fill_day(fill: Any) -> date | None:
-    raw = (fill.get("transaction_time") if isinstance(fill, dict) else None) or ""
+def _fills(broker, day: date) -> list[dict] | None:
     try:
-        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).astimezone(NY).date()
-    except ValueError:
+        start = datetime(day.year, day.month, day.day, tzinfo=NY).astimezone(timezone.utc)
+        return [f for f in broker.fills_since(start)
+                if _ny_date((f if isinstance(f, dict) else {}).get("transaction_time")) == day]
+    except Exception as exc:
+        logger.warning("daily review: fills unavailable (%s)", type(exc).__name__)
         return None
 
 
@@ -218,30 +256,50 @@ def _fill_day(fill: Any) -> date | None:
 # ---------------------------------------------------------------------------
 
 
-def _names(config: PipelineConfig, session: str, day: date) -> list[dict]:
-    """Structured per-name facts of a slot — never brief prose."""
-    from pipeline import research_digest as rd
+def _code(stages: dict, name: str) -> str | None:
+    stage = stages.get(name)
+    return stage.get("code") if isinstance(stage, dict) else None
 
-    tickers, _threshold, _executed, _readable = rd._tickers(config, session, day)
+
+def _names(config: PipelineConfig, session: str, day: date) -> list[dict]:
+    """Structured per-name facts of a slot — never brief prose. Every funnel
+    entry of the slot's own session is listed (a name without a brief too:
+    a failed collection or a watch name can still be a missed move)."""
+    from pipeline import research_digest as rd
+    from pipeline.common import session_for_ticker
+
+    tickers = {t.ticker: t for t in rd._tickers(config, session, day)[0]}
+    rows = _jsonl_rows(config.ledger_dir / "decisions.jsonl") or []
     briefs_used = {str(r.get("run_id")): str(((r.get("inputs") or {}).get("ticker_brief") or {}).get("path") or "")
-                   for r in _jsonl_rows(config.ledger_dir / "decisions.jsonl") if r.get("date") == day.isoformat()}
+                   for r in rows if r.get("date") == day.isoformat() and isinstance(r.get("inputs"), dict)}
     out = []
-    for t in tickers:
-        impact = rd._last_impact(t.body) if t.has_brief else None
-        details = (t.decide or {}).get("details") or {}
-        used = briefs_used.get(str(details.get("run_id")), "")
-        trigger = t.stages.get("trigger") if isinstance(t.stages.get("trigger"), dict) else {}
-        out.append({
-            "ticker": t.ticker, "impact": impact[0] if impact else None, "score": t.score,
-            "eval": ((t.stages.get("evaluate") or {}).get("code")),
-            # the runner's own code (core / core-pair / catalyst / below-threshold …)
-            "trigger": trigger.get("code") or t.trigger,
-            # a decision made on an older brief (served stale, contract gap = 1)
-            "brief_used": used.split("/")[-1].removesuffix(".md") if used and day.isoformat() not in used else None,
-            "decision": (t.decide or {}).get("code"), "pm_rating": details.get("pm_rating"),
-            "arm": details.get("arm"), "final": t.final,
-            "execute": (t.execute or {}).get("code") if isinstance(t.execute, dict) else None,
-        })
+    for entry in _snapshot(config, session, day):
+        ticker = str(entry["ticker"])
+        try:
+            if session_for_ticker(ticker) != session:
+                continue
+            stages = entry.get("stages") if isinstance(entry.get("stages"), dict) else {}
+            t = tickers.get(ticker)
+            impact = rd._last_impact(t.body) if t is not None and t.has_brief else None
+            decide = t.decide if t is not None else None
+            details = (decide or {}).get("details") or {}
+            used = briefs_used.get(str(details.get("run_id")), "")
+            out.append({
+                "ticker": ticker, "impact": impact[0] if impact else None,
+                "score": t.score if t is not None else None, "has_brief": bool(t is not None and t.has_brief),
+                "layer": entry.get("layer"), "collect": _code(stages, "collect"),
+                "eval": _code(stages, "evaluate"),
+                # the runner's own code (core / core-pair / catalyst / below-threshold …)
+                "trigger": _code(stages, "trigger") or (t.trigger if t is not None else None),
+                # a decision made on an older brief (served stale, contract gap = 1)
+                "brief_used": (used.split("/")[-1].removesuffix(".md")
+                               if used and day.isoformat() not in used else None),
+                "decision": (decide or {}).get("code"), "pm_rating": details.get("pm_rating"),
+                "arm": details.get("arm"), "final": t.final if t is not None else entry.get("final"),
+                "execute": (t.execute or {}).get("code") if t is not None and isinstance(t.execute, dict) else None,
+            })
+        except Exception as exc:  # one malformed row never costs the review
+            logger.warning("daily review: skipped a malformed funnel row (%s)", type(exc).__name__)
     return out
 
 
@@ -255,13 +313,19 @@ def _with_moves(names: list[dict], session: str, day: date, prices: dict) -> lis
 
 
 def _scoreboard(config: PipelineConfig, day: date, prices: dict) -> dict:
-    """Rolling: decision-day excess return by brief impact word and by PM
-    rating, over the last SCOREBOARD_SESSIONS archived us sessions."""
+    """Rolling: the excess return of the decision day's own session (the
+    pre-market decision's day; it includes the overnight gap before the
+    09:45 execution) by brief impact word and by PM rating, over the last
+    SCOREBOARD_SESSIONS us sessions with a funnel snapshot."""
     buckets: dict[str, dict[str, list[float]]] = {"impact": defaultdict(list), "pm_rating": defaultdict(list)}
     d, seen = day, 0
     while seen < SCOREBOARD_SESSIONS and (day - d).days < 60:
         if d.weekday() < 5:
-            names = _with_moves(_names(config, "us", d), "us", d, prices)
+            try:
+                names = _with_moves(_names(config, "us", d), "us", d, prices)
+            except Exception as exc:
+                logger.warning("daily review: scoreboard skipped %s (%s)", d, type(exc).__name__)
+                names = []
             if names:
                 seen += 1
             for row in names:
@@ -272,9 +336,29 @@ def _scoreboard(config: PipelineConfig, day: date, prices: dict) -> dict:
                 if row["pm_rating"]:
                     buckets["pm_rating"][row["pm_rating"]].append(row["excess_pct"])
         d -= timedelta(days=1)
-    return {"sessions": seen, **{
-        kind: {key: {"n": len(v), "mean_excess_pct": round(sum(v) / len(v), 2)} for key, v in group.items()}
+    return {"sessions": seen, "definition": "decision-day session excess vs benchmark", **{
+        kind: {key: {"n": len(v), "mean_excess_pct": round(sum(v) / len(v), 2)} for key, v in sorted(group.items())}
         for kind, group in buckets.items()}}
+
+
+def _error_kinds(config: PipelineConfig, day: date) -> dict[str, int]:
+    from pipeline.llm_usage import error_kind
+
+    rows = _jsonl_rows(config.state_dir / "llm_usage.jsonl") or []
+    out: dict[str, int] = defaultdict(int)
+    for r in rows:
+        if r.get("date") == day.isoformat() and r.get("error"):
+            out[error_kind(str(r["error"]))] += 1
+    return dict(out)
+
+
+def history_prices(config: PipelineConfig, day: date, fetch=None) -> dict:
+    """Closes for the day's names, the scoreboard window's and the benchmarks."""
+    tickers: set[str] = set(BENCHMARKS.values())
+    for back in range(60):
+        for names in _day_tickers(config, day - timedelta(days=back)).values():
+            tickers |= names
+    return closes(tickers, fetch)
 
 
 def build_facts(config: PipelineConfig, day: date, *, prices: dict | None = None, broker=None) -> dict:
@@ -282,28 +366,27 @@ def build_facts(config: PipelineConfig, day: date, *, prices: dict | None = None
     from pipeline import research_digest as rd
 
     if prices is None:
-        tickers: set[str] = set(BENCHMARKS.values())
-        d = day
-        for _ in range(60):  # the scoreboard window's names too
-            for names in _day_tickers(config, d).values():
-                tickers |= names
-            d -= timedelta(days=1)
-        prices = closes(tickers)
+        prices = history_prices(config, day)
     facts: dict[str, Any] = {"date": day.isoformat()}
     for session in ("us", "cn"):
         names = _with_moves(_names(config, session, day), session, day, prices)
-        macro, _text = rd.macro_read(config, session, day) if (
-            config.macro_brief_dir / f"{day.isoformat()}.{session}.md").exists() else ("无宏观简报", None)
+        try:
+            macro = rd.macro_read(config, session, day)[0]
+        except Exception as exc:  # a damaged macro brief costs only this line
+            logger.warning("daily review: macro brief unreadable (%s)", type(exc).__name__)
+            macro = "宏观简报无法读取"
+        bench = day_change(prices.get(BENCHMARKS[session], []), day)
         facts[session] = {
             "macro": macro,
-            "benchmark_move_pct": (lambda m: None if m is None else round(m, 2))(
-                day_change(prices.get(BENCHMARKS[session], []), day)),
+            "benchmark_move_pct": None if bench is None else round(bench, 2),
             "names": names,
-            "missed_moves": [r for r in names if r["decision"] is None and r["move_pct"] is not None
+            "missed_moves": [{k: r[k] for k in ("ticker", "move_pct", "layer", "collect", "trigger")}
+                             for r in names if r["decision"] is None and r["move_pct"] is not None
                              and abs(r["move_pct"]) >= MISSED_MOVE_PCT],
             "analysis_errors": sum(1 for r in names if r["decision"] == "ERROR"),
             "execute_outcomes": dict(sorted(_count(r["execute"] for r in names if r["execute"]).items())),
         }
+    facts["analysis_error_kinds"] = _error_kinds(config, day)
     if broker is not None:
         with contextlib.suppress(Exception):
             account = broker.account()
@@ -314,6 +397,10 @@ def build_facts(config: PipelineConfig, day: date, *, prices: dict | None = None
                 {k: (p.model_dump() if hasattr(p, "model_dump") else dict(p)).get(k)
                  for k in ("symbol", "qty", "avg_entry_price", "current_price", "unrealized_pl")}
                 for p in broker.positions()]
+        fills = _fills(broker, day)
+        if fills is not None:
+            facts["fills"] = [{k: f.get(k) for k in ("symbol", "side", "qty", "price", "transaction_time")}
+                              for f in fills if isinstance(f, dict)]
     facts["scoreboard"] = _scoreboard(config, day, prices)
     return facts
 
@@ -331,7 +418,7 @@ REVIEW_SCHEMA = {
         "summary": {"type": "string"},
         "issues": {"type": "array", "items": {"type": "object", "properties": {
             "title": {"type": "string"}, "evidence": {"type": "string"},
-            "severity": {"type": "string", "enum": ["高", "中", "低"]}},
+            "severity": {"type": "string", "enum": list(SEVERITIES)}},
             "required": ["title", "evidence", "severity"], "additionalProperties": False}},
         "verdict": {"type": "string", "enum": list(VERDICTS)},
         "proposals": {"type": "array", "items": {"type": "object", "properties": {
@@ -348,8 +435,9 @@ REVIEW_PROMPT = """你是一个交易研究流水线的复盘员。下面是 {da
 包括：美股（us）与 A股/港股（cn）每只股票的简报方向（impact: 偏多/偏空/中性/分歧）、催化剂分数、
 评估结论、触发代码、分析结论（decision: BUY/SELL/HOLD/ERROR）与 PM 评级、执行结果、
 当天涨跌（move_pct）和相对基准的超额（excess_pct；为 null 表示行情尚未更新，不是零）；
-brief_used 不为空表示分析用的是那一天的旧简报（当天简报缺失时按合约沿用前一天的）；被跳过却大幅波动的股票（missed_moves）；
-宏观判断；账户和持仓；以及最近 {sessions} 个交易日的滚动统计（按简报方向、按 PM 评级的超额收益均值与样本数）。
+brief_used 不为空表示分析用的是那一天的旧简报（当天简报缺失时按合约沿用前一天的）；
+未分析却大幅波动的股票（missed_moves）；宏观判断；分析出错的原因分类；账户、持仓与成交；
+以及最近 {sessions} 个交易日的滚动统计（决策当天的超额收益，按简报方向、按 PM 评级，含样本数）。
 
 请用中文复盘：
 1. summary：两三句话总结今天的操作和结果。
@@ -359,16 +447,18 @@ brief_used 不为空表示分析用的是那一天的旧简报（当天简报缺
    样本数少于 10 的规律不足以支撑策略改动，只能列入 watch。
 5. watch：需要继续积累数据观察的现象。
 
-规则：只使用下面的事实，不要搜索、不要引用外部信息、不要编造任何数字；数字写阿拉伯数字。
+规则：只使用下面的事实，不要搜索、不要引用外部信息、不要编造任何数字；数字写阿拉伯数字；不要写网址。
 你只提建议，任何改动都由人决定。
 
 {facts}"""
 
 
 def _run_review(prompt: str) -> dict:
-    """One hermetic call on the evaluator's model, schema-bound JSON."""
+    """One hermetic call on the evaluator's model, schema-bound JSON. A call
+    that used a web tool is rejected: the review is the facts' alone."""
     from pipeline.claude_cli import (
         EnvelopeError,
+        _web_search_requests,
         call_env,
         claude_command,
         parse_envelope,
@@ -398,7 +488,37 @@ def _run_review(prompt: str) -> dict:
     record_usage("daily_review", model, effort, envelope, outcome="ok" if isinstance(output, dict) else "error")
     if not isinstance(output, dict):
         raise RuntimeError("review call returned no structured output")
+    calls = envelope.get("_tool_calls") if isinstance(envelope.get("_tool_calls"), dict) else {}
+    if (any(calls.get(field) for field in ("web_search_queries", "web_fetch_urls", "web_fetch_requests"))
+            or _web_search_requests(envelope) > 0):
+        raise RuntimeError("review call used web tools")
     return output
+
+
+def checked_review(review: object) -> dict:
+    """The review if every field has its schema shape and no text carries a
+    link or markup; raises otherwise (the caller falls back to the facts)."""
+    def text(value: object) -> str:
+        if not isinstance(value, str) or _UNSAFE_TEXT.search(value):
+            raise ValueError("a review field is not plain text")
+        return value.strip()
+
+    if not isinstance(review, dict) or review.get("verdict") not in VERDICTS:
+        raise ValueError("verdict outside the schema")
+    issues, proposals, watch = review.get("issues"), review.get("proposals"), review.get("watch")
+    if not all(isinstance(v, list) for v in (issues, proposals, watch)):
+        raise ValueError("a review list is not a list")
+    for issue in issues:
+        if not isinstance(issue, dict) or issue.get("severity") not in SEVERITIES:
+            raise ValueError("an issue is malformed")
+    return {
+        "summary": text(review.get("summary")), "verdict": review["verdict"],
+        "issues": [{"title": text(i.get("title")), "evidence": text(i.get("evidence")), "severity": i["severity"]}
+                   for i in issues],
+        "proposals": [{k: text((p if isinstance(p, dict) else {}).get(k)) for k in ("change", "why", "evidence", "risk")}
+                      for p in proposals],
+        "watch": [text(w) for w in watch],
+    }
 
 
 def render(day: date, facts: dict, review: dict | None) -> str:
@@ -407,7 +527,8 @@ def render(day: date, facts: dict, review: dict | None) -> str:
     account = facts.get("account") or {}
     try:
         equity, last = float(account.get("equity")), float(account.get("last_equity"))
-        lines.append(f"账户：权益 ${equity:,.2f}（今日 {equity - last:+,.2f}）｜持仓 {len(facts.get('positions') or [])} 只")
+        lines.append(f"账户：权益 ${equity:,.2f}（今日 {equity - last:+,.2f}）｜持仓 {len(facts.get('positions') or [])} 只"
+                     f"｜成交 {len(facts.get('fills') or [])} 笔")
     except (TypeError, ValueError):
         pass
     us = facts.get("us") or {}
@@ -420,45 +541,53 @@ def render(day: date, facts: dict, review: dict | None) -> str:
             missed = ", ".join(f"{r['ticker']} {r['move_pct']:+.1f}%" for r in block.get("missed_moves") or [])
             lines.append(f"• {label}：分析出错 {block.get('analysis_errors', 0)} 次"
                          + (f"；未分析但大幅波动：{missed}" if missed else ""))
+        if facts.get("error"):
+            lines.append(f"• 事实整理失败：{facts['error']}")
         return "\n".join(lines)
-    lines += ["", f"总结：{review.get('summary', '').strip()}"]
-    issues = review.get("issues") or []
-    if issues:
-        lines += ["", "问题："]
-        lines += [f"• [{i.get('severity')}] {i.get('title')} — {i.get('evidence')}" for i in issues]
-    lines += ["", f"策略：{review.get('verdict')}"]
-    for p in review.get("proposals") or []:
-        lines.append(f"• 建议：{p.get('change')}\n  理由：{p.get('why')}\n  依据：{p.get('evidence')}\n  风险：{p.get('risk')}")
-    watch = review.get("watch") or []
-    if watch:
-        lines += ["", "继续观察："] + [f"• {w}" for w in watch]
+    lines += ["", f"总结：{review['summary']}"]
+    if review["issues"]:
+        lines += ["", "问题："] + [f"• [{i['severity']}] {i['title']} — {i['evidence']}" for i in review["issues"]]
+    lines += ["", f"策略：{review['verdict']}"]
+    for p in review["proposals"]:
+        lines.append(f"• 建议：{p['change']}\n  理由：{p['why']}\n  依据：{p['evidence']}\n  风险：{p['risk']}")
+    if review["watch"]:
+        lines += ["", "继续观察："] + [f"• {w}" for w in review["watch"]]
     lines += ["", "（复盘只提建议，策略改动需你确认）"]
     return "\n".join(lines)
 
 
 def review_day(config: PipelineConfig, day: date, *, broker=None, send=None, runner=None) -> str:
-    """Archive, build facts, review, deliver, archive the review; returns the text."""
+    """Facts, review, deliver, archive; returns the text. Every step but the
+    send is guarded: whatever fails, the day's message is still queued."""
     from pipeline import trade_notify
 
-    facts = build_facts(config, day, broker=broker)
-    archive_day(config, day, broker=broker, prices=None)
+    prices: dict = {}
     try:
-        review = (runner or _run_review)(REVIEW_PROMPT.format(
-            date=day.isoformat(), sessions=facts["scoreboard"]["sessions"],
-            facts=json.dumps(facts, ensure_ascii=False, default=str)))
-        if review.get("verdict") not in VERDICTS:
-            raise ValueError("verdict outside the schema")
+        prices = history_prices(config, day)
+        facts = build_facts(config, day, prices=prices, broker=broker)
     except Exception as exc:
-        logger.warning("daily review: model unavailable (%s) — facts only", type(exc).__name__)
-        review = None
+        logger.warning("daily review: facts failed (%s)", type(exc).__name__)
+        facts = {"date": day.isoformat(), "error": type(exc).__name__}
+    review = None
+    if "error" not in facts:
+        try:
+            review = checked_review((runner or _run_review)(REVIEW_PROMPT.format(
+                date=day.isoformat(), sessions=facts["scoreboard"]["sessions"],
+                facts=json.dumps(facts, ensure_ascii=False, default=str))))
+        except Exception as exc:
+            logger.warning("daily review: model unavailable (%s) — facts only", type(exc).__name__)
     text = render(day, facts, review)
-    root = archive_root(config) / "reviews" / day.isoformat()
-    root.mkdir(parents=True, exist_ok=True)
-    atomic_write(root / "review.md", text + "\n")
-    atomic_write(root / "review.json", json.dumps({"facts": facts, "review": review}, ensure_ascii=False,
-                                                   default=str, indent=1))
     if send is not None:
         trade_notify.enqueue(config.state_dir, f"review:{day.isoformat()}", text, send)
+    try:  # after the model call, so its usage row is in the day's archive
+        archive_day(config, day, broker=broker, prices=prices or None)
+        root = archive_root(config) / "reviews" / day.isoformat()
+        root.mkdir(parents=True, exist_ok=True)
+        atomic_write(root / "review.md", text + "\n")
+        atomic_write(root / "review.json", json.dumps({"facts": facts, "review": review}, ensure_ascii=False,
+                                                       default=str, indent=1))
+    except Exception as exc:
+        logger.warning("daily review: archive failed (%s)", type(exc).__name__)
     return text
 
 
@@ -472,41 +601,47 @@ def _marks(config: PipelineConfig, day: date) -> tuple[Path, Path]:
     return base / f"{day.isoformat()}.started", base / f"{day.isoformat()}.done"
 
 
-def maybe_start(config: PipelineConfig, now: datetime, *, spawn=None) -> bool:
-    """Start the day's review, detached, once per day after REVIEW_AFTER (NY)
-    on a weekday whose us funnel snapshot exists. Returns whether it started."""
+def due(config: PipelineConfig, now: datetime) -> date | None:
+    """The New York date whose review is due now, else None: past
+    REVIEW_AFTER on a weekday with a us funnel snapshot, not done, and not
+    started within STUCK_AFTER."""
     from pipeline.funnel import snapshot_path
 
     local = now.astimezone(NY)
     day = local.date()
     if day.weekday() >= 5 or local.time() < REVIEW_AFTER:
-        return False
+        return None
     if not snapshot_path(config.state_dir, "us", day).exists():
-        return False
+        return None
     started, done = _marks(config, day)
     if done.exists():
-        return False
+        return None
     if started.exists():
         try:
             at = datetime.fromisoformat(started.read_text(encoding="utf-8").strip())
         except ValueError:
             at = now - STUCK_AFTER
         if now - at < STUCK_AFTER:
-            return False
+            return None
+    return day
+
+
+def maybe_start(config: PipelineConfig, now: datetime, *, runner=None) -> bool:
+    """The watchdog's share: run the due review inline (well inside the
+    watchdog task's limit), with started/done marks. Returns whether it ran."""
+    day = due(config, now)
+    if day is None:
+        return False
+    started, _done = _marks(config, day)
     started.parent.mkdir(parents=True, exist_ok=True)
     atomic_write(started, now.astimezone(timezone.utc).isoformat())
-    (spawn or _spawn)(day)
+    (runner or run)(config, day)
     return True
 
 
-def _spawn(day: date) -> None:
-    subprocess.Popen(  # noqa: S603 — our own module, fixed argv
-        [sys.executable, "-m", "pipeline.daily_review", "run", "--date", day.isoformat()],
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
-        cwd=str(Path(__file__).resolve().parents[1]))
-
-
 def run(config: PipelineConfig, day: date) -> int:
+    """Review ``day`` and deliver it. The done mark is written only when the
+    message was queued — or no trades channel is configured at all."""
     from pipeline import trade_notify
     from pipeline.trade_monitor import make_trades_sender
 
@@ -514,6 +649,8 @@ def run(config: PipelineConfig, day: date) -> int:
     with contextlib.suppress(Exception):
         broker = trade_notify.AlpacaReadOnly(*trade_notify.alpaca_keys())
     send = make_trades_sender(config) if config.notifications_enabled else None
+    if send is None and config.notifications_enabled:
+        logger.warning("daily review: no trades webhook configured — the review is archived, not sent")
     review_day(config, day, broker=broker if day == datetime.now(NY).date() else None, send=send)
     _started, done = _marks(config, day)
     done.parent.mkdir(parents=True, exist_ok=True)
@@ -522,6 +659,9 @@ def run(config: PipelineConfig, day: date) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from pipeline.orchestrator import _load_repo_dotenv
+
+    _load_repo_dotenv()  # like every job: the webhook, keys and routing live in .env
     parser = argparse.ArgumentParser(prog="python -m pipeline.daily_review", description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
     one = sub.add_parser("run", help="archive and review one US trading date, then send the review")

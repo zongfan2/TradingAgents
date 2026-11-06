@@ -486,7 +486,8 @@ can show only the last pair.
 ## 7c. Daily review and data archive
 
 After every US trading day the hourly watchdog starts the day's review
-once the New York clock is past 17:00 (specs/daily-review.md): it archives
+once the New York clock is past 17:00 (specs/daily-review.md), inline (its
+log is `scheduler.watchdog.err.log`): it archives
 the day under `/mnt/d/massive/stock/<category>/<YYYY-MM-DD>/` (override
 `TRADINGAGENTS_ARCHIVE_DIR`) — macro and ticker briefs with their evals,
 funnel snapshots, ledger decisions and orders, research digests, closes,
