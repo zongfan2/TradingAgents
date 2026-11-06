@@ -2334,9 +2334,10 @@ def test_funnel_rerun_can_upgrade_a_skip_to_submitted(tmp_path):
 @pytest.mark.parametrize(("bid", "ask", "submitted", "reason"), [
     (99.5, 100.0, True, None),          # inside the zone [99, 100]
     (101.0, 101.5, True, None),         # above: the limit rests for a pullback
-    (97.9, 98.02, True, None),          # within 1 % of the zone low (98.01)
+    (98.02, 98.5, True, None),          # within 1 % of the zone low (98.01)
     (96.0, 96.5, False, "below-entry-zone"),  # gapped through the zone
     (96.0, 0.0, False, "below-entry-zone"),   # no ask: the bid decides
+    (93.0, 99.5, False, "below-entry-zone"),  # a wide one-venue quote: the bid gives the gap away
     (0.0, 0.0, False, "guard-unavailable"),   # no usable price fails closed
 ])
 def test_s8a_a_buy_below_its_entry_zone_is_skipped(tmp_path, bid, ask, submitted, reason):

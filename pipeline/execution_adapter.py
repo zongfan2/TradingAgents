@@ -39,6 +39,9 @@ Safety invariants (spec S1-S9, each individually tested):
       asset tradability, quote freshness (``max_quote_age_minutes``); ANY
       guard source error ⇒ skip ``guard-unavailable`` — never submit on
       missing information.
+- S8a entry-zone guard: a BUY whose lower usable quote side is more than
+      1 % below the plan's entry zone skips ``below-entry-zone`` (a gap
+      through the zone is another setup); an unusable quote fails closed.
 - S9  portfolio constraints: BUY on a held ticker without ``add_intent`` is a
       ``maintain`` skip; add-on tranches gated by tranche cap / pyramid-up /
       trading-day spacing / per-ticker notional (each violation its own skip
@@ -705,8 +708,8 @@ ENTRY_ZONE_GAP_TOLERANCE = 0.01
 
 
 def entry_zone_reason(plan: TradePlan, quote: Quote | None) -> str | None:
-    """S8a: ``below-entry-zone`` when the price a BUY would pay (the ask, else
-    the bid) is more than ENTRY_ZONE_GAP_TOLERANCE below the entry zone's
+    """S8a: ``below-entry-zone`` when the lower usable side of the quote (ask
+    or bid) is more than ENTRY_ZONE_GAP_TOLERANCE below the entry zone's
     low; ``guard-unavailable`` when the quote has no usable price
     (fail-closed, like every S8 guard); else None."""
     if quote is None:
@@ -716,11 +719,14 @@ def entry_zone_reason(plan: TradePlan, quote: Quote | None) -> str | None:
 
     if any(value is not None and not math.isfinite(value) for value in (quote.ask, quote.bid)):
         return "guard-unavailable"  # a NaN/inf field: the quote itself is corrupt
-    price = quote.ask if usable(quote.ask) else quote.bid
-    if not usable(price):
+    prices = [value for value in (quote.ask, quote.bid) if usable(value)]
+    if not prices:
         return "guard-unavailable"
+    # The lower side: the quote feed is one venue (IEX), so a wide quote's ask
+    # can sit inside the zone while the market trades far below it.
+    price = min(prices)
     if price < plan.entry_zone[0] * (1 - ENTRY_ZONE_GAP_TOLERANCE):
-        logger.info("BUY price %.2f (ask, else bid) below the entry zone %s — the plan's entry is gone",
+        logger.info("BUY quote %.2f (lower of ask/bid) below the entry zone %s — the plan's entry is gone",
                     price, plan.entry_zone)
         return "below-entry-zone"
     return None
