@@ -506,6 +506,9 @@ def test_every_claude_command_caller_states_its_cli_role():
     assert calls == {
         "claude_cli.py": ["return claude_command(*_collect_model_effort())"],
         "evaluator.py": ['command = claude_command(model, effort, "--json-schema", schema, role="eval")'],
+        # The daily review: a judgment, on the evaluator's model and role.
+        "daily_review.py": ['command = claude_command(model, effort, "--json-schema", json.dumps(REVIEW_SCHEMA), '
+                            'role="eval")'],
         # The digest's summaries: the cheap collect model on every rung.
         "research_digest.py": ['command = claude_command(model, effort, "--json-schema", json.dumps(_SUMMARY_SCHEMA), '
                                'role="collect")'],

@@ -2036,8 +2036,11 @@ def run_watchdog(
 
 def _hourly_trade_notifications(config: PipelineConfig, now: datetime) -> None:
     """specs/trade-notifications.md T5/T6: reconcile what the listener missed
-    and send the daily report — only with the trades webhook; never raises."""
+    and send the daily report — only with the trades webhook; then the daily
+    review (specs/daily-review.md R3), which archives even without one.
+    Never raises."""
     if not config.notifications_enabled or not config.lark_trades_webhook_url:
+        _daily_review(config, now)
         return
     from pipeline import trade_notify
     from pipeline.trade_monitor import make_trades_sender
@@ -2053,6 +2056,16 @@ def _hourly_trade_notifications(config: PipelineConfig, now: datetime) -> None:
         trade_notify.flush_outbox(config.state_dir, send)
     except Exception as exc:
         logger.warning("research digest retry failed: %s", type(exc).__name__)
+    _daily_review(config, now)
+
+
+def _daily_review(config: PipelineConfig, now: datetime) -> None:
+    try:
+        from pipeline import daily_review
+
+        daily_review.maybe_start(config, now)  # specs/daily-review.md R3: inline, once a day
+    except Exception as exc:
+        logger.warning("daily review not started: %s", type(exc).__name__)
 
 
 def _alertable_days(session: str, at_time: str, now: datetime) -> list[date]:

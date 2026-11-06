@@ -17,6 +17,7 @@ queued trade message.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
@@ -26,7 +27,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from pipeline.common import session_for_ticker
+from pipeline.common import atomic_write, session_for_ticker
 from pipeline.config import PipelineConfig
 from pipeline.contracts.briefs import MACRO_IMPACT_SECTIONS, split_frontmatter
 
@@ -871,6 +872,9 @@ def send_digest(config: PipelineConfig, session: str, slot_date: date) -> int:
             sent = trade_notify.flush_outbox(config.state_dir, make_trades_sender(config))
         else:
             text = build_digest(config, session, slot_date)
+            with contextlib.suppress(OSError):  # the daily archive keeps the digest as sent
+                atomic_write(config.state_dir / "research_digest" / session / f"{slot_date.isoformat()}.txt",
+                             text + "\n")
             sent = trade_notify.enqueue(config.state_dir, key, text, make_trades_sender(config))
         (_pending_dir(config) / f"{session}_{slot_date.isoformat()}").unlink(missing_ok=True)
         return sent

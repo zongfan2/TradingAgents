@@ -486,6 +486,26 @@ either log can show any of these lines:
 `scheduler.trade-monitor.err.log` (the listener flushes the same queue)
 can show only the last pair.
 
+## 7c. Daily review and data archive
+
+After every US trading day the hourly watchdog starts the day's review
+once the New York clock is past 17:00 (specs/daily-review.md), inline (its
+log is `scheduler.watchdog.err.log`): it archives
+the day under `/mnt/d/massive/stock/<category>/<YYYY-MM-DD>/` (override
+`TRADINGAGENTS_ARCHIVE_DIR`) — macro and ticker briefs with their evals,
+funnel snapshots, ledger decisions and orders, research digests, closes,
+LLM usage, a read-only broker snapshot — and sends one Chinese review to
+the Lark trades group: summary, issues with evidence, a strategy verdict
+(需要优化 / 继续观察 / 暂不调整) and proposals. **It never changes the
+strategy**: act on a proposal yourself. Copies land in
+`reviews/<date>/review.md` and `review.json`. Marks:
+`~/.tradingagents/daily_review/<date>.started|done` (a run stuck 2 h is
+retried; a day left undone is still picked up up to 3 days later; a market
+holiday is archived without a review). The review as queued is kept in
+`<date>.queued.json`, so a retry re-archives that text without a second
+model call — delete it to have `run --date D` write a fresh review. By hand: `python -m pipeline.daily_review run --date D`;
+backfill the archive only: `python -m pipeline.daily_review archive --since D`.
+
 ## 7b. LLM provider ladder (Claude → OpenAI → DeepSeek)
 
 With `TRADINGAGENTS_LLM_ROUTING=ladder` (specs/llm-provider-ladder.md) the
