@@ -161,6 +161,8 @@ def test_the_digest_groups_tickers_by_outcome_in_plain_words(tmp_path, live):
     # A blocked SELL is no order whatever the (unknown) position.
     ("SELL", "Sell", None, {"blocker": "ticker-eval-fail"}, "看空，不下单（PM 看空；简报评估 fail）", False),
     ("SELL", "Sell", None, {"blocker": "feeds-arm"}, "看空，不下单（PM 看空；对照分析）", False),
+    ("SELL", "Sell", False, {"blocker": "feeds-arm"}, "看空，不下单（PM 看空；对照分析）", False),
+    ("SELL", "Sell", False, {"blocker": "ticker-eval-fail"}, "看空，不下单（PM 看空；简报评估 fail）", False),
     ("ERROR", None, False, {}, "分析出错", False),
 ])
 def test_actions_are_the_adapters_outcome_in_plain_words(code, rating, held, kw, shown, ordered):
@@ -962,3 +964,35 @@ def test_a_later_attempt_under_dry_run_or_halt_is_no_live_order(tmp_path, monkey
     write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "m — m.")}, tickers=[entry("NVDA", decide=decide)])
     text = build(cfg, "us")
     assert f"→ 不下单（{mode}）" in text and f"计划下单（{mode}）：无" in text.splitlines()[0]
+
+
+@pytest.mark.unit
+def test_a_scheduled_decision_missing_from_a_valid_snapshot_is_undetermined(tmp_path, live):
+    cfg = config(tmp_path)
+    book(cfg)
+    write_slot(cfg, briefs={}, tickers=[])
+    decided(cfg, "NVDA", "BUY", "Overweight")
+    head = build(cfg, "us").splitlines()[0]
+    assert "计划下单：待核实：NVDA" in head and "计划下单：无" not in head
+    cfg2 = config(tmp_path / "manual")
+    book(cfg2)
+    write_slot(cfg2, briefs={}, tickers=[])
+    write_decision(cfg2, ticker="NVDA", trigger="manual", plan=BUY_PLAN, date_iso=DAY.isoformat())
+    assert "计划下单：无" in build(cfg2, "us").splitlines()[0]  # a manual row is not step 7's
+
+
+@pytest.mark.unit
+def test_after_execution_the_brief_arms_own_skip_reason_is_told(tmp_path, live):
+    cfg = config(tmp_path)
+    book(cfg)
+    execute = {"code": "feeds-arm", "outcome": "excluded", "details": {"arm": "feeds"},
+               "events": [{"code": "feeds-arm", "details": {"arm": "feeds"}},
+                          {"code": "total-risk", "details": {"arm": "brief"}}]}
+    row = {**entry("NVDA", decide=decided(cfg, "NVDA", "BUY", "Overweight")), "final": "excluded"}
+    row["stages"]["execute"] = execute
+    write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "m — m.")}, tickers=[row])
+    path = cfg.state_dir / "funnel" / "us" / f"{DAY}.json"
+    snap = json.loads(path.read_text())
+    snap["context"] = {"execute_ran": True}
+    path.write_text(json.dumps(snap), encoding="utf-8")
+    assert "→ 看多（PM 看多；未下单：总风险超限）" in build(cfg, "us")

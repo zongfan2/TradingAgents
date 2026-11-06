@@ -339,8 +339,7 @@ def action_text(code: str | None, rating: str | None, *, session: str, held: boo
         if blocker == "unknown":
             return "看空" + paren(pm, mode or "下单待核实"), None if not mode else False
         if blocker:  # the adapter rejects the row whatever the position
-            return ("不买" + paren(pm, "无持仓，不做空")) if held is False else (
-                "看空，不下单" + paren(pm, BLOCKER_NAMES.get(blocker, "不满足下单条件"))), False
+            return "看空，不下单" + paren(pm, BLOCKER_NAMES.get(blocker, "不满足下单条件")), False
         if held is None:
             return "看空" + paren(pm, mode or "持仓未知，是否下单待定"), None if not mode else False
         if not held:
@@ -397,7 +396,14 @@ class _Ticker:
             self.trigger = code if isinstance(code, str) and code else ("unrecorded" if trigger else None)
         self.final = entry_final
         execute = stages.get("execute")
-        self.execute = execute if isinstance(execute, dict) else None
+        execute = execute if isinstance(execute, dict) else None
+        if execute is not None:
+            # The brief arm's own outcome: the stage keeps the first event of
+            # its strongest outcome, which can be the feeds arm's skip.
+            events = [e for e in execute.get("events") or [] if isinstance(e, dict)]
+            brief = [e for e in events if isinstance(e.get("details"), dict) and e["details"].get("arm") == "brief"]
+            execute = brief[-1] if brief else execute
+        self.execute = execute
 
     def head(self) -> str:
         score = f"{self.score:.1f}" if self.score is not None else "–"
@@ -620,6 +626,13 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
         records, ledger_read = {}, False
     # A snapshot or a ledger that was not read: no line may say "no order".
     unread = session == "us" and (not readable or not ledger_read)
+    # A valid snapshot can still miss the slot's decisions (an older snapshot
+    # kept when a rebuild failed): step 7 reads the ledger, so any scheduled
+    # BUY/SELL row the snapshot does not show is undetermined.
+    shown = {t.ticker for t in tickers if t.decide is not None}
+    unseen = sorted({r.ticker for r in records.values()
+                     if r.session == session and str(r.date)[:10] == slot_date.isoformat()
+                     and r.trigger != "manual" and r.decision in ("BUY", "SELL") and r.ticker not in shown})
     try:
         from pipeline.execution_adapter import load_settings
 
@@ -649,7 +662,7 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
 
     actions: dict[str, str] = {}
     planned: list[str] = []
-    undecided: list[str] = []
+    undecided: list[str] = list(unseen) if session == "us" and mode not in ("模拟", "执行已暂停") else []
     for t in analysed:
         details = t.decide.get("details") or {}
         record = records.get(str(details.get("run_id")))

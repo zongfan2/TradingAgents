@@ -60,7 +60,8 @@ line) was hard to read: the user asked why a name with no position was
     `add_intent` (`可能加仓（按加仓规则）` — the adapter's add-on gates still
     apply); `看多（持仓未知，是否下单待定）` when positions are unknown. `SELL`
     → `卖出` when held, `不买（…不做空）` when not, `看空（持仓未知，是否下单待定）`
-    when unknown. A blocked BUY/SELL reads `看多/看空，不下单（<adapter reason>）`;
+    when unknown. A blocked BUY/SELL reads `看多/看空，不下单（<adapter reason>）` (also a
+    blocked SELL on a flat name);
     cn always `A股不下单`. Execution mode at build time: the kill switch
     (`EXECUTION_HALT`) → `执行已暂停`, `TRADINGAGENTS_EXECUTION_ENABLED` off →
     `模拟`, in the header and in place of `下单`; neither is listed as a
@@ -104,7 +105,10 @@ line) was hard to read: the user asked why a name with no position was
     switch (`执行状态未知`) leaves BUY/SELL undetermined too; after execution
     the header keeps `已执行：` and appends `待核实（决策数据未读到）` when an
     input was unread. Undetermined names are listed in the
-    header as `待核实：X`. A brief-arm run whose ticker or macro evaluation failed adds
+    header as `待核实：X` — including any scheduled BUY/SELL ledger row of the
+    slot that the (valid) snapshot does not show (an older snapshot kept when
+    a rebuild failed). After execution the reason is the brief arm's own
+    execute event (the stage may hold the feeds arm's). A brief-arm run whose ticker or macro evaluation failed adds
     `；简报未采用（评估 fail）` (the brief was withheld). PM ratings in words: Buy 强烈看多 · Overweight 看多 ·
     Hold 中性 · Underweight 看淡 · Sell 看空. An analysis error reads
     `分析出错` and **never** carries the error text (API error bodies).
