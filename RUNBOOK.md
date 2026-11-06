@@ -519,9 +519,13 @@ No catch-up slot is run without explicit authorization.
 ERROR. The alert names the kinds: `API key refused` means a provider
 answered 401 — the ladder already stepped down for that slot (Anthropic →
 OpenAI → DeepSeek), but every rung refusing (or a fixed routing) leaves the
-slot without decisions: fix the key in `.env`, then re-run the slot's step 6
-(`orchestrator run --session <s> --date <d> --only analysis_runner`, the
-session and date the alert names). `credits
+slot without decisions: fix the key in `.env`, then re-run the slot from
+step 6 (`orchestrator run --session <s> --date <d> --from 6`, the session
+and date the alert names) — `--from 6` also reaches step 7: inline it
+submits, deferred it records the skip that re-arms the missed-execute
+watchdog (`--only analysis_runner` would leave recovered plans unexecuted
+with no signal). Past the us execution time, submit with
+`orchestrator execute --now` afterwards. `credits
 exhausted` / `timed out` point at the budget and the run timeout.
 
 **Component failure ≠ slot failure.** Every component failure/timeout is

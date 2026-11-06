@@ -194,6 +194,13 @@ slot start on the stepped-down rung. DeepSeek is the floor: a refusal there
 (`auth` / `credit` / `timeout` / `other`), and the orchestrator alerts on a
 slot whose runs mostly failed (specs/orchestrator.md Notifications).
 
+One loop handles both rung failures, in any order (e.g. Anthropic out of
+credits, then OpenAI refusing its key → DeepSeek). Its step-down skips every
+rung the run already failed on and every provider refused earlier in the
+slot, so the floor never climbs back to a refused key. A retried attempt's
+usage is written in the loop and the final attempt once afterwards; when
+nowhere is left the run is recorded on the profile it actually ran on.
+
 ## User decisions (2026-11-01)
 
 - **Q1** OpenAI credits are **monthly**; November has only **$71** left.
@@ -234,4 +241,13 @@ installed version (0.164.0 on 2026-11-01).
    never on argv, each in its own call home whose session files — rollout,
    state databases — are deleted once the call is billed) and log usage
    with `billing: openai-api`, each request priced on its own tier.
-4. `claude-first` behaviour is unchanged.
+4. `claude-first` behaviour is unchanged, except L5 (a refused key steps
+   down to DeepSeek for the rest of the slot).
+5. L5: under `ladder` or `claude-first` an authentication refusal marks the
+   provider refused for the slot only (no month marker) and reruns the run
+   on the next rung; one loop handles exhausted credits and refused keys in
+   any order; the step-down skips every rung the run failed on and every
+   provider refused earlier in the slot (the floor never climbs back); when
+   nowhere is left the ERROR row (kind `auth`) is recorded on the profile
+   that actually ran, its attempt billed once; fixed routings never move;
+   a slot whose runs mostly failed alerts with the error kinds.
