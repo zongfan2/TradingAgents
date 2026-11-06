@@ -70,7 +70,7 @@ BLOCKER_NAMES = {
     "max-tranches": "加仓次数已满", "pyramid-up-only": "只在盈利时加仓", "add-spacing": "加仓间隔不足",
     "cancel-failed": "撤单失败", "recovery-unavailable": "恢复数据不可用", "submit-error": "提交出错",
     "adapter-error": "执行程序出错", "rejected": "券商拒单", "manual-shadowed": "被手动重跑取代",
-    "dedupe": "重复订单", "below-entry-zone": "价格已跌破入场区间", "later-attempt": "有更新的分析记录",
+    "dedupe": "重复订单", "below-entry-zone": "价格已跌破入场区间", "low-reward-risk": "盈亏比不足 1", "later-attempt": "有更新的分析记录",
 }
 #: Words a summary must not contain (the action is shown separately; the
 #: user asked why "HOLD" appeared for a name with no position).
