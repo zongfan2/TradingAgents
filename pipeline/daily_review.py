@@ -46,6 +46,11 @@ REVIEW_TIMEOUT_S = 300.0
 BENCHMARKS = {"us": "SPY", "cn": "000300.SS", "hk": "^HSI"}
 VERDICTS = ("需要优化", "继续观察", "暂不调整")
 SEVERITIES = ("高", "中", "低")
+#: Size bounds (schema, prompt and check): one Lark text message, well under
+#: the webhook's body limit; a larger review falls back to the facts.
+MAX_FIELD_CHARS = 300
+MAX_ITEMS = {"issues": 8, "proposals": 5, "watch": 6}
+MAX_MESSAGE_CHARS = 6000
 #: Links or markup never reach the group (the review text is model output):
 #: any scheme, www., a markdown link, an HTML/Lark tag — a plain comparison
 #: ("超额>2%", "n<10") is fine — and any domain-like host (research_digest's
@@ -53,6 +58,7 @@ SEVERITIES = ("高", "中", "低")
 _UNSAFE_TEXT = re.compile(
     r"[A-Za-z][A-Za-z0-9+.-]*://|www\.|\]\("
     # a tag (an HTML or Lark element name, or <!): NVDA<SPY is a comparison
+    r"|</?\s*[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*)?/?>"
     r"|<\s*/?\s*(?:a|at|b|i|u|s|p|br|hr|em|font|img|div|span|script|style|iframe|svg|link|meta|form)\b|<\s*!"
     # research_digest's host rules: a host with a path (numeric or not), an
     # IP-like host, a common TLD in any script
@@ -139,8 +145,9 @@ def closes(tickers: set[str], fetch=None, budget_s: float = PRICE_BUDGET_S, *, f
             logger.warning("daily review: closes for %s unavailable (%s)", ticker, type(exc).__name__)
             failed += 1
             continue
-        series = [(d, c) for d, c in bars if c == c and c > 0]
-        if series:
+        # An unusable close stays in place as None: a change never spans it.
+        series = [(d, c if c == c and c > 0 else None) for d, c in bars]
+        if any(c is not None for _d, c in series):
             out[ticker] = series
         else:
             failed += 1
@@ -150,9 +157,10 @@ def closes(tickers: set[str], fetch=None, budget_s: float = PRICE_BUDGET_S, *, f
 
 
 def day_change(series: list[tuple[date, float]], day: date) -> float | None:
-    """% change of the session on ``day`` vs the previous close."""
+    """% change of the session on ``day`` vs the previous session's close;
+    None when either close is missing (never a move across a gap)."""
     for i, (d, close) in enumerate(series):
-        if d == day and i > 0:
+        if d == day and i > 0 and close is not None and series[i - 1][1] is not None:
             return (close / series[i - 1][1] - 1) * 100
     return None
 
@@ -234,12 +242,16 @@ def _archive_into(config, day, root, iso, counts, *, broker, fetch, prices) -> N
         _copy(snapshot_path(config.state_dir, session, day), root / "funnel" / iso / f"{session}.json", counts, "funnel")
         _copy(config.state_dir / "research_digest" / session / f"{iso}.txt",
               root / "digests" / iso / f"{session}.txt", counts, "digests")
-    with contextlib.suppress(OSError):
-        for brief in sorted(config.ticker_brief_dir.glob(f"*/{iso}.md")):
-            ticker = brief.parent.name
-            _copy(brief, root / "ticker_briefs" / iso / f"{ticker}.md", counts, "ticker_briefs")
-            _copy(brief.with_name(f"{iso}.eval.json"), root / "ticker_briefs" / iso / f"{ticker}.eval.json",
-                  counts, "ticker_briefs")
+    briefs: list[Path] = []
+    try:
+        briefs = sorted(config.ticker_brief_dir.glob(f"*/{iso}.md"))
+    except OSError:
+        counts["ticker_briefs:missing"] += 1
+    for brief in briefs:  # a write failure propagates: the day is not done
+        ticker = brief.parent.name
+        _copy(brief, root / "ticker_briefs" / iso / f"{ticker}.md", counts, "ticker_briefs")
+        _copy(brief.with_name(f"{iso}.eval.json"), root / "ticker_briefs" / iso / f"{ticker}.eval.json",
+              counts, "ticker_briefs")
     decisions = _jsonl_rows(config.ledger_dir / "decisions.jsonl")
     _write(root / "decisions" / iso / "decisions.jsonl",
            _jsonl_text(None if decisions is None else [r for r in decisions if r.get("date") == iso]),
@@ -255,11 +267,12 @@ def _archive_into(config, day, root, iso, counts, *, broker, fetch, prices) -> N
     _write(root / "llm_usage" / iso / "analysis.jsonl",
            _jsonl_text(None if analysis is None else [r for r in analysis if r.get("date") == iso]),
            counts, "llm_usage")
+    tickers = set().union(*_day_tickers(config, day).values()) | set(BENCHMARKS.values())
     if prices is None:
-        tickers = set().union(*_day_tickers(config, day).values()) | set(BENCHMARKS.values())
         prices = closes(tickers, fetch, first=BENCHMARKS.values())
     rows = [[iso, ticker, f"{close:.4f}", "" if (c := day_change(series, day)) is None else f"{c:.2f}"]
-            for ticker, series in sorted(prices.items()) for d, close in series if d == day]
+            for ticker, series in sorted(prices.items()) if ticker in tickers
+            for d, close in series if d == day and close is not None]
     dest = root / "prices" / iso / "closes.csv"
     merged: dict[str, list[str]] = {}
     with contextlib.suppress(OSError, UnicodeDecodeError):
@@ -474,17 +487,20 @@ def _count(values) -> dict[str, int]:
 REVIEW_SCHEMA = {
     "type": "object",
     "properties": {
-        "summary": {"type": "string"},
+        "summary": {"type": "string", "maxLength": MAX_FIELD_CHARS},
         "issues": {"type": "array", "items": {"type": "object", "properties": {
-            "title": {"type": "string"}, "evidence": {"type": "string"},
+            "title": {"type": "string", "maxLength": MAX_FIELD_CHARS},
+            "evidence": {"type": "string", "maxLength": MAX_FIELD_CHARS},
             "severity": {"type": "string", "enum": list(SEVERITIES)}},
-            "required": ["title", "evidence", "severity"], "additionalProperties": False}},
+            "required": ["title", "evidence", "severity"], "additionalProperties": False},
+            "maxItems": MAX_ITEMS["issues"]},
         "verdict": {"type": "string", "enum": list(VERDICTS)},
         "proposals": {"type": "array", "items": {"type": "object", "properties": {
-            "change": {"type": "string"}, "why": {"type": "string"}, "evidence": {"type": "string"},
-            "risk": {"type": "string"}},
-            "required": ["change", "why", "evidence", "risk"], "additionalProperties": False}},
-        "watch": {"type": "array", "items": {"type": "string"}},
+            **{k: {"type": "string", "maxLength": MAX_FIELD_CHARS} for k in ("change", "why", "evidence", "risk")}},
+            "required": ["change", "why", "evidence", "risk"], "additionalProperties": False},
+            "maxItems": MAX_ITEMS["proposals"]},
+        "watch": {"type": "array", "items": {"type": "string", "maxLength": MAX_FIELD_CHARS},
+                  "maxItems": MAX_ITEMS["watch"]},
     },
     "required": ["summary", "issues", "verdict", "proposals", "watch"],
     "additionalProperties": False,
@@ -508,7 +524,8 @@ brief_used 不为空表示分析用的是那一天的旧简报（当天简报缺
 5. watch：需要继续积累数据观察的现象。
 
 规则：只使用下面的事实，不要搜索、不要引用外部信息、不要编造任何数字；数字写阿拉伯数字；
-不要写网址、域名或任何 HTML/标记标签（比较可以写"大于/小于"或 >、<）。
+不要写网址、域名或任何 HTML/标记标签（比较可以写"大于/小于"或 >、<）；
+每段文字不超过 {max_chars} 字，问题最多 {max_issues} 条、建议最多 {max_proposals} 条、观察最多 {max_watch} 条。
 你只提建议，任何改动都由人决定。
 
 {facts}"""
@@ -564,6 +581,8 @@ def checked_review(review: object) -> dict:
     def text(value: object) -> str:
         if not isinstance(value, str) or _UNSAFE_TEXT.search(value):
             raise ValueError("a review field is not plain text")
+        if len(value.strip()) > MAX_FIELD_CHARS:
+            raise ValueError("a review field is too long")
         if any(not _SYMBOL.fullmatch(token) for token in _DOMAIN.findall(value)):
             raise ValueError("a review field carries a host")
         return value.strip()
@@ -573,6 +592,8 @@ def checked_review(review: object) -> dict:
     issues, proposals, watch = review.get("issues"), review.get("proposals"), review.get("watch")
     if not all(isinstance(v, list) for v in (issues, proposals, watch)):
         raise ValueError("a review list is not a list")
+    if any(len(review[k]) > n for k, n in MAX_ITEMS.items()):
+        raise ValueError("a review list is too long")
     for issue in issues:
         if not isinstance(issue, dict) or issue.get("severity") not in SEVERITIES:
             raise ValueError("an issue is malformed")
@@ -648,11 +669,16 @@ def review_day(config: PipelineConfig, day: date, *, broker=None, send=None, run
         if "error" not in facts:
             try:
                 review = checked_review((runner or _run_review)(REVIEW_PROMPT.format(
-                    date=day.isoformat(), sessions=facts["scoreboard"]["sessions"],
+                    date=day.isoformat(), sessions=facts["scoreboard"]["sessions"], max_chars=MAX_FIELD_CHARS,
+                    max_issues=MAX_ITEMS["issues"], max_proposals=MAX_ITEMS["proposals"],
+                    max_watch=MAX_ITEMS["watch"],
                     facts=json.dumps(facts, ensure_ascii=False, default=str))))
             except Exception as exc:
                 logger.warning("daily review: model unavailable (%s) — facts only", type(exc).__name__)
         text = render(day, facts, review)
+        if len(text) > MAX_MESSAGE_CHARS:  # a backstop: the facts, never a body the webhook may refuse
+            logger.warning("daily review: message too long (%d chars) — facts only", len(text))
+            review, text = None, render(day, facts, None)[:MAX_MESSAGE_CHARS]
         try:
             path = _queued_path(config, day)
             path.parent.mkdir(parents=True, exist_ok=True)

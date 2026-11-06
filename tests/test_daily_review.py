@@ -530,7 +530,8 @@ def test_an_undone_day_is_picked_up_after_midnight_within_the_look_back(tmp_path
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("bad", ["见 360.hk/x", "见 例子.com/x", "见 1.2.3.4/x", "<at id=1>", "</a>", "<!-- x -->"])
+@pytest.mark.parametrize("bad", ["见 360.hk/x", "见 例子.com/x", "见 1.2.3.4/x", "<at id=1>", "</a>", "<!-- x -->",
+                                 "<table>", "</table>", "<h1>", "<object data=x>", "<li>", "<at"])
 def test_hosts_and_tags_are_screened(bad):
     with pytest.raises(ValueError):
         dr.checked_review({**review(), "summary": bad})
@@ -565,3 +566,60 @@ def test_the_broker_snapshot_is_archived_and_in_the_facts(tmp_path, archive):
     counts = dr.archive_day(cfg, DAY, broker=broken, prices=prices_for("NVDA", "FN"))
     assert counts["broker:missing"] == 3
     assert json.loads((folder / "account.json").read_text())["equity"] == "1010"  # kept
+
+
+@pytest.mark.unit
+def test_a_brief_write_failure_leaves_the_day_undone(tmp_path, archive):
+    cfg = config(tmp_path)
+    slot(cfg)
+    (archive / "ticker_briefs").mkdir(parents=True)
+    (archive / "ticker_briefs" / DAY.isoformat()).write_text("a file where the folder goes")
+    counts = dr.archive_day(cfg, DAY, prices=prices_for("NVDA", "FN"))
+    assert counts.get("error")
+
+
+@pytest.mark.unit
+def test_a_change_never_spans_a_missing_close(tmp_path):
+    cfg = config(tmp_path)
+    slot(cfg)
+    bars = {"FN": [(date(2026, 11, 2), 100.0), (date(2026, 11, 3), float("nan")), (DAY, 110.0)]}
+    prices = dr.closes({"FN", "SPY"}, fetch=lambda t: bars.get(t, [(date(2026, 11, 3), 1.0), (DAY, 1.0)]))
+    assert dr.day_change(prices["FN"], DAY) is None
+    facts = dr.build_facts(cfg, DAY, prices=prices)
+    assert not facts["us"]["missed_moves"]
+
+
+@pytest.mark.unit
+def test_closes_hold_only_the_days_names_and_benchmarks(tmp_path, archive):
+    cfg = config(tmp_path)
+    slot(cfg)
+    counts = dr.archive_day(cfg, DAY, prices=prices_for("NVDA", "FN", "OLDNAME"))
+    text = (archive / "prices" / DAY.isoformat() / "closes.csv").read_text()
+    assert ",NVDA," in text and ",SPY," in text and "OLDNAME" not in text
+    counts = dr.archive_day(cfg, DAY, prices=prices_for("NVDA", "FN"))
+    assert not counts.get("prices:missing")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("big", [
+    {**review(), "summary": "长" * (dr.MAX_FIELD_CHARS + 1)},
+    {**review(), "watch": ["x"] * (dr.MAX_ITEMS["watch"] + 1)},
+])
+def test_an_oversized_review_falls_back_to_the_facts(tmp_path, archive, monkeypatch, big):
+    cfg = config(tmp_path)
+    slot(cfg)
+    monkeypatch.setattr(dr, "closes", lambda tickers, fetch=None, **k: prices_for("NVDA", "FN"))
+    text = dr.review_day(cfg, DAY, send=None, runner=lambda prompt: big)
+    assert "复盘模型不可用" in text and len(text) <= dr.MAX_MESSAGE_CHARS
+
+
+@pytest.mark.unit
+def test_the_message_stays_under_its_cap(tmp_path, archive, monkeypatch):
+    cfg = config(tmp_path)
+    slot(cfg)
+    monkeypatch.setattr(dr, "closes", lambda tickers, fetch=None, **k: prices_for("NVDA", "FN"))
+    full = {**review(), "issues": [{"title": "t" * 290, "evidence": "e" * 290, "severity": "中"}] * 8,
+            "proposals": [dict.fromkeys(("change", "why", "evidence", "risk"), "p" * 290)] * 5,
+            "watch": ["w" * 290] * 6}
+    text = dr.review_day(cfg, DAY, send=None, runner=lambda prompt: full)
+    assert len(text) <= dr.MAX_MESSAGE_CHARS and "复盘模型不可用" in text

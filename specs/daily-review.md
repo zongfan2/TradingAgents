@@ -29,7 +29,7 @@ US trading date `day`, into `<root>/<category>/<day>/…` (root: env
 | `decisions` | `decisions.jsonl` — the ledger rows dated `day` |
 | `orders` | `orders.jsonl` — the ledger order rows whose client order id is dated `day` |
 | `digests` | `<session>.txt` — the research digest as sent (research_digest writes `state_dir/research_digest/<session>/<date>.txt` when it queues one) |
-| `prices` | `closes.csv` — date, ticker, close, change % for the day's names and benchmarks |
+| `prices` | `closes.csv` — date, ticker, close, change % for the day's names and benchmarks (a change across a missing close is empty, never a two-session move) |
 | `llm_usage` | `cli.jsonl` (the CLI usage log the writer uses, rows whose New York date is `day`), `analysis.jsonl` |
 | `broker` | `account.json`, `positions.json`, `fills.json` — read-only Alpaca snapshot (only when archived on the day itself) |
 | `reviews` | `review.md`, `review.json` (R2) |
@@ -87,7 +87,10 @@ rejected: the review is the facts' alone. The output is checked before it
 reaches anyone: every field has its schema shape and no text carries a
 link or markup (any scheme, `www.`, a markdown link, an HTML/Lark tag, a
 domain-like host other than a numeric exchange symbol — a plain comparison
-such as `超额>2%` is fine); a failure falls back to the facts. Every step but the send is guarded (facts, model, archive), so the
+such as `超额>2%` or `NVDA<SPY` is fine), and stays within its size bounds
+(300 characters a field, at most 8 issues, 5 proposals, 6 watch items, in the
+schema and the prompt; a rendered message over 6000 characters is replaced by
+the facts); a failure falls back to the facts. Every step but the send is guarded (facts, model, archive), so the
 day's message is always queued.
 
 The result is rendered as one Lark message to the trades group through the
@@ -127,8 +130,11 @@ archived, with a warning). By hand, `python -m pipeline.daily_review run
   review also judges the research and the gates.
 - **NautilusTrader** — https://github.com/nautechsystems/nautilus_trader @
   `df64cfe7b63f`, LGPL-3.0 (reference only): its portfolio analyzer computes
-  return statistics from fills and positions after a run. Taken: the review's
-  numbers come from recorded fills/positions and prices, never from the model.
+  return statistics from fills and positions after a run. Taken: the facts'
+  numbers (moves, excess, scoreboard, account, fills) are computed from
+  recorded fills/positions and prices, never by the model; the model's own
+  prose figures are bound only by the prompt (cite the facts, invent nothing)
+  — the user checks them against the archived `review.json` facts.
 - **QuantConnect LEAN** — https://github.com/QuantConnect/Lean @
   `06eb5cb315c7`, Apache-2.0 (reference only, nothing copied): its result
   handler writes per-day statistics and orders into a results package next to
