@@ -538,7 +538,7 @@ def test_hosts_and_tags_are_screened(bad):
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("ok", ["超额<SPY", "NVDA<SPY 2 天", "n<10", "<A股>"])
+@pytest.mark.parametrize("ok", ["超额<SPY", "NVDA<SPY 2 天", "n<10", "<A股>", "NVDA<SPY 但 MU>SPY"])
 def test_comparisons_pass_the_screen(ok):
     assert dr.checked_review({**review(), "summary": ok})["summary"] == ok
 
@@ -623,3 +623,33 @@ def test_the_message_stays_under_its_cap(tmp_path, archive, monkeypatch):
             "watch": ["w" * 290] * 6}
     text = dr.review_day(cfg, DAY, send=None, runner=lambda prompt: full)
     assert len(text) <= dr.MAX_MESSAGE_CHARS and "复盘模型不可用" in text
+
+
+@pytest.mark.unit
+def test_a_change_never_spans_a_missing_bar(tmp_path):
+    cfg = config(tmp_path)
+    slot(cfg)
+    spy = [(date(2026, 11, 2), 1.0), (date(2026, 11, 3), 1.0), (DAY, 1.0)]
+    prices = {"SPY": spy, "FN": [(date(2026, 11, 2), 100.0), (DAY, 110.0)],
+              "NVDA": [(date(2026, 11, 3), 100.0), (DAY, 103.0)]}
+    facts = dr.build_facts(cfg, DAY, prices=prices)
+    moves = {r["ticker"]: r["move_pct"] for r in facts["us"]["names"]}
+    assert moves == {"FN": None, "NVDA": 3.0} and not facts["us"]["missed_moves"]
+
+
+@pytest.mark.unit
+def test_errors_without_a_usage_row_are_counted_as_unrecorded(tmp_path):
+    cfg = config(tmp_path)
+    write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "bearish — x.")}, tickers=[
+        entry("NVDA", evaluate="warn", trigger="core", decide=decided(cfg, "NVDA", "ERROR", None))])
+    (cfg.state_dir / "llm_usage.jsonl").write_text("")
+    facts = dr.build_facts(cfg, DAY, prices=prices_for("NVDA"))
+    assert facts["us"]["analysis_errors"] == 1 and facts["analysis_error_kinds"] == {"unrecorded": 1}
+
+
+@pytest.mark.unit
+def test_the_review_schema_survives_the_strict_form():
+    from pipeline.claude_cli import strict_output_schema
+
+    text = json.dumps(strict_output_schema(dr.REVIEW_SCHEMA))
+    assert "maxLength" not in text and "maxItems" not in text

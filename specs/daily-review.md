@@ -29,7 +29,7 @@ US trading date `day`, into `<root>/<category>/<day>/…` (root: env
 | `decisions` | `decisions.jsonl` — the ledger rows dated `day` |
 | `orders` | `orders.jsonl` — the ledger order rows whose client order id is dated `day` |
 | `digests` | `<session>.txt` — the research digest as sent (research_digest writes `state_dir/research_digest/<session>/<date>.txt` when it queues one) |
-| `prices` | `closes.csv` — date, ticker, close, change % for the day's names and benchmarks (a change across a missing close is empty, never a two-session move) |
+| `prices` | `closes.csv` — date, ticker, close, change % for the day's names and benchmarks (a change across a missing close, or a missing bar — the name's previous bar is not the benchmark's previous session —, is empty, never a two-session move) |
 | `llm_usage` | `cli.jsonl` (the CLI usage log the writer uses, rows whose New York date is `day`), `analysis.jsonl` |
 | `broker` | `account.json`, `positions.json`, `fills.json` — read-only Alpaca snapshot (only when archived on the day itself) |
 | `reviews` | `review.md`, `review.json` (R2) |
@@ -64,7 +64,9 @@ prompt):
 - analysis errors by kind, entry-zone skips, other execute skips;
 - every funnel entry of the session, a brief-less one too (a failed
   collection, a watch name), with its layer and collect code;
-- analysis errors by kind (`llm_usage.error_kind`) and the day's fills;
+- analysis errors by kind (`llm_usage.error_kind`), with ERROR decisions
+  that left no usage row (a run refused before any call, such as a 401)
+  counted as `unrecorded`, and the day's fills;
 - `price_reads`: how many price reads were skipped (budget spent) or
   failed — a truncated read is a fact in the prompt and a warning line in
   the message, never a quiet null;
@@ -89,7 +91,7 @@ link or markup (any scheme, `www.`, a markdown link, an HTML/Lark tag, a
 domain-like host other than a numeric exchange symbol — a plain comparison
 such as `超额>2%` or `NVDA<SPY` is fine), and stays within its size bounds
 (300 characters a field, at most 8 issues, 5 proposals, 6 watch items, in the
-schema and the prompt; a rendered message over 6000 characters is replaced by
+prompt and the check — not the schema, which codex sends in OpenAI strict form; a rendered message over 6000 characters is replaced by
 the facts); a failure falls back to the facts. Every step but the send is guarded (facts, model, archive), so the
 day's message is always queued.
 

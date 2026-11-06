@@ -46,7 +46,8 @@ REVIEW_TIMEOUT_S = 300.0
 BENCHMARKS = {"us": "SPY", "cn": "000300.SS", "hk": "^HSI"}
 VERDICTS = ("需要优化", "继续观察", "暂不调整")
 SEVERITIES = ("高", "中", "低")
-#: Size bounds (schema, prompt and check): one Lark text message, well under
+#: Size bounds (prompt and check — not the schema: codex sends it in OpenAI
+#: strict form, which has no maxLength): one Lark text message, well under
 #: the webhook's body limit; a larger review falls back to the facts.
 MAX_FIELD_CHARS = 300
 MAX_ITEMS = {"issues": 8, "proposals": 5, "watch": 6}
@@ -58,7 +59,8 @@ MAX_MESSAGE_CHARS = 6000
 _UNSAFE_TEXT = re.compile(
     r"[A-Za-z][A-Za-z0-9+.-]*://|www\.|\]\("
     # a tag (an HTML or Lark element name, or <!): NVDA<SPY is a comparison
-    r"|</?\s*[A-Za-z][A-Za-z0-9-]*(?:\s[^<>]*)?/?>"
+    # (attributes are name or name=value, so "NVDA<SPY 但 MU>SPY" is no tag)
+    r"|</?\s*[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z][\w:-]*(?:\s*=\s*[^\s<>]*)?)*\s*/?>"
     r"|<\s*/?\s*(?:a|at|b|i|u|s|p|br|hr|em|font|img|div|span|script|style|iframe|svg|link|meta|form)\b|<\s*!"
     # research_digest's host rules: a host with a path (numeric or not), an
     # IP-like host, a common TLD in any script
@@ -163,6 +165,23 @@ def day_change(series: list[tuple[date, float]], day: date) -> float | None:
         if d == day and i > 0 and close is not None and series[i - 1][1] is not None:
             return (close / series[i - 1][1] - 1) * 100
     return None
+
+
+def _previous_date(series: list[tuple[date, float]], day: date) -> date | None:
+    dates = [d for d, _c in series]
+    return dates[dates.index(day) - 1] if day in dates and dates.index(day) > 0 else None
+
+
+def name_change(prices: dict, ticker: str, session: str, day: date) -> float | None:
+    """The name's change on ``day``, None when its previous bar is not the
+    benchmark's previous session (a suspension with no bar): never a move
+    across a gap. Without the benchmark's bars the name's own stand."""
+    series = prices.get(ticker, [])
+    move = day_change(series, day)
+    bench = prices.get(_benchmark(ticker, session), [])
+    if move is None or ticker in BENCHMARKS.values() or day_change(bench, day) is None:
+        return move
+    return move if _previous_date(series, day) == _previous_date(bench, day) else None
 
 
 def _ny_date(stamp: object) -> date | None:
@@ -270,7 +289,9 @@ def _archive_into(config, day, root, iso, counts, *, broker, fetch, prices) -> N
     tickers = set().union(*_day_tickers(config, day).values()) | set(BENCHMARKS.values())
     if prices is None:
         prices = closes(tickers, fetch, first=BENCHMARKS.values())
-    rows = [[iso, ticker, f"{close:.4f}", "" if (c := day_change(series, day)) is None else f"{c:.2f}"]
+    session_of = {t: session for session, names in _day_tickers(config, day).items() for t in names}
+    rows = [[iso, ticker, f"{close:.4f}",
+             "" if (c := name_change(prices, ticker, session_of.get(ticker, "us"), day)) is None else f"{c:.2f}"]
             for ticker, series in sorted(prices.items()) if ticker in tickers
             for d, close in series if d == day and close is not None]
     dest = root / "prices" / iso / "closes.csv"
@@ -372,7 +393,7 @@ def _names(config: PipelineConfig, session: str, day: date) -> list[dict]:
 
 def _with_moves(names: list[dict], session: str, day: date, prices: dict) -> list[dict]:
     for row in names:
-        move = day_change(prices.get(row["ticker"], []), day)
+        move = name_change(prices, row["ticker"], session, day)
         bench = day_change(prices.get(_benchmark(row["ticker"], session), []), day)
         row["move_pct"] = None if move is None else round(move, 2)
         row["excess_pct"] = None if move is None or bench is None else round(move - bench, 2)
@@ -458,7 +479,11 @@ def build_facts(config: PipelineConfig, day: date, *, prices: dict | None = None
             "analysis_errors": sum(1 for r in names if r["decision"] == "ERROR"),
             "execute_outcomes": dict(sorted(_count(r["execute"] for r in names if r["execute"]).items())),
         }
-    facts["analysis_error_kinds"] = _error_kinds(config, day)
+    kinds = _error_kinds(config, day)
+    unrecorded = sum(facts[s]["analysis_errors"] for s in ("us", "cn")) - sum(kinds.values())
+    if unrecorded > 0:  # a run refused before any LLM call (a 401) writes no usage row
+        kinds["unrecorded"] = unrecorded
+    facts["analysis_error_kinds"] = kinds
     if broker is not None:
         with contextlib.suppress(Exception):
             account = broker.account()
@@ -487,20 +512,17 @@ def _count(values) -> dict[str, int]:
 REVIEW_SCHEMA = {
     "type": "object",
     "properties": {
-        "summary": {"type": "string", "maxLength": MAX_FIELD_CHARS},
+        "summary": {"type": "string"},
         "issues": {"type": "array", "items": {"type": "object", "properties": {
-            "title": {"type": "string", "maxLength": MAX_FIELD_CHARS},
-            "evidence": {"type": "string", "maxLength": MAX_FIELD_CHARS},
+            "title": {"type": "string"},
+            "evidence": {"type": "string"},
             "severity": {"type": "string", "enum": list(SEVERITIES)}},
-            "required": ["title", "evidence", "severity"], "additionalProperties": False},
-            "maxItems": MAX_ITEMS["issues"]},
+            "required": ["title", "evidence", "severity"], "additionalProperties": False}},
         "verdict": {"type": "string", "enum": list(VERDICTS)},
         "proposals": {"type": "array", "items": {"type": "object", "properties": {
-            **{k: {"type": "string", "maxLength": MAX_FIELD_CHARS} for k in ("change", "why", "evidence", "risk")}},
-            "required": ["change", "why", "evidence", "risk"], "additionalProperties": False},
-            "maxItems": MAX_ITEMS["proposals"]},
-        "watch": {"type": "array", "items": {"type": "string", "maxLength": MAX_FIELD_CHARS},
-                  "maxItems": MAX_ITEMS["watch"]},
+            **{k: {"type": "string"} for k in ("change", "why", "evidence", "risk")}},
+            "required": ["change", "why", "evidence", "risk"], "additionalProperties": False}},
+        "watch": {"type": "array", "items": {"type": "string"}},
     },
     "required": ["summary", "issues", "verdict", "proposals", "watch"],
     "additionalProperties": False,
@@ -512,7 +534,7 @@ REVIEW_PROMPT = """你是一个交易研究流水线的复盘员。下面是 {da
 当天涨跌（move_pct）和相对基准的超额（excess_pct；为 null 表示没有读到行情，不是零——
 price_reads 记录行情读取被跳过（skipped，时间预算用完）和失败（failed）的股票数，大于 0 时相关统计不完整，要在总结里说明）；
 brief_used 不为空表示分析用的是那一天的旧简报（当天简报缺失时按合约沿用前一天的）；
-未分析却大幅波动的股票（missed_moves）；宏观判断；分析出错的原因分类；账户、持仓与成交；
+未分析却大幅波动的股票（missed_moves）；宏观判断；分析出错的原因分类（unrecorded 表示出错但没有留下用量记录、原因未知，常见于调用前就被拒，如认证失败）；账户、持仓与成交；
 以及最近 {sessions} 个交易日的滚动统计（决策当天的超额收益，按简报方向、按 PM 评级，含样本数）。
 
 请用中文复盘：
