@@ -1638,10 +1638,10 @@ def _run_job_impl(
     pair_id: str | None = None  # minted under flock with the pair's first row
     # llm-cost R2: one profile per JOB, so both arms of a pair run on the same
     # provider (the A/B contrast is the information source, not the model);
-    # it only changes when Anthropic reports the credits gone.
+    # it only changes when a rung's credits are gone or its key is refused.
     profile: Profile | None = router.choose().profile if router is not None else None
     # Profiles the job's earlier arms actually ran on: a pair is split only
-    # when a later arm runs on a different one (credit exhaustion mid-pair).
+    # when a later arm runs on a different one (credits or a key gone mid-pair).
     ran_profiles: set[str] = set()
     for arm_index, arm in enumerate(job.arms):
         # Resolved before the child spends anything: a snapshot write failure

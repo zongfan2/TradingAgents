@@ -525,7 +525,8 @@ and date the alert names) — `--from 6` also reaches step 7: inline it
 submits, deferred it records the skip that re-arms the missed-execute
 watchdog (`--only analysis_runner` would leave recovered plans unexecuted
 with no signal). Past the us execution time, submit with
-`orchestrator execute --now` afterwards. `credits
+`orchestrator execute --now --date <d>` afterwards (without `--date` it
+targets today's New York slot, not the recovered one). `credits
 exhausted` / `timed out` point at the budget and the run timeout.
 
 **Component failure ≠ slot failure.** Every component failure/timeout is

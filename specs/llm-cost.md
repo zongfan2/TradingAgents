@@ -94,13 +94,16 @@ The user also has **$200/month of Anthropic credits** to use before DeepSeek.
 - A child failing with Anthropic's "credit balance is too low" error writes
   `~/.tradingagents/llm_budget/<YYYY-MM>.exhausted` (atomic; its existence is
   the state) and that run is rerun once on `deepseek` (as are the job's
-  remaining arms). This is the one way a pair can split across providers
+  remaining arms). This and a refused key (specs/llm-provider-ladder.md
+L5: a 401 under `ladder`/`claude-first` reruns on the next rung for the rest
+of the slot) are the only ways a pair can split across providers
   (first arm on Claude, second on DeepSeek): the later arm's run carries the
   flag `llm-profile-switched` (only when an earlier arm of the job really ran
   on another profile — a switch on the first arm keeps the pair on DeepSeek), and the pair's rows have different `preset`s, so
   a per-preset A/B aggregate never counts it as a complete pair. Only the final result is written to the decision ledger;
   the failed Claude attempt appears only in `llm_usage.jsonl` (`run_id`
-  null). Other errors are not retried here.
+  null). Other errors (beyond exhausted credits and, per L5, a refused key)
+  are not retried here.
 - The per-profile config digest is resolved before the child starts, so a
   snapshot write failure fails the run before any token is spent.
 - The end-of-slot notification adds month-to-date Anthropic spend and the
