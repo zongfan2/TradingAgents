@@ -43,6 +43,7 @@ specifies Flash for every model-assisted backup role without activating it.
 | [price-tape.md](price-tape.md) | Verified recent closes (before as_of) in the ticker collector and evaluator prompts; citation-severity rule | Claude Code | **Implemented** |
 | [trade-notifications.md](trade-notifications.md) | Separate Lark trades group: real-time order/fill/exit messages (Alpaca paper stream, read-only) + hourly reconcile + daily report | Claude Code | **Implemented** |
 | [research-digest.md](research-digest.md) | Each slot's research (macro read, ticker briefs, evals, decisions) as one message in the Lark trades group | Claude Code | **Implemented** |
+| [daily-review.md](daily-review.md) | Daily post-close review (structured facts → one model call → Lark trades group) and the by-category, by-date data archive under /mnt/d/massive/stock | Claude Code | **Implemented** |
 | [llm-provider-ladder.md](llm-provider-ladder.md) | Claude → OpenAI (GPT, hermetic codex) → DeepSeek routing; monthly OpenAI balance confirmation (`pipeline.llm_budget`) | Claude Code | **Implemented** |
 | [ticker-brief-dossier.md](ticker-brief-dossier.md) | Ticker brief dossier + daily delta (cross-day research dedup) | Claude Code | **Draft** |
 

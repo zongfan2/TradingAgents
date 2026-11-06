@@ -2053,6 +2053,12 @@ def _hourly_trade_notifications(config: PipelineConfig, now: datetime) -> None:
         trade_notify.flush_outbox(config.state_dir, send)
     except Exception as exc:
         logger.warning("research digest retry failed: %s", type(exc).__name__)
+    try:
+        from pipeline import daily_review
+
+        daily_review.maybe_start(config, now)  # specs/daily-review.md R3: detached, once a day
+    except Exception as exc:
+        logger.warning("daily review not started: %s", type(exc).__name__)
 
 
 def _alertable_days(session: str, at_time: str, now: datetime) -> list[date]:
