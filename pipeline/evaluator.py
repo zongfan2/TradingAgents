@@ -315,7 +315,12 @@ def build_eval_prompt(
         subject = f"daily global macro brief (as of {date}{session})"
         coverage_target = f"what moved global markets in the 48h before {date}"
         citation_rules = _MACRO_CITATION_RULES
-        consistency_extra = ""
+        consistency_extra = (
+            " For this macro brief, if every Impact line reads 'mixed' and the rationales do not "
+            "say why the opposing forces balance or which one matters most, flag it under "
+            "coverage with severity 'minor': the brief gives a reader no read at all. This flag "
+            "alone must not take any dimension score below 6."
+        )
     return f"""\
 You are an independent accuracy evaluator for a {subject}. You have web search
 enabled: verify claims against independent sources — never by trusting the brief's own
