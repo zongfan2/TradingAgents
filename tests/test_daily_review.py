@@ -236,6 +236,8 @@ def test_re_archiving_never_replaces_good_files_with_empty_ones(tmp_path, archiv
 @pytest.mark.parametrize("bad", [
     {**review(), "summary": None}, {**review(), "issues": ["x"]}, {**review(), "verdict": "全仓买入"},
     {**review(), "summary": "详见 https://evil.example 。"}, {**review(), "watch": ['<at user_id="all">所有人</at>']},
+    {**review(), "summary": "详见 evil.example/x。"}, {**review(), "summary": "ftp://evil.example"},
+    {**review(), "summary": "[点击](evil)"}, {**review(), "summary": "见 evil.com。"},
 ])
 def test_a_malformed_or_unsafe_review_falls_back_to_the_facts(tmp_path, archive, monkeypatch, bad):
     cfg = config(tmp_path)
@@ -288,3 +290,74 @@ def test_the_usage_archive_reads_the_log_the_writer_uses_and_includes_the_review
     dr.review_day(cfg, DAY, send=None, runner=runner)
     rows = (archive / "llm_usage" / DAY.isoformat() / "cli.jsonl").read_text().splitlines()
     assert [json.loads(r)["component"] for r in rows] == ["daily_review"]
+
+
+@pytest.mark.unit
+def test_a_comparison_or_an_exchange_symbol_is_plain_text():
+    ok = dr.checked_review({**review(), "summary": "超额>2%，n<10 不足以调整；0700.HK 平稳。"})
+    assert ok["summary"].startswith("超额>2%")
+
+
+@pytest.mark.unit
+def test_a_missing_ledger_or_an_empty_source_never_empties_the_archive(tmp_path, archive):
+    cfg = config(tmp_path)
+    slot(cfg)
+    dr.archive_day(cfg, DAY, prices=prices_for("NVDA", "FN"))
+    iso = DAY.isoformat()
+    kept = {p: p.read_bytes() for p in (archive / "decisions" / iso / "decisions.jsonl",
+                                        archive / "ticker_briefs" / iso / "NVDA.md")}
+    (cfg.ledger_dir / "decisions.jsonl").unlink()
+    (cfg.ticker_brief_dir / "NVDA" / f"{iso}.md").write_text("")
+    counts = dr.archive_day(cfg, DAY, prices=prices_for("NVDA", "FN"))
+    assert {p: p.read_bytes() for p in kept} == kept
+    assert counts["decisions:missing"] == 1 and counts["ticker_briefs:missing"] >= 1
+
+
+@pytest.mark.unit
+def test_closes_are_merged_never_dropped(tmp_path, archive):
+    cfg = config(tmp_path)
+    slot(cfg)
+    dr.archive_day(cfg, DAY, prices=prices_for("NVDA", "FN", moves={"FN": 8.0}))
+    counts = dr.archive_day(cfg, DAY, prices={"NVDA": prices_for("NVDA")["NVDA"]})  # a partial refetch
+    text = (archive / "prices" / DAY.isoformat() / "closes.csv").read_text()
+    assert ",FN,108.0000,8.00" in text and ",NVDA," in text and counts["prices:missing"] >= 1
+
+
+@pytest.mark.unit
+def test_an_unwritable_archive_leaves_the_day_for_the_retry(tmp_path, monkeypatch):
+    from pipeline import trade_monitor
+
+    cfg = config(tmp_path)
+    slot(cfg)
+    blocker = tmp_path / "a-file"
+    blocker.write_text("x")
+    monkeypatch.setenv(dr.ARCHIVE_ENV, str(blocker / "archive"))
+    monkeypatch.setattr(dr, "closes", lambda tickers, fetch=None: prices_for("NVDA", "FN"))
+    monkeypatch.setattr(dr, "_run_review", lambda prompt: review())
+    monkeypatch.setattr(trade_monitor, "make_trades_sender", lambda c: None)
+    assert dr.run(cfg, DAY) == 1
+    assert not dr._marks(cfg, DAY)[1].exists()  # no done mark: retried after STUCK_AFTER
+
+
+@pytest.mark.unit
+def test_without_a_trades_webhook_the_watchdog_still_reviews_and_archives(tmp_path, monkeypatch):
+    from pipeline import orchestrator
+
+    calls = []
+    monkeypatch.setattr(dr, "maybe_start", lambda cfg, now: calls.append(now))
+    cfg = config(tmp_path)  # no lark_trades_webhook_url
+    now = datetime(2026, 11, 4, 22, tzinfo=timezone.utc)
+    orchestrator._hourly_trade_notifications(cfg, now)
+    assert calls == [now]
+
+
+@pytest.mark.unit
+def test_the_price_reads_share_a_budget():
+    import time as _time
+
+    def slow(ticker):
+        _time.sleep(0.05)
+        return [(DAY, 1.0)]
+
+    out = dr.closes({f"T{i}" for i in range(20)}, fetch=slow, budget_s=0.12)
+    assert 0 < len(out) < 20  # the rest skipped, the review goes on

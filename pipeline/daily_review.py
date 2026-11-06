@@ -46,8 +46,11 @@ REVIEW_TIMEOUT_S = 300.0
 BENCHMARKS = {"us": "SPY", "cn": "000300.SS", "hk": "^HSI"}
 VERDICTS = ("需要优化", "继续观察", "暂不调整")
 SEVERITIES = ("高", "中", "低")
-#: Links or markup never reach the group (the review text is model output).
-_UNSAFE_TEXT = re.compile(r"https?://|www\.|<|>", re.IGNORECASE)
+#: Links or markup never reach the group (the review text is model output):
+#: any scheme, www., a markdown link, an HTML/Lark tag — a plain comparison
+#: ("超额>2%", "n<10") is fine — and any domain-like host (research_digest's
+#: rule: only a numeric exchange symbol such as 0700.HK passes).
+_UNSAFE_TEXT = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://|www\.|\]\(|<\s*/?\s*[A-Za-z!]", re.IGNORECASE)
 
 
 def archive_root(config: PipelineConfig | None = None) -> Path:
@@ -65,12 +68,10 @@ def _benchmark(ticker: str, session: str) -> str:
 
 
 def _jsonl_rows(path: Path) -> list[dict] | None:
-    """The file's JSON-object rows; None when it cannot be read (a missing
-    file is an empty list — nothing was written that day)."""
+    """The file's JSON-object rows; None when it is missing or cannot be
+    read — the archive then keeps what it has (facts read None as no rows)."""
     try:
         text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return []
     except (OSError, UnicodeDecodeError):
         return None
     rows = []
@@ -100,13 +101,25 @@ def _day_tickers(config: PipelineConfig, day: date) -> dict[str, set[str]]:
     return {session: {str(e["ticker"]) for e in _snapshot(config, session, day)} for session in ("cn", "us")}
 
 
-def closes(tickers: set[str], fetch=None) -> dict[str, list[tuple[date, float]]]:
+#: The price reads share this budget (the review runs inside the watchdog's
+#: 15-minute task limit, with the model call's own 300 s): tickers left when
+#: it is spent are skipped (their moves read null), never the review.
+PRICE_BUDGET_S = 240.0
+
+
+def closes(tickers: set[str], fetch=None, budget_s: float = PRICE_BUDGET_S) -> dict[str, list[tuple[date, float]]]:
     """ticker -> clean daily closes (the price tape's source); a ticker whose
     read fails is left out (never an empty series)."""
+    import time as _time
+
     from pipeline import price_tape
 
     out = {}
+    deadline = _time.monotonic() + budget_s
     for ticker in sorted(tickers):
+        if _time.monotonic() > deadline:
+            logger.warning("daily review: price budget spent — %d tickers skipped", len(tickers) - len(out))
+            break
         try:
             bars = (fetch or price_tape.fetch_daily_closes)(ticker)
         except Exception as exc:
@@ -144,6 +157,9 @@ def _copy(src: Path, dest: Path, counts: dict[str, int], category: str) -> None:
     except OSError:
         counts[f"{category}:missing"] += 1
         return
+    if not data and dest.exists() and dest.stat().st_size:
+        counts[f"{category}:missing"] += 1  # an empty source never replaces an archived copy
+        return
     dest.parent.mkdir(parents=True, exist_ok=True)
     if not (dest.exists() and dest.read_bytes() == data):
         tmp = dest.with_name(dest.name + ".tmp")
@@ -178,10 +194,20 @@ def archive_day(config: PipelineConfig, day: date, *, broker=None, fetch=None,
     """Archive ``day`` under ``<root>/<category>/<day>/``; returns counts per
     category (``<category>:missing`` for an input skipped or unreadable — an
     archived file is never replaced by an empty one). Never raises on input."""
-    from pipeline.funnel import snapshot_path
 
     root, iso = archive_root(config), day.isoformat()
     counts: dict[str, int] = defaultdict(int)
+    try:
+        _archive_into(config, day, root, iso, counts, broker=broker, fetch=fetch, prices=prices)
+    except OSError as exc:  # the root itself is unwritable (a missing drive, a full disk)
+        logger.warning("daily review: archive root unwritable (%s)", type(exc).__name__)
+        counts["error"] += 1
+    return dict(counts)
+
+
+def _archive_into(config, day, root, iso, counts, *, broker, fetch, prices) -> None:
+    from pipeline.funnel import snapshot_path
+
     for session in ("cn", "us"):
         base = config.macro_brief_dir / f"{iso}.{session}"
         _copy(Path(f"{base}.md"), root / "macro_briefs" / iso / f"{session}.md", counts, "macro_briefs")
@@ -215,14 +241,24 @@ def archive_day(config: PipelineConfig, day: date, *, broker=None, fetch=None,
         prices = closes(tickers, fetch)
     rows = [[iso, ticker, f"{close:.4f}", "" if (c := day_change(series, day)) is None else f"{c:.2f}"]
             for ticker, series in sorted(prices.items()) for d, close in series if d == day]
+    dest = root / "prices" / iso / "closes.csv"
+    merged: dict[str, list[str]] = {}
+    with contextlib.suppress(OSError, UnicodeDecodeError):
+        for row in list(csv.reader(dest.read_text(encoding="utf-8").splitlines()))[1:]:
+            if len(row) == 4:
+                merged[row[1]] = row
+    before = len(merged)
+    merged.update({row[1]: row for row in rows})  # re-archiving adds or refreshes rows, never drops one
     if rows:
         buf = io.StringIO()
         writer = csv.writer(buf)
         writer.writerow(["date", "ticker", "close", "change_pct"])
-        writer.writerows(rows)
-        _write(root / "prices" / iso / "closes.csv", buf.getvalue(), counts, "prices")
+        writer.writerows(row for _ticker, row in sorted(merged.items()))
+        _write(dest, buf.getvalue(), counts, "prices")
+        if len(rows) < before:
+            counts["prices:missing"] += before - len(rows)
     else:  # no closes read (a network failure, a date older than the data): keep what is there
-        _write(root / "prices" / iso / "closes.csv", None, counts, "prices")
+        _write(dest, None, counts, "prices")
     if broker is not None:
         for name, read in (("account", broker.account), ("positions", broker.positions)):
             try:
@@ -238,7 +274,6 @@ def archive_day(config: PipelineConfig, day: date, *, broker=None, fetch=None,
         fills = _fills(broker, day)
         _write(root / "broker" / iso / "fills.json", None if fills is None else json.dumps(fills, default=str, indent=1),
                counts, "broker")
-    return dict(counts)
 
 
 def _fills(broker, day: date) -> list[dict] | None:
@@ -447,7 +482,8 @@ brief_used 不为空表示分析用的是那一天的旧简报（当天简报缺
    样本数少于 10 的规律不足以支撑策略改动，只能列入 watch。
 5. watch：需要继续积累数据观察的现象。
 
-规则：只使用下面的事实，不要搜索、不要引用外部信息、不要编造任何数字；数字写阿拉伯数字；不要写网址。
+规则：只使用下面的事实，不要搜索、不要引用外部信息、不要编造任何数字；数字写阿拉伯数字；
+不要写网址、域名或任何 HTML/标记标签（比较可以写"大于/小于"或 >、<）。
 你只提建议，任何改动都由人决定。
 
 {facts}"""
@@ -498,9 +534,13 @@ def _run_review(prompt: str) -> dict:
 def checked_review(review: object) -> dict:
     """The review if every field has its schema shape and no text carries a
     link or markup; raises otherwise (the caller falls back to the facts)."""
+    from pipeline.research_digest import _DOMAIN, _SYMBOL
+
     def text(value: object) -> str:
         if not isinstance(value, str) or _UNSAFE_TEXT.search(value):
             raise ValueError("a review field is not plain text")
+        if any(not _SYMBOL.fullmatch(token) for token in _DOMAIN.findall(value)):
+            raise ValueError("a review field carries a host")
         return value.strip()
 
     if not isinstance(review, dict) or review.get("verdict") not in VERDICTS:
@@ -556,7 +596,8 @@ def render(day: date, facts: dict, review: dict | None) -> str:
     return "\n".join(lines)
 
 
-def review_day(config: PipelineConfig, day: date, *, broker=None, send=None, runner=None) -> str:
+def review_day(config: PipelineConfig, day: date, *, broker=None, send=None, runner=None,
+               return_archived: bool = False):
     """Facts, review, deliver, archive; returns the text. Every step but the
     send is guarded: whatever fails, the day's message is still queued."""
     from pipeline import trade_notify
@@ -579,16 +620,18 @@ def review_day(config: PipelineConfig, day: date, *, broker=None, send=None, run
     text = render(day, facts, review)
     if send is not None:
         trade_notify.enqueue(config.state_dir, f"review:{day.isoformat()}", text, send)
+    archived = False
     try:  # after the model call, so its usage row is in the day's archive
-        archive_day(config, day, broker=broker, prices=prices or None)
+        counts = archive_day(config, day, broker=broker, prices=prices or None)
         root = archive_root(config) / "reviews" / day.isoformat()
         root.mkdir(parents=True, exist_ok=True)
         atomic_write(root / "review.md", text + "\n")
         atomic_write(root / "review.json", json.dumps({"facts": facts, "review": review}, ensure_ascii=False,
                                                        default=str, indent=1))
+        archived = not counts.get("error")
     except Exception as exc:
-        logger.warning("daily review: archive failed (%s)", type(exc).__name__)
-    return text
+        logger.warning("daily review: archive failed (%s) — retried by the next watchdog run", type(exc).__name__)
+    return text if not return_archived else (text, archived)
 
 
 # ---------------------------------------------------------------------------
@@ -640,8 +683,9 @@ def maybe_start(config: PipelineConfig, now: datetime, *, runner=None) -> bool:
 
 
 def run(config: PipelineConfig, day: date) -> int:
-    """Review ``day`` and deliver it. The done mark is written only when the
-    message was queued — or no trades channel is configured at all."""
+    """Review ``day`` and deliver it. The done mark is written once the
+    message is queued (or no trades channel exists) and the archive was
+    written; an unwritable archive leaves the day for the stuck retry."""
     from pipeline import trade_notify
     from pipeline.trade_monitor import make_trades_sender
 
@@ -651,7 +695,12 @@ def run(config: PipelineConfig, day: date) -> int:
     send = make_trades_sender(config) if config.notifications_enabled else None
     if send is None and config.notifications_enabled:
         logger.warning("daily review: no trades webhook configured — the review is archived, not sent")
-    review_day(config, day, broker=broker if day == datetime.now(NY).date() else None, send=send)
+    _text, archived = review_day(config, day, broker=broker if day == datetime.now(NY).date() else None,
+                                 send=send, return_archived=True)
+    if not archived:
+        # The message is queued (key review:<day>, never resent); the archive
+        # is retried by the next watchdog run after STUCK_AFTER.
+        return 1
     _started, done = _marks(config, day)
     done.parent.mkdir(parents=True, exist_ok=True)
     atomic_write(done, datetime.now(timezone.utc).isoformat())

@@ -37,8 +37,12 @@ US trading date `day`, into `<root>/<category>/<day>/…` (root: env
 Every write is atomic and idempotent: re-archiving a day rewrites the same
 content. A missing or unreadable input is skipped and counted
 (`<category>:missing`) and **never replaces an archived file with an empty
-one** (an unreadable ledger, a failed price fetch, a date older than the
-data window). The review archives after its model call, so the day's
+one** (a missing or unreadable ledger or usage log, an empty source file, a
+failed price fetch, a date older than the data window); `closes.csv` is
+merged — a partial refetch refreshes rows, never drops one. A root that
+cannot be written (a missing drive) leaves the day without a done mark, so
+the stuck retry archives it later (the message, already queued, is not
+resent). The review archives after its model call, so the day's
 `daily_review` usage row is included, and reuses the facts' closes.
 `python -m pipeline.daily_review archive --since D [--until D]` backfills.
 
@@ -75,8 +79,9 @@ the user, who decides.
 A call that used a web tool (tool-call fields or a billed search) is
 rejected: the review is the facts' alone. The output is checked before it
 reaches anyone: every field has its schema shape and no text carries a
-link or markup (`<`, `>`, a scheme, `www.`); a failure falls back to the
-facts. Every step but the send is guarded (facts, model, archive), so the
+link or markup (any scheme, `www.`, a markdown link, an HTML/Lark tag, a
+domain-like host other than a numeric exchange symbol — a plain comparison
+such as `超额>2%` is fine); a failure falls back to the facts. Every step but the send is guarded (facts, model, archive), so the
 day's message is always queued.
 
 The result is rendered as one Lark message to the trades group through the
@@ -89,8 +94,10 @@ never lost.
 
 The hourly watchdog (`_hourly_trade_notifications`, guarded) calls
 `maybe_start`: once the New York clock is past 17:00 on a weekday whose us
-funnel snapshot exists, it runs the review **inline** (a few minutes, well
-inside the watchdog task's 15-minute limit; its log is the watchdog's). Marks
+funnel snapshot exists, it runs the review **inline** (its log is the watchdog's): the
+price reads share a 240 s budget (tickers left are skipped, their moves
+null) and the model call has its own 300 s timeout, inside the watchdog
+task's 15-minute limit. It runs whether or not a trades webhook exists. Marks
 `state_dir/daily_review/<date>.started|done`: a started run older than 2 h is
 retried, a done day never re-runs; the done mark is written once the message
 is queued (or when no trades channel is configured — the review is then only
@@ -99,16 +106,24 @@ archived, with a warning). By hand, `python -m pipeline.daily_review run
 
 ## Prior art (specs/README.md rule 6)
 
-- **freqtrade** — https://github.com/freqtrade/freqtrade (GPL-3.0, design
-  reference only, nothing copied; recorded in specs/trade-notifications.md):
-  its `/daily`, `/performance` and `/profit` Telegram reports summarise a
-  bot's trades per day from its own trade database. Taken: one daily
-  summary built from the system's own records, sent where the trades go.
-  Not taken: profit-only reporting — this review also judges the research
-  and the gates, and its strategy verdict is advisory.
-- **The repository's own retry pattern** (trade outbox, research-digest
-  pending marks): started/done marks with a stuck-retry age, so a review
-  that died mid-run is not lost and a done one never repeats.
+- **freqtrade** — https://github.com/freqtrade/freqtrade @ `0789f5d5c3e7`,
+  GPL-3.0 (design reference only, nothing copied): `/daily`, `/performance`
+  and `/profit` Telegram reports summarise a bot's trades per day from its
+  own trade database. Taken: one daily summary built from the system's own
+  records, sent where the trades go. Avoided: profit-only reporting — this
+  review also judges the research and the gates.
+- **NautilusTrader** — https://github.com/nautechsystems/nautilus_trader @
+  `df64cfe7b63f`, LGPL-3.0 (reference only): its portfolio analyzer computes
+  return statistics from fills and positions after a run. Taken: the review's
+  numbers come from recorded fills/positions and prices, never from the model.
+- **QuantConnect LEAN** — https://github.com/QuantConnect/Lean @
+  `06eb5cb315c7`, Apache-2.0 (reference only, nothing copied): its result
+  handler writes per-day statistics and orders into a results package next to
+  the run. Taken: a by-date archive of every input next to the review, so a
+  day can be re-examined later. Avoided: a single monolithic results blob —
+  categories by date keep the archive browsable and re-archivable.
+- **This repository's retry pattern** (trade outbox, research-digest pending
+  marks): started/done marks with a stuck-retry age.
 
 ## Acceptance criteria
 
@@ -120,7 +135,8 @@ archived, with a warning). By hand, `python -m pipeline.daily_review run
 4. The review proposes, never applies, a strategy change.
 5. The watchdog runs the review once per day after 17:00 ET, inline; a
    stuck run is retried after 2 h; a by-hand run loads `.env`.
-7. A model call that used the web, a malformed or unsafe review, or any
+6. A model call that used the web, a malformed or unsafe review, or any
    failure before the send still sends the facts; the archive never
-   replaces a file with an empty one.
-6. Tests are offline.
+   replaces a file with an empty one (a missing or empty source, a partial
+   price refetch — closes are merged, never dropped).
+7. Tests are offline.
