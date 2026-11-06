@@ -560,6 +560,7 @@ def test_a_brief_the_pm_never_read_is_never_summarized_as_its_reason(tmp_path, m
     ("详见 bit.ly/x。", "x", False), ("详见example.com查看。", "x", False), ("下跌十五个百分点。", "x", False),
     ("规模五十多亿。", "x", False), ("三十美分。", "x", False),
     ("0700.HK 财报前无新消息。", "0700.HK", True), ("600256.SS 走势平稳。", "600256.SS", True),
+    ("详见 evil.hk/x。", "x", False), ("三分之一的收入。", "x", False), ("五億美元。", "x", False),
     ('<at user_id="all">所有人</at>注意。', "x", False), ("统一口径，一季度持平。", "x", True),
 ])
 def test_the_summary_screen(summary, source, kept):
@@ -794,6 +795,37 @@ def test_after_execution_an_unread_row_never_reads_as_no_order(tmp_path, live):
     path.write_text(json.dumps(snap), encoding="utf-8")
     head = build(cfg, "us").splitlines()[0]
     assert "已执行：待核实（决策数据未读到）" in head and "无下单" not in head
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("halted", "header"), [(False, "计划下单（模拟）：无"), (True, "计划下单（执行已暂停）：无")])
+def test_a_lost_brief_arm_event_under_dry_run_or_halt_is_no_live_order(tmp_path, monkeypatch, halted, header):
+    if halted:
+        monkeypatch.setenv("TRADINGAGENTS_EXECUTION_ENABLED", "true")
+    else:
+        monkeypatch.delenv("TRADINGAGENTS_EXECUTION_ENABLED", raising=False)
+    cfg = config(tmp_path)
+    book(cfg)
+    if halted:
+        (cfg.state_dir / "EXECUTION_HALT").parent.mkdir(parents=True, exist_ok=True)
+        (cfg.state_dir / "EXECUTION_HALT").write_text("", encoding="utf-8")
+    decided(cfg, "NVDA", "BUY", "Overweight")
+    feeds = stage("HOLD", arm="feeds", pm_rating="Hold", run_id=f"{DAY.isoformat()}-us-NVDA-feeds-1")
+    write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "m — m.")}, tickers=[entry("NVDA", decide=feeds)])
+    assert header in build(cfg, "us").splitlines()[0]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("triggers", "shown"), [(("manual", "core"), "下单待核实（有更新的分析记录）"),
+                                                 (("core", "manual"), "被手动重跑取代")])
+def test_the_greatest_later_attempt_decides(tmp_path, live, triggers, shown):
+    cfg = config(tmp_path)
+    book(cfg)
+    decide = decided(cfg, "NVDA", "BUY", "Overweight")
+    for n, trigger in enumerate(triggers, start=2):
+        write_decision(cfg, ticker="NVDA", n=n, trigger=trigger, plan=BUY_PLAN, date_iso=DAY.isoformat())
+    write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "m — m.")}, tickers=[entry("NVDA", decide=decide)])
+    assert shown in build(cfg, "us")
 
 
 @pytest.mark.unit

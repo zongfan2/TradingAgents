@@ -89,10 +89,13 @@ _UNSAFE = re.compile(
     r"https?://|www\.|<|>"
     # any domain-like token (ASCII, so CJK neighbours do not hide it), except
     # an exchange suffix such as 0700.HK / 600256.SS
-    r"|(?<![A-Za-z0-9])[A-Za-z0-9-]+\.(?!(?:HK|SS|SZ|BJ)(?![A-Za-z]))[A-Za-z]{2,}(?![A-Za-z])"
-    r"|百分之|[零〇一二两三四五六七八九十百千万亿]{2,}|[零〇一二两三四五六七八九十百千]+[万亿成]"
-    r"|[零〇一二两三四五六七八九十百千万亿]+(?:美元|美分|元|%|倍|个百分点)",
+    r"|百分之|分之|[零〇一二两三四五六七八九十百千万亿萬億]{2,}|[零〇一二两三四五六七八九十百千]+[万亿萬億成]"
+    r"|[零〇一二两三四五六七八九十百千万亿萬億]+(?:美元|美分|元|%|倍|个百分点)",
     re.IGNORECASE)
+#: Domain-like tokens (ASCII, so CJK neighbours do not hide one); only a
+#: numeric exchange symbol (0700.HK, 600256.SS) is not a link.
+_DOMAIN = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9-]+\.[A-Za-z]{2,}(?![A-Za-z])")
+_SYMBOL = re.compile(r"\d+\.(?:HK|SS|SZ|BJ)", re.IGNORECASE)
 _NUMBER = re.compile(r"(?<![\d.])\d+(?:\.\d+)?(?!\d)(?!\.\d)")  # "520." is 520
 #: The summary call: one small, cheap model; a tight timeout so the digest
 #: never waits long for it (DIGEST_DEADLINE_S in the orchestrator bounds all).
@@ -237,12 +240,14 @@ def order_blocker(record: Any | None, settings: Any, records: dict[str, Any] | N
 
     if record is None:
         return "unknown"
-    for other in (records or {}).values():
-        if (other.date == record.date and other.session == record.session and other.ticker == record.ticker
-                and other.arm == record.arm and _attempt_number(other.run_id) > _attempt_number(record.run_id)):
-            # A later attempt is the decision step 7 reads: a manual one never
-            # executes here; any other is unseen by this digest — undetermined.
-            return "manual-shadowed" if other.trigger == "manual" else "later-attempt"
+    later = [other for other in (records or {}).values()
+             if other.date == record.date and other.session == record.session and other.ticker == record.ticker
+             and other.arm == record.arm and _attempt_number(other.run_id) > _attempt_number(record.run_id)]
+    if later:
+        # The greatest attempt is the decision step 7 reads (_latest_attempts):
+        # a manual one never executes here; any other is unseen — undetermined.
+        latest = max(later, key=lambda other: _attempt_number(other.run_id))
+        return "manual-shadowed" if latest.trigger == "manual" else "later-attempt"
     return non_candidate_reason(record) or blocking_reason(record, settings)
 
 
@@ -531,6 +536,8 @@ def _screened(summary: str, source: str) -> str | None:
     text = " ".join(summary.split())
     if not text or len(text) > SUMMARY_MAX_CHARS or _FORBIDDEN.search(text) or _UNSAFE.search(text):
         return None
+    if any(not _SYMBOL.fullmatch(token) for token in _DOMAIN.findall(text)):
+        return None
     # Whole numbers only, and never from a link: a URL's digits vouch for nothing.
     known = set(_NUMBER.findall(re.sub(r"https?://\S+", " ", source)))
     if any(number not in known for number in _NUMBER.findall(text)):
@@ -647,7 +654,10 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
         if not executed and session != "cn" and blocker == "unknown" and details.get("arm") == "feeds" and brief_row:
             # The brief arm's event was lost: whatever the feeds arm decided,
             # step 7 reads the brief arm's ledger row itself.
-            text, ordered = "下单待核实（简报一路的记录缺失）", None
+            if mode in ("模拟", "执行已暂停"):
+                text, ordered = f"不下单（{mode}）", False
+            else:
+                text, ordered = "下单待核实（简报一路的记录缺失）", None
         elif executed:
             text = executed_text(t.decide.get("code"), details.get("pm_rating"), final=t.final, execute=t.execute)
             ordered = False
