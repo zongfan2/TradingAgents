@@ -580,6 +580,8 @@ def test_a_brief_the_pm_never_read_is_never_summarized_as_its_reason(tmp_path, m
     ("評級上調。", "x", False), ("建議減持。", "x", False),
     ("目标价 200 美元。", "target $1,200", False), ("目标价 1,520 美元。", "item 1 of 520", False),
     ("目标价 1,200 美元。", "target $1,200", True), ("目标价 1200 美元。", "target $1,200", True),
+    ("涨幅超预期,520 美元。", "x", False), ("增5%,30%的涨幅。", "5", False), ("跌.5%。", "x", False),
+    ("目标 1,20 美元。", "1", False), ("市盈率 3.14 倍。", "3.14", True),
     ('<at user_id="all">所有人</at>注意。', "x", False), ("统一口径，一季度持平。", "x", True),
 ])
 def test_the_summary_screen(summary, source, kept):
@@ -1085,3 +1087,15 @@ def test_cn_never_suggests_an_order_even_with_execution_state_unknown(tmp_path, 
                tickers=[entry("0981.HK", decide=stage("BUY", arm="brief", pm_rating="Overweight"))])
     out = build(cfg, "cn")
     assert "A股不下单" in out and "执行状态未知" not in out
+
+
+@pytest.mark.unit
+def test_a_summary_may_name_its_own_numeric_ticker(tmp_path, monkeypatch):
+    cfg = config(tmp_path)
+    write_decision(cfg, ticker="0700.HK", session="cn", plan=None, date_iso=DAY.isoformat(), decision="HOLD")
+    decide = stage("HOLD", arm="brief", pm_rating="Hold", run_id=f"{DAY.isoformat()}-cn-0700.HK-brief-1")
+    write_slot(cfg, "cn", briefs={"0700.HK": ticker_brief("0700.HK", 7.0, "neutral — quiet week.")},
+               tickers=[entry("0700.HK", decide=decide)])
+    monkeypatch.setattr(rd, "_run_summary", lambda p: json.dumps(
+        {"macro": "", "tickers": [{"ticker": "0700.HK", "summary": "0700.HK 本周平静。"}]}))
+    assert "  0700.HK 本周平静。" in build(cfg, "cn").splitlines()

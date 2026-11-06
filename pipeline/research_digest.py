@@ -110,7 +110,15 @@ _UNSAFE = re.compile(
 #: numeric exchange symbol (0700.HK, 600256.SS) is not a link.
 _DOMAIN = re.compile(r"(?<![A-Za-z0-9.])(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?![A-Za-z])(?!\.[A-Za-z])")  # whole hosts
 _SYMBOL = re.compile(r"\d+\.(?:HK|SS|SZ|BJ)", re.IGNORECASE)
-_NUMBER = re.compile(r"(?<![\d.,])\d{1,3}(?:,\d{3})+(?:\.\d+)?(?![\d,])|(?<![\d.,])\d+(?:\.\d+)?(?!\d)(?!\.\d)(?!,\d{3})")  # 1,200 is one number
+#: Whole numbers, after _grouped() joined thousands groups (1,200 → 1200):
+#: never a fragment of a decimal, but a figure right after a lone "," or "."
+#: (",520", ".5") is a number of its own and is checked.
+_NUMBER = re.compile(r"(?<!\d)(?<!\d\.)\d+(?:\.\d+)?(?!\d)(?!\.\d)")
+_GROUPED = re.compile(r"(?<=\d),(?=\d{3}(?!\d))")
+
+
+def _grouped(text: str) -> str:
+    return _GROUPED.sub("", text)
 #: The summary call: one small, cheap model; a tight timeout so the digest
 #: never waits long for it (DIGEST_DEADLINE_S in the orchestrator bounds all).
 DIGEST_SUMMARY_MODEL = "claude-haiku-5-5"
@@ -598,14 +606,15 @@ def _screened(summary: str, source: str) -> str | None:
     if any(not _SYMBOL.fullmatch(token) for token in _DOMAIN.findall(text)):
         return None
     # Whole numbers only, and never from a link: a URL's digits vouch for nothing.
-    plain = re.sub(r"https?://\S+", " ", source)
+    plain = _grouped(re.sub(r"https?://\S+", " ", source))
     known = {_canonical(n) for n in _NUMBER.findall(plain)}
     # A translated date: "Nov 6" in the source is 11月6日 in the summary — a
     # month name (a whole word) vouches only for a number written as a month.
     months = {str(month) for month, pattern in _MONTHS.items() if pattern.search(plain)}
-    for match in _NUMBER.finditer(text):
+    grouped = _grouped(text)
+    for match in _NUMBER.finditer(grouped):
         number = _canonical(match.group(0))
-        as_month = text[match.end():match.end() + 1] == "月"
+        as_month = grouped[match.end():match.end() + 1] == "月"
         if number not in known and not (as_month and number in months):
             return None
     return text
@@ -623,7 +632,8 @@ def summaries(macro_text: str | None, items: dict[str, str]) -> tuple[str | None
         macro = _screened(str(output.get("macro") or ""), macro_text or "")
         found = {str(row.get("ticker")): str(row.get("summary") or "")
                  for row in output.get("tickers") or [] if isinstance(row, dict)}
-        kept = {t: text for t, raw in found.items() if t in items and (text := _screened(raw, items[t]))}
+        # The name's own ticker (0700.HK) is part of what it may say.
+        kept = {t: text for t, raw in found.items() if t in items and (text := _screened(raw, f"{t} {items[t]}"))}
         return (macro if macro_text else None), kept
     except Exception as exc:
         logger.warning("research digest: Chinese summaries unavailable (%s)", type(exc).__name__)
