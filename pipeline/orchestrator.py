@@ -512,6 +512,11 @@ LARK_TIMEOUT_S = 10.0
 #: Hard bound on the whole delivery (DNS included) as seen by the slot: the
 #: POST runs on a daemon thread that is abandoned past this.
 LARK_DEADLINE_S = 15.0
+#: A slot alerts on failed analysis runs at this many errors and at least
+#: half of the planned runs (one flaky run is the summary's business).
+ANALYSIS_ALERT_MIN_ERRORS = 3
+ANALYSIS_ERROR_WORDS = {"auth": "API key refused", "credit": "credits exhausted", "timeout": "timed out",
+                        "other": "other errors"}
 #: How long a slot end waits for the research digest (lock + build + send).
 DIGEST_DEADLINE_S = 60.0
 
@@ -1126,7 +1131,30 @@ class Orchestrator:
 
     # -- end of slot --------------------------------------------------------
 
+    def _alert_failed_analysis(self) -> None:
+        """A slot whose analysis runs mostly failed gets its own alert, not
+        just a count inside the summary (2026-10-27..29: every run failed on
+        a refused API key for three slots, read as "run errors 15")."""
+        counts = self._analysis_counts
+        if not counts:
+            return
+        errors, planned = counts.get("errors", 0), counts.get("planned", 0)
+        if errors < ANALYSIS_ALERT_MIN_ERRORS or errors * 2 < planned:
+            return
+        kinds = counts.get("error_kinds") or {}
+        why = ", ".join(f"{ANALYSIS_ERROR_WORDS.get(kind, kind)} {n}"
+                        for kind, n in sorted(kinds.items(), key=lambda kv: -kv[1])) or "unknown"
+        hint = " — check the API keys in .env" if kinds.get("auth") else ""
+        with contextlib.suppress(Exception):
+            self.notifier.notify(
+                "TradingAgents pipeline",
+                f"⚠ analysis {self.session} {self.slot_date.isoformat()}: {errors}/{planned} runs failed "
+                f"({why}){hint}",
+                dedup_key=("analysis-errors", (self.session, self.slot_date.isoformat()), "alert"),
+            )
+
     def _send_research_digest(self) -> None:
+
         """specs/research-digest.md: the slot's research to the trades group,
         once per slot day, after the slot is recorded finished and its lock
         released. Imported lazily, guarded, and bounded by DIGEST_DEADLINE_S
@@ -1202,6 +1230,7 @@ class Orchestrator:
                 message += f"; {self._analysis_llm}"
         if problems:
             message += "; failures: " + ", ".join(problems)
+        self._alert_failed_analysis()
         # End-of-slot summary is always sent (dedup key still guards retries).
         self.notifier.notify(
             "TradingAgents pipeline",
@@ -1477,7 +1506,12 @@ def _analysis_summary_counts(result: RunResult) -> dict[str, int] | None:
         value = summary.get(key)
         return value if isinstance(value, int) else 0
 
-    return {key: count(key) for key in ("planned", "completed", "errors", "invalid_plans", "pairs")}
+    counts = {key: count(key) for key in ("planned", "completed", "errors", "invalid_plans", "pairs")}
+    kinds = summary.get("error_kinds")
+    counts["error_kinds"] = (
+        {str(k): v for k, v in kinds.items() if isinstance(v, int) and v > 0} if isinstance(kinds, dict) else {}
+    )
+    return counts
 
 
 def _analysis_llm_text(result: RunResult) -> str | None:

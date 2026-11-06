@@ -44,6 +44,7 @@ import signal
 import subprocess
 import sys
 import threading
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
@@ -90,6 +91,8 @@ from pipeline.llm_routing import (
 )
 from pipeline.llm_usage import (
     append_usage,
+    error_kind,
+    is_auth_error,
     is_credit_exhausted_error,
     mark_exhausted,
     month_spend,
@@ -1213,6 +1216,13 @@ class _LlmRouter:
         self._lock = threading.Lock()
         self._digests: dict[str, str] = {}
         self.last_decision: RoutingDecision | None = None
+        #: Providers that refused their key this slot (ladder L5): skipped for
+        #: the rest of the slot only — nothing is written for the month.
+        self._auth_failed: set[str] = set()
+
+    def mark_auth_failed(self, provider: str) -> None:
+        with self._lock:
+            self._auth_failed.add(provider)
 
     def choose(self) -> RoutingDecision:
         decision = choose_profile(
@@ -1221,6 +1231,18 @@ class _LlmRouter:
             self.settings.anthropic_monthly_budget_usd,
             self.clock(),
         )
+        with self._lock:
+            failed = set(self._auth_failed)
+        if decision.profile.provider in failed and self.settings.llm_routing in ("ladder", "claude-first"):
+            # Step down past every provider that refused its key this slot;
+            # DeepSeek is the floor (nothing below it) and fixed routings
+            # (claude / deepseek) never move.
+            reason = f"{decision.reason}; {decision.profile.provider} refused its key this slot"
+            if (self.settings.llm_routing == "ladder" and decision.profile.provider == "anthropic"
+                    and "openai" not in failed and self.openai_usable()):
+                decision = replace(decision, profile=OPENAI, reason=reason)
+            elif decision.profile.provider != "deepseek":
+                decision = replace(decision, profile=DEEPSEEK, reason=reason)  # the floor, even if it refused too
         with self._lock:
             self.last_decision = decision
         return decision
@@ -1644,6 +1666,35 @@ def _run_job_impl(
             result = ChildResult(-1, None, f"child runner raised: {exc}")
         exhausted_providers: set[str] = set()
         while (
+            router is not None
+            and profile is not None
+            and result.returncode != 0
+            and is_auth_error(result.error)
+            and profile.provider not in exhausted_providers
+        ):
+            # ladder L5: the provider refused its key — skip it for the rest of
+            # the slot and rerun this run on the next rung (the month is not
+            # marked: a key is fixed by the operator, not by a new month).
+            refused = profile
+            exhausted_providers.add(refused.provider)
+            router.mark_auth_failed(refused.provider)
+            append_usage(
+                config.state_dir, run_id=None, date=date_iso, session=session,
+                ticker=job.ticker, arm=arm, profile=profile.name,
+                models=result.usage or {}, error=result.error, clock=clock,
+            )
+            profile = router.choose().profile
+            if profile.provider in exhausted_providers:
+                break  # nowhere left to go: the ERROR row records the refusal
+            logger.warning("%s: %s refused its API key — retrying on %s",
+                           job.ticker, refused.provider, profile.name)
+            run_digest = router.digest(profile)
+            spec = replace(spec, env=tuple(sorted(profile.env.items())))
+            try:
+                result = child_runner(spec, settings.run_timeout_seconds)
+            except Exception as exc:
+                result = ChildResult(-1, None, f"child runner raised: {exc}")
+        while (
             profile is not None
             and profile.provider in ("anthropic", "openai")
             and result.returncode != 0
@@ -1994,6 +2045,7 @@ def run_slot(
         "planned": sum(len(job.arms) for job in jobs),
         "completed": completed,
         "errors": errors,
+        "error_kinds": dict(Counter(error_kind(line["error"]) for line in run_lines if line["error"] is not None)),
         "invalid_plans": invalid_plans,
         "pairs": sum(1 for job in jobs if job.paired),
         "skipped": skipped,

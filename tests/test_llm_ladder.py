@@ -928,3 +928,72 @@ def test_stale_homes_are_pruned_once_per_call(ladder_cli, monkeypatch):
     seen.clear()
     claude_cli.claude_command("claude-haiku-5-5", "low")
     assert len(seen) == 1
+
+
+AUTH_401 = ("Error code: 401 - {'error': {'message': 'Authentication Fails, Your api key: ****48b5 is invalid', "
+            "'type': 'authentication_error'}}")
+
+
+class RefusingChild(UsageChild):
+    """Providers in ``refuse`` answer every run with a 401."""
+
+    def __init__(self, refuse):
+        super().__init__()
+        self.refuse = set(refuse)
+
+    def __call__(self, spec, timeout):
+        env = dict(spec.env)
+        provider, model = env.get("TRADINGAGENTS_LLM_PROVIDER"), env.get("TRADINGAGENTS_DEEP_THINK_LLM")
+        if provider in self.refuse:
+            self.specs.append(spec)
+            return ar.ChildResult(1, None, AUTH_401, usage=usage_row(model, cost=0.0))
+        result = super().__call__(spec, timeout)
+        return ar.ChildResult(result.returncode, result.payload, result.error, usage=usage_row(model, cost=0.3))
+
+
+@pytest.mark.unit
+def test_a_refused_key_steps_down_for_the_rest_of_the_slot_only(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-proj-test")
+    config, resolvers = _slot(tmp_path)
+    confirm_balance(config.state_dir, MONTH, 71, NOW - timedelta(hours=1))
+    child = RefusingChild({"anthropic"})
+    settings = ar.RunnerSettings(ab_pairing="off", llm_routing="ladder", analysis_job_concurrency=1)
+    outcome, _ = run(config, resolvers, child, settings=settings)
+    providers = [dict(s.env)["TRADINGAGENTS_LLM_PROVIDER"] for s in child.specs]
+    # Job 1: anthropic refuses → reruns on openai; job 2 goes straight to openai.
+    assert providers == ["anthropic", "openai", "openai"]
+    assert outcome.summary["errors"] == 0
+    assert not exhausted_marker(config.state_dir, MONTH).exists()  # a key is not a month
+
+
+@pytest.mark.unit
+def test_every_rung_refusing_ends_in_an_auth_error_row(tmp_path):
+    config, resolvers = _slot(tmp_path)
+    child = RefusingChild({"anthropic", "deepseek"})
+    settings = ar.RunnerSettings(ab_pairing="off", llm_routing="claude-first", analysis_job_concurrency=1)
+    outcome, _ = run(config, resolvers, child, settings=settings)
+    providers = [dict(s.env)["TRADINGAGENTS_LLM_PROVIDER"] for s in child.specs]
+    assert providers == ["anthropic", "deepseek", "deepseek"]  # job 2 skips anthropic, deepseek is the floor
+    assert outcome.summary["errors"] == 2 and outcome.summary["error_kinds"] == {"auth": 2}
+
+
+@pytest.mark.unit
+def test_a_fixed_routing_never_moves_on_a_refused_key(tmp_path):
+    config, resolvers = _slot(tmp_path)
+    child = RefusingChild({"anthropic"})
+    settings = ar.RunnerSettings(ab_pairing="off", llm_routing="claude", analysis_job_concurrency=1)
+    outcome, _ = run(config, resolvers, child, settings=settings)
+    assert {dict(s.env)["TRADINGAGENTS_LLM_PROVIDER"] for s in child.specs} == {"anthropic"}
+    assert outcome.summary["error_kinds"] == {"auth": 2}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("error", "kind"), [
+    (AUTH_401, "auth"), ("invalid x-api-key", "auth"), ("Incorrect API key provided", "auth"),
+    ("Your credit balance is too low", "credit"), ("insufficient_quota", "credit"),
+    ("run timed out after 900s", "timeout"), ("ValueError: boom", "other"), (None, "other"),
+])
+def test_error_kinds(error, kind):
+    from pipeline.llm_usage import error_kind
+
+    assert error_kind(error) == kind

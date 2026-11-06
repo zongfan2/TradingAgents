@@ -176,6 +176,24 @@ includes CLI lines billed `openai-api`; `since` restricts a fold to spend
 after an instant (an unreadable timestamp counts — over-counting is
 budget-safe).
 
+### L5 — A refused key steps down for the slot (2026-11-06)
+
+2026-10-27..29: DeepSeek answered every analysis run with `401 - Authentication
+Fails` for three slots (15–17 ERROR rows each, read only as "run errors 15" in
+the summary). The ladder stepped down only on exhausted credits. Now an
+authentication refusal (`llm_usage.is_auth_error`: `error code: 401`,
+`authentication_error`, `authentication fails`, `invalid x-api-key`,
+`invalid_api_key`, `incorrect api key`, `invalid api key`) under `ladder` or
+`claude-first` marks the provider refused **for the rest of the slot only**
+(the router's in-memory set; nothing is written for the month — a key is
+fixed by the operator, not by a new month) and reruns the run on the next
+rung: Anthropic → OpenAI (ladder, when usable) → DeepSeek; later jobs of the
+slot start on the stepped-down rung. DeepSeek is the floor: a refusal there
+(or on every rung) ends in the ERROR row, kind `auth`. Fixed routings
+(`claude`, `deepseek`) never move. The runner summary gains `error_kinds`
+(`auth` / `credit` / `timeout` / `other`), and the orchestrator alerts on a
+slot whose runs mostly failed (specs/orchestrator.md Notifications).
+
 ## User decisions (2026-11-01)
 
 - **Q1** OpenAI credits are **monthly**; November has only **$71** left.
