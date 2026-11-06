@@ -720,8 +720,8 @@ def entry_zone_reason(plan: TradePlan, quote: Quote | None) -> str | None:
     if not usable(price):
         return "guard-unavailable"
     if price < plan.entry_zone[0] * (1 - ENTRY_ZONE_GAP_TOLERANCE):
-        logger.info("%s: ask %.2f below the entry zone %s — the plan's entry is gone",
-                    plan.action, price, plan.entry_zone)
+        logger.info("BUY price %.2f (ask, else bid) below the entry zone %s — the plan's entry is gone",
+                    price, plan.entry_zone)
         return "below-entry-zone"
     return None
 
