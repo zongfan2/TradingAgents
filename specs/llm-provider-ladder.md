@@ -176,6 +176,31 @@ includes CLI lines billed `openai-api`; `since` restricts a fold to spend
 after an instant (an unreadable timestamp counts — over-counting is
 budget-safe).
 
+### L5 — A refused key steps down for the slot (2026-11-06)
+
+2026-10-27..29: DeepSeek answered every analysis run with `401 - Authentication
+Fails` for three slots (15–17 ERROR rows each, read only as "run errors 15" in
+the summary). The ladder stepped down only on exhausted credits. Now an
+authentication refusal (`llm_usage.is_auth_error`: `error code: 401`,
+`authentication_error`, `authentication fails`, `invalid x-api-key`,
+`invalid_api_key`, `incorrect api key`, `invalid api key`) under `ladder` or
+`claude-first` marks the provider refused **for the rest of the slot only**
+(the router's in-memory set; nothing is written for the month — a key is
+fixed by the operator, not by a new month) and reruns the run on the next
+rung: Anthropic → OpenAI (ladder, when usable) → DeepSeek; later jobs of the
+slot start on the stepped-down rung. DeepSeek is the floor: a refusal there
+(or on every rung) ends in the ERROR row, kind `auth`. Fixed routings
+(`claude`, `deepseek`) never move. The runner summary gains `error_kinds`
+(`auth` / `credit` / `timeout` / `other`), and the orchestrator alerts on a
+slot whose runs mostly failed (specs/orchestrator.md Notifications).
+
+One loop handles both rung failures, in any order (e.g. Anthropic out of
+credits, then OpenAI refusing its key → DeepSeek). Its step-down skips every
+rung the run already failed on and every provider refused earlier in the
+slot, so the floor never climbs back to a refused key. A retried attempt's
+usage is written in the loop and the final attempt once afterwards; when
+nowhere is left the run is recorded on the profile it actually ran on.
+
 ## User decisions (2026-11-01)
 
 - **Q1** OpenAI credits are **monthly**; November has only **$71** left.
@@ -216,4 +241,13 @@ installed version (0.164.0 on 2026-11-01).
    never on argv, each in its own call home whose session files — rollout,
    state databases — are deleted once the call is billed) and log usage
    with `billing: openai-api`, each request priced on its own tier.
-4. `claude-first` behaviour is unchanged.
+4. `claude-first` behaviour is unchanged, except L5 (a refused key steps
+   down to DeepSeek for the rest of the slot).
+5. L5: under `ladder` or `claude-first` an authentication refusal marks the
+   provider refused for the slot only (no month marker) and reruns the run
+   on the next rung; one loop handles exhausted credits and refused keys in
+   any order; the step-down skips every rung the run failed on and every
+   provider refused earlier in the slot (the floor never climbs back); when
+   nowhere is left the ERROR row (kind `auth`) is recorded on the profile
+   that actually ran, its attempt billed once; fixed routings never move;
+   a slot whose runs mostly failed alerts with the error kinds.

@@ -515,6 +515,20 @@ recover a missed slot: `orchestrator run --session <s> --date <d>` (or
 `--from N` if it died mid-slot — the status file names the failed step).
 No catch-up slot is run without explicit authorization.
 
+**"⚠ analysis …: N/M runs failed".** Most analysis runs of a slot ended in
+ERROR. The alert names the kinds: `API key refused` means a provider
+answered 401 — the ladder already stepped down for that slot (Anthropic →
+OpenAI → DeepSeek), but every rung refusing (or a fixed routing) leaves the
+slot without decisions: fix the key in `.env`, then re-run the slot from
+step 6 (`orchestrator run --session <s> --date <d> --from 6`, the session
+and date the alert names) — `--from 6` also reaches step 7: inline it
+submits, deferred it records the skip that re-arms the missed-execute
+watchdog (`--only analysis_runner` would leave recovered plans unexecuted
+with no signal). Past the us execution time, submit with
+`orchestrator execute --now --date <d>` afterwards (without `--date` it
+targets today's New York slot, not the recovered one). `credits
+exhausted` / `timed out` point at the budget and the run timeout.
+
 **Component failure ≠ slot failure.** Every component failure/timeout is
 recorded in the status file and the slot continues, degrading per D12:
 macro eval `fail` ⇒ runs forced to feeds + flagged (no auto-execution);
