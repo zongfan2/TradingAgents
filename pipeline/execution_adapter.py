@@ -697,6 +697,30 @@ def blocking_reason(
 # ---------------------------------------------------------------------------
 
 
+#: S8a: a BUY whose live ask is this far below the plan's entry zone is
+#: skipped — the plan entered at support; a gap through it is a different
+#: setup (2026-10-30: MU zone 925–940, stop 850, filled at 893.92 on a
+#: gap-down; the limit at the zone top fills at once at any lower price).
+ENTRY_ZONE_GAP_TOLERANCE = 0.01
+
+
+def entry_zone_reason(plan: TradePlan, quote: Quote | None) -> str | None:
+    """S8a: ``below-entry-zone`` when the price a BUY would pay (the ask, else
+    the bid) is more than ENTRY_ZONE_GAP_TOLERANCE below the entry zone's
+    low; ``guard-unavailable`` when the quote has no usable price
+    (fail-closed, like every S8 guard); else None."""
+    if quote is None:
+        return "guard-unavailable"
+    price = quote.ask if quote.ask and quote.ask > 0 else quote.bid
+    if not price or price <= 0:
+        return "guard-unavailable"
+    if price < plan.entry_zone[0] * (1 - ENTRY_ZONE_GAP_TOLERANCE):
+        logger.info("%s: ask %.2f below the entry zone %s — the plan's entry is gone",
+                    plan.action, price, plan.entry_zone)
+        return "below-entry-zone"
+    return None
+
+
 def sized_qty(plan: TradePlan, equity: float, settings: AdapterSettings) -> int:
     """``floor(equity × risk_pct/100 / (entry_zone[1] − stop))``, reduced to
     honor the per-order notional cap (S6). 0 after caps ⇒ the caller skips."""
@@ -1261,9 +1285,13 @@ class _SubmitRun:
         if self.snapshot_reason:
             self.skip(record, self.snapshot_reason, cid)
             return
-        guard_reason, _quote = self._ticker_guard(ticker)
+        guard_reason, quote = self._ticker_guard(ticker)
         if guard_reason:
             self.skip(record, guard_reason, cid)
+            return
+        zone_reason = entry_zone_reason(plan, quote)
+        if zone_reason:
+            self.skip(record, zone_reason, cid)
             return
         position = self._position(ticker)
         if position is not None:

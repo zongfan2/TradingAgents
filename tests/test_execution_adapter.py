@@ -2328,3 +2328,31 @@ def test_funnel_rerun_can_upgrade_a_skip_to_submitted(tmp_path):
     submit_slot(config, FakeBroker(), settings=live_settings())
     outcome = current_outcomes(read_events(config.state_dir, "us", SLOT))[("execute", "NVDA")]
     assert (outcome["outcome"], outcome["code"]) == ("passed", "submitted")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("bid", "ask", "submitted", "reason"), [
+    (99.5, 100.0, True, None),          # inside the zone [99, 100]
+    (101.0, 101.5, True, None),         # above: the limit rests for a pullback
+    (97.9, 98.02, True, None),          # within 1 % of the zone low (98.01)
+    (96.0, 96.5, False, "below-entry-zone"),  # gapped through the zone
+    (96.0, 0.0, False, "below-entry-zone"),   # no ask: the bid decides
+    (0.0, 0.0, False, "guard-unavailable"),   # no usable price fails closed
+])
+def test_s8a_a_buy_below_its_entry_zone_is_skipped(tmp_path, bid, ask, submitted, reason):
+    config = make_config(tmp_path)
+    write_decision(config)
+    broker = FakeBroker(quotes={"NVDA": ea.Quote(bid=bid, ask=ask, timestamp=NOW)})
+    submit_slot(config, broker, settings=live_settings())
+    assert bool(broker.submitted) is submitted
+    if reason:
+        assert [(r["kind"], r["reason"]) for r in read_orders(config)] == [("skip", reason)]
+
+
+@pytest.mark.unit
+def test_s8a_the_mu_gap_down_would_have_been_skipped():
+    plan = ea.TradePlan.model_validate({**BUY_PLAN, "entry_zone": [925.0, 940.0], "stop": 850.0,
+                                        "targets": [980.38, 1105.55]})
+    gap = ea.Quote(bid=893.5, ask=893.92, timestamp=NOW)
+    assert ea.entry_zone_reason(plan, gap) == "below-entry-zone"
+    assert ea.entry_zone_reason(plan, ea.Quote(bid=929.0, ask=930.0, timestamp=NOW)) is None
