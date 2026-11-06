@@ -42,6 +42,9 @@ Safety invariants (spec S1-S9, each individually tested):
 - S8a entry-zone guard: a BUY whose lower usable quote side is more than
       1 % below the plan's entry zone skips ``below-entry-zone`` (a gap
       through the zone is another setup); an unusable quote fails closed.
+- S8b reward/risk gate: a BUY whose first target pays less than
+      MIN_REWARD_RISK times its risk, both from the limit (the zone top),
+      skips ``low-reward-risk``.
 - S9  portfolio constraints: BUY on a held ticker without ``add_intent`` is a
       ``maintain`` skip; add-on tranches gated by tranche cap / pyramid-up /
       trading-day spacing / per-ticker notional (each violation its own skip
@@ -732,6 +735,33 @@ def entry_zone_reason(plan: TradePlan, quote: Quote | None) -> str | None:
     return None
 
 
+#: S8b (user decision 2026-11-06, reviewed again after two weeks of data):
+#: the first target must pay at least this multiple of the risk. Replaying
+#: the 80 fillable US BUY plans 2026-08-10..11-06 on daily bars, plans under
+#: 1.0 averaged -0.18 R and plans at or above it +0.52 R.
+MIN_REWARD_RISK = 1.0
+
+
+def reward_risk(plan: TradePlan) -> float | None:
+    """(targets[0] - limit) / (limit - stop), the limit being the zone top
+    the bracket is placed at; None when the risk is not positive."""
+    limit = plan.entry_zone[1]
+    risk = limit - plan.stop
+    return (plan.targets[0] - limit) / risk if risk > 0 else None
+
+
+def reward_risk_reason(plan: TradePlan) -> str | None:
+    """S8b: ``low-reward-risk`` when the first target pays less than
+    MIN_REWARD_RISK times the risk; else None."""
+    ratio = reward_risk(plan)
+    if ratio is None or ratio < MIN_REWARD_RISK - 1e-9:
+        logger.info("BUY reward/risk %s below %.2f (limit %.2f, stop %.2f, first target %.2f)",
+                    "n/a" if ratio is None else f"{ratio:.2f}", MIN_REWARD_RISK,
+                    plan.entry_zone[1], plan.stop, plan.targets[0])
+        return "low-reward-risk"
+    return None
+
+
 def sized_qty(plan: TradePlan, equity: float, settings: AdapterSettings) -> int:
     """``floor(equity × risk_pct/100 / (entry_zone[1] − stop))``, reduced to
     honor the per-order notional cap (S6). 0 after caps ⇒ the caller skips."""
@@ -1307,6 +1337,10 @@ class _SubmitRun:
         zone_reason = entry_zone_reason(plan, quote)
         if zone_reason:
             self.skip(record, zone_reason, cid)
+            return
+        rr_reason = reward_risk_reason(plan)
+        if rr_reason:
+            self.skip(record, rr_reason, cid)
             return
         if position is not None:
             addon_reason = self._addon_pre_reason(plan, position)

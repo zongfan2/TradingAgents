@@ -2399,3 +2399,49 @@ def test_s8a_applies_to_the_manual_path_and_reaches_the_funnel(tmp_path):
     write_decision(config2)
     submit_slot(config2, FakeBroker(quotes={"NVDA": GAPPED}), settings=live_settings())
     assert funnel_rows(config2) == [("NVDA", "excluded", "below-entry-zone")]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("targets", "submitted"), [
+    ([110.0, 120.0], True),    # exactly 1 R from the limit: passes
+    ([109.0, 125.0], False),   # 0.9 R on the first target, whatever the second
+    ([115.0], True),
+])
+def test_s8b_a_first_target_under_one_r_is_skipped(tmp_path, targets, submitted):
+    config = make_config(tmp_path)
+    write_decision(config, plan={**BUY_PLAN, "targets": targets})
+    broker = FakeBroker()
+    submit_slot(config, broker, settings=live_settings())
+    assert bool(broker.submitted) is submitted
+    if not submitted:
+        assert [(r["kind"], r["reason"]) for r in read_orders(config)] == [("skip", "low-reward-risk")]
+        assert funnel_rows(config) == [("NVDA", "excluded", "low-reward-risk")]
+
+
+@pytest.mark.unit
+def test_s8b_the_msft_plan_of_11_06_would_have_been_skipped():
+    plan = ea.TradePlan.model_validate({**BUY_PLAN, "entry_zone": [516.13, 531.07], "stop": 500.0,
+                                        "targets": [551.61, 559.15]})
+    assert round(ea.reward_risk(plan), 2) == 0.66 and ea.reward_risk_reason(plan) == "low-reward-risk"
+
+
+@pytest.mark.unit
+def test_s8b_guards_add_ons_and_the_manual_path_and_keeps_maintain(tmp_path):
+    low = {**BUY_PLAN, "targets": [105.0, 130.0]}
+    config = make_config(tmp_path)
+    broker = addon_scenario(config)
+    write_decision(config, plan={**ADDON_PLAN, "targets": [105.0, 130.0]}, n=10)  # latest attempt: an add-on
+    submit_slot(config, broker, settings=live_settings())
+    assert broker.submitted == [] and read_orders(config)[-1]["reason"] == "low-reward-risk"
+
+    config2 = make_config(tmp_path / "manual")
+    row = write_decision(config2, plan=low, n=1, trigger="manual")
+    broker2 = FakeBroker()
+    submit_slot(config2, broker2, settings=live_settings(), run_id=row["run_id"], execute=True)
+    assert broker2.submitted == [] and read_orders(config2)[-1]["reason"] == "low-reward-risk"
+
+    config3 = make_config(tmp_path / "maintain")
+    broker3 = addon_scenario(config3)
+    write_decision(config3, plan=low, n=10)  # held, no add_intent: a view refresh
+    submit_slot(config3, broker3, settings=live_settings())
+    assert broker3.submitted == [] and read_orders(config3)[-1]["reason"] == "maintain"
