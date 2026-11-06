@@ -131,6 +131,14 @@ CORE_SKIP_UNCHANGED_ENV = "TRADINGAGENTS_CORE_SKIP_UNCHANGED"
 #: A core ticker skipped as unchanged still gets a full run once its last
 #: HOLD is older than this many trading days (weekly refresh).
 CORE_UNCHANGED_MAX_AGE = 4
+#: ...and at once when its price moved since that HOLD (specs/llm-cost.md R6,
+#: 2026-11-06: on 11-05 nine core names were skipped as "unchanged" after
+#: −7%/−8% sessions, the day before a −17%/−22% one): any session at or
+#: beyond CORE_MOVE_SESSION_PCT, or a total at or beyond CORE_MOVE_TOTAL_PCT.
+CORE_MOVE_SESSION_PCT = 5.0
+CORE_MOVE_TOTAL_PCT = 8.0
+#: Sessions read for the move (the HOLD is at most CORE_UNCHANGED_MAX_AGE old).
+_MOVE_SESSIONS = 15
 ANTHROPIC_BUDGET_ENV = "TRADINGAGENTS_ANTHROPIC_MONTHLY_BUDGET_USD"
 
 _AB_PAIRING_CHOICES = ("off", "paired")
@@ -903,6 +911,32 @@ def _weekdays_between(start: date, end: date) -> int:
     )
 
 
+PriceMove = Callable[[str, date, date], "tuple[float, float] | None"]
+
+
+def price_move_since(ticker: str, since: date, slot_date: date) -> tuple[float, float] | None:
+    """``(largest |session change| %, |total change| %)`` over the sessions
+    on or after ``since`` (the HOLD was decided before that day's open) and
+    before ``slot_date``; None when the move is unknown — no data, a tape
+    behind the last weekday, no session before ``since``, or a gap (a
+    missing or unusable close) among them."""
+    from pipeline import price_tape
+
+    rows = price_tape.tape_rows(price_tape.fetch_daily_closes(ticker), slot_date, sessions=_MOVE_SESSIONS)
+    if not rows or rows[-1][0] < price_tape.previous_weekday(slot_date):
+        return None
+    base = [r for r in rows if r[0] < since]
+    after = [r for r in rows if r[0] >= since]
+    if not base:
+        return None
+    if not after:
+        return 0.0, 0.0
+    if any(pct is None for _day, _close, pct in after):
+        return None
+    largest = max(abs(pct) for _day, _close, pct in after)
+    return largest, abs(after[-1][1] / base[-1][1] - 1) * 100
+
+
 def select_core_runs(
     core_tickers: Sequence[str],
     *,
@@ -912,6 +946,7 @@ def select_core_runs(
     decision_rows: Sequence[Mapping],
     positions: PositionsSnapshot | None,
     inspect_ticker: Callable[[str], BriefInfo],
+    price_move: PriceMove | None = None,
 ) -> tuple[list[str], list[tuple[str, str, str, dict]]]:
     """specs/llm-cost.md R6: the core tickers to analyse this slot, and the
     skipped ones as ``(ticker, code, reason, details)`` funnel entries.
@@ -922,9 +957,13 @@ def select_core_runs(
       its latest scheduled brief-arm decision is a HOLD at most
       ``CORE_UNCHANGED_MAX_AGE`` trading days old; today's brief exists, its
       eval is ``pass``/``warn`` and its catalyst score is below the trigger
-      threshold. Any doubt (no or stale snapshot, no prior decision, no
-      brief, no score, eval ``fail``/missing) runs it.
+      threshold; and its price has not moved since that HOLD (no session
+      at or beyond ``CORE_MOVE_SESSION_PCT``, total below
+      ``CORE_MOVE_TOTAL_PCT``). Any doubt (no or stale snapshot, no prior
+      decision, no brief, no score, eval ``fail``/missing, an unknown price
+      move) runs it.
     """
+    price_move = price_move or price_move_since
     if session not in settings.core_analysis_sessions:
         reason = f"core analysis off for {session} (catalyst-only session)"
         return [], [(t, "core-session-off", reason, {}) for t in core_tickers]
@@ -986,12 +1025,27 @@ def select_core_runs(
         ):
             run.append(ticker)
             continue
+        try:
+            move = price_move(ticker, last, slot_date)
+        except Exception as exc:  # no price data is doubt, and runs
+            logger.warning("%s: price move unknown (%s) — runs", ticker, type(exc).__name__)
+            move = None
+        # Judged as shown (2 decimals), like the tape's ⚠: never a 5.00% skip.
+        if (move is None or round(move[0], 2) >= CORE_MOVE_SESSION_PCT
+                or round(move[1], 2) >= CORE_MOVE_TOTAL_PCT):
+            logger.info("%s: core run despite an unchanged HOLD — price move %s since %s", ticker,
+                        "unknown" if move is None else f"{move[0]:.2f}% max session, {move[1]:.2f}% total",
+                        row["date"])
+            run.append(ticker)
+            continue
         skipped.append((
             ticker,
             "core-unchanged",
             f"HOLD on {row['date']} ({age} trading day(s) ago), no position, "
-            f"brief catalyst {score:g} < trigger {threshold:g} (eval {info.verdict})",
-            {"last_decision_date": row["date"], "age": age, "score": score, "threshold": threshold},
+            f"brief catalyst {score:g} < trigger {threshold:g} (eval {info.verdict}), "
+            f"price moved {move[1]:.2f}% since (max session {move[0]:.2f}%)",
+            {"last_decision_date": row["date"], "age": age, "score": score, "threshold": threshold,
+             "max_session_move_pct": round(move[0], 2), "total_move_pct": round(move[1], 2)},
         ))
     return run, skipped
 

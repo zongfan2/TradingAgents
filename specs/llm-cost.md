@@ -156,9 +156,21 @@ caches common prefixes automatically. Behavior is otherwise unchanged
   run at least weekly); it has no scheduled row today yet (a same-day rerun
   is left to the already-done rule); today's brief exists, its eval is
   `pass`/`warn` and its catalyst score is below the trigger threshold (no
-  brief, no score or a failed/missing eval is doubt). Any doubt runs the
+  brief, no score or a failed/missing eval is doubt); **and its price has
+  not moved since that HOLD** (2026-11-06, after nine core names were
+  skipped on 11-05 following −7%/−8% sessions, the day before a −17%/−22%
+  one): over the sessions on or after the HOLD's date (it was decided
+  before that day's open) and before the slot date, no session change
+  reaches `CORE_MOVE_SESSION_PCT` = 5 % (the price tape's ⚠ level; both bars
+  are judged on the value rounded to 2 decimals, as the tape shows it) and the
+  total change from the last close before the HOLD stays below
+  `CORE_MOVE_TOTAL_PCT` = 8 %; daily closes from the price tape's source
+  (`price_tape.fetch_daily_closes`). No data, a read failure, a tape behind
+  the last weekday, no session before the HOLD, a split (the tape refuses
+  one) or a gap among the sessions is doubt. Any doubt runs the
   ticker. Funnel trigger code
-  `core-unchanged` (excluded) with the age, score and threshold.
+  `core-unchanged` (excluded) with the age, score, threshold and the
+  largest session / total move.
   `TRADINGAGENTS_CORE_SKIP_UNCHANGED=on|off` (default off). Both settings
   are part of the config digest.
 
