@@ -176,6 +176,16 @@ includes CLI lines billed `openai-api`; `since` restricts a fold to spend
 after an instant (an unreadable timestamp counts — over-counting is
 budget-safe).
 
+### L1a — The console's usage limit is exhausted credits (2026-11-07)
+
+2026-11-06: Anthropic answered "You have reached your specified API usage
+limits. You will regain access on 2026-12-01" — the account's own spend
+limit in the console, lower than the ladder's budget — and, read as a plain
+error, it stepped nothing down: runs failed instead of moving to OpenAI. The
+message now counts as exhausted credits (`CREDIT_EXHAUSTED_MARKERS`): the
+month is marked and the ladder steps down (analysis and CLI alike). Its
+reset date is the next month, which is exactly the marker's scope.
+
 ### L5 — A refused key steps down for the slot (2026-11-06)
 
 2026-10-27..29: DeepSeek answered every analysis run with `401 - Authentication

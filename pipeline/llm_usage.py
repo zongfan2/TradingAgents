@@ -32,7 +32,12 @@ logger = logging.getLogger(__name__)
 USAGE_SCHEMA = 1
 USAGE_NAME = "llm_usage.jsonl"
 BUDGET_DIRNAME = "llm_budget"
-CREDIT_EXHAUSTED_MARKERS = ("credit balance is too low", "credit balance too low")
+#: Anthropic refusing for the rest of the month: exhausted credits, or the
+#: console's own spend limit (2026-11-06: "You have reached your specified API
+#: usage limits. You will regain access on 2026-12-01" — read as a plain error,
+#: it stepped nothing down and the runs failed).
+CREDIT_EXHAUSTED_MARKERS = ("credit balance is too low", "credit balance too low",
+                            "reached your specified api usage limits")
 
 
 @dataclass(frozen=True)
