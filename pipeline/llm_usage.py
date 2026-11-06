@@ -500,6 +500,33 @@ OPENAI_QUOTA_MARKERS = (
 )
 
 
+#: A provider refusing the key itself (2026-10-27..29: DeepSeek answered
+#: "401 - Authentication Fails" to every run for three slots). Unlike
+#: exhausted credits this says nothing about the month: the provider is only
+#: skipped for the rest of the slot (llm-provider-ladder L5).
+AUTH_ERROR_MARKERS = (
+    "error code: 401", "authentication_error", "authentication fails", "invalid x-api-key",
+    "invalid_api_key", "incorrect api key", "invalid api key",
+)
+
+
+def is_auth_error(error: str | None) -> bool:
+    text = (error or "").lower()
+    return any(marker in text for marker in AUTH_ERROR_MARKERS)
+
+
+def error_kind(error: str | None) -> str:
+    """``auth`` | ``credit`` | ``timeout`` | ``other`` — for the slot alert."""
+    text = (error or "").lower()
+    if is_auth_error(text):
+        return "auth"
+    if any(m in text for m in CREDIT_EXHAUSTED_MARKERS + OPENAI_QUOTA_MARKERS):
+        return "credit"
+    if "timed out" in text or "timeout" in text:
+        return "timeout"
+    return "other"
+
+
 def is_credit_exhausted_error(error: str | None, provider: str = "anthropic") -> bool:
     text = (error or "").lower()
     markers = OPENAI_QUOTA_MARKERS if provider == "openai" else CREDIT_EXHAUSTED_MARKERS

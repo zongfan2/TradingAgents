@@ -73,6 +73,19 @@ included — constructs a broker client.
   inclusive interval `[0, max_quote_age]`. Apply the same rule to close
   re-submission in `refresh`; a guard rejection does not consume its once-only
   retry. Existing naive timestamps retain their UTC interpretation.
+- **S8a — Entry-zone guard** (BUY entries and add-ons, after the S8
+  guards and after S9's `maintain` — a held name without `add_intent` is a
+  view refresh, never an entry attempt, 2026-11-06): the lower usable side of the live
+  quote (ask or bid — the quote feed is one venue, IEX, so a wide quote's
+  ask can sit in the zone while the market trades below it) more than 1 %
+  below the plan's `entry_zone[0]` skips the order,
+  reason `below-entry-zone`. The bracket's limit sits at the zone top, so a
+  gap below the zone would otherwise fill at once at the lower price:
+  2026-10-30 MU (zone 925–940, stop 850) filled at 893.92 on a gap-down,
+  5 % above its stop with the setup it was planned on broken. A quote with
+  no usable price (missing, non-positive or non-finite) fails closed
+  (`guard-unavailable`). A price above the
+  zone is unchanged: the limit rests until a pullback.
 - **S9 — Portfolio constraints**:
   - A BUY for a held ticker without `add_intent` ⇒ skip (`maintain`) — not an
     error; the plan is a view refresh, not an order.
@@ -165,7 +178,10 @@ included — constructs a broker client.
    (manual-trigger exclusion, short-block, close-qty clamp), S6 caps counting
    pending entries incl. the gross-exposure ceiling, S8 market-state guards
    (closed day, non-tradable asset, stale quote, guard-unavailable each ⇒ the
-   right skip reason), S9 add-on rules (maintain skip without add_intent;
+   right skip reason), S8a (a quote gapped below the entry zone ⇒
+   `below-entry-zone` for entries, add-ons and the manual path; inside or
+   above the zone ⇒ submitted; an unusable or non-finite quote ⇒
+   `guard-unavailable`; a held name without `add_intent` stays `maintain`), S9 add-on rules (maintain skip without add_intent;
    tranche cap, pyramid-up, spacing, and per-ticker notional each
    individually violated ⇒ its specific skip) plus buying-power / total-risk
    skips, sizing math incl. cap reduction and qty-0 skip.

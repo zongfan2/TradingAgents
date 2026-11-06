@@ -1630,7 +1630,8 @@ def test_analysis_runner_outcome_mapper():
     counts = orchestrator._analysis_summary_counts(
         R(0, stdout=analysis_summary(planned=6, completed=4, errors=2, invalid_plans=1) + "\n")
     )
-    assert counts == {"planned": 6, "completed": 4, "errors": 2, "invalid_plans": 1, "pairs": 0}
+    assert counts == {"planned": 6, "completed": 4, "errors": 2, "invalid_plans": 1, "pairs": 0,
+                      "error_kinds": {}}
     assert orchestrator._analysis_summary_counts(R(0, stdout="not json\n")) is None
 
 
@@ -2217,3 +2218,22 @@ def test_a_refused_digest_is_resent_hourly_without_the_broker(tmp_path, monkeypa
     monkeypatch.setattr(trade_notify, "alpaca_keys", lambda: (_ for _ in ()).throw(RuntimeError("no keys")))
     orchestrator._hourly_trade_notifications(config, NOW)
     assert sent == ["digest"] and trade_notify.SentStore(config.state_dir).outbox() == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("planned", "errors", "alerted"), [(17, 17, True), (6, 3, True), (7, 3, False), (2, 2, False)])
+def test_a_slot_whose_analysis_mostly_failed_gets_its_own_alert(tmp_path, planned, errors, alerted):
+    config = make_config(tmp_path)
+    write_eval(config, "us", SLOT_DATE)
+    summary = json.loads(analysis_summary(planned=planned, completed=planned - errors, errors=errors))
+    summary["error_kinds"] = {"auth": errors}
+    runner = FakeRunner({
+        "ticker_collectors": orchestrator.RunResult(0, stdout=ticker_summary() + "\n"),
+        "analysis_runner": orchestrator.RunResult(0, stdout=json.dumps(summary) + "\n"),
+    })
+    notifier, sent = recording_notifier()
+    run_default_slot(config, "us", runner, notifier=notifier)
+    alerts = [m for m in (" ".join(argv) for argv in sent) if "runs failed" in m]
+    assert bool(alerts) is alerted
+    if alerted:
+        assert f"{errors}/{planned} runs failed (API key refused {errors}) — check the API keys in .env" in alerts[0]

@@ -210,7 +210,10 @@ webui reads both.
 ## Notifications
 
 - Desktop notification on: any component `failed`/`timeout`, any
-  eval `fail` verdict, any broker `rejected`/`canceled` surfaced by refresh,
+  eval `fail` verdict, a slot whose analysis runs mostly failed (≥ 3
+  ERROR rows and at least half the planned runs — its own alert with the
+  runner's `error_kinds`, "check the API keys" when keys were refused,
+  specs/llm-provider-ladder.md L5; the runner component stays `warn`), any broker `rejected`/`canceled` surfaced by refresh,
   the watchdog's missed-slot alert, and (always) an end-of-slot summary —
   plans produced, orders submitted/dry-run, pairs run, failures. On macOS
   it is `osascript` `display notification`; under WSL (`WSL_DISTRO_NAME`
