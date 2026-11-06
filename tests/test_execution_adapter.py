@@ -2390,7 +2390,7 @@ def test_s8a_guards_add_ons_and_keeps_maintain_for_a_held_view_refresh(tmp_path)
 @pytest.mark.unit
 def test_s8a_applies_to_the_manual_path_and_reaches_the_funnel(tmp_path):
     config = make_config(tmp_path)
-    row = write_decision(config, n=1)
+    row = write_decision(config, n=1, trigger="manual")  # a real manual run: submit --run-id --execute
     broker = FakeBroker(quotes={"NVDA": GAPPED})
     submit_slot(config, broker, settings=live_settings(), run_id=row["run_id"], execute=True)
     assert broker.submitted == [] and read_orders(config)[-1]["reason"] == "below-entry-zone"

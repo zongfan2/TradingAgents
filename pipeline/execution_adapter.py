@@ -700,7 +700,7 @@ def blocking_reason(
 # ---------------------------------------------------------------------------
 
 
-#: S8a: a BUY whose live ask is this far below the plan's entry zone is
+#: S8a: a BUY whose lower quote side (ask or bid) is this far below the plan's entry zone is
 #: skipped — the plan entered at support; a gap through it is a different
 #: setup (2026-10-30: MU zone 925–940, stop 850, filled at 893.92 on a
 #: gap-down; the limit at the zone top fills at once at any lower price).
