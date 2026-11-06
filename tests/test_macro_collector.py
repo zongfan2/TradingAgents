@@ -670,3 +670,22 @@ def test_module_invocable_via_python_dash_m():
     assert proc.returncode == 0
     assert "--session" in proc.stdout
     assert "--backend" in proc.stdout
+
+
+@pytest.mark.unit
+def test_the_coverage_rules_are_in_both_session_prompts(brief_dir):
+    for session in ("cn", "us"):
+        runner = FakeRunner([make_brief(session=session)])
+        collect(session, as_of=AS_OF, runner=runner)
+        prompt = " ".join(runner.calls[0][1].split())
+        for clause in ("after the previous session's close and before today's open",
+                       "if you found none, say which names you searched",
+                       "second-order effects on the sectors it touches",
+                       "for `us`, US index futures and the largest pre-market movers",
+                       "for `cn`, the last US session's close and after-hours movers and the Asian index "
+                       "futures before the open",
+                       "each with its stated reason, or say it was not found",
+                       "Name each report you found with its date, the guidance versus consensus and the move",
+                       "Sections 1–6 each end with `**Impact**: bullish|bearish|neutral|mixed"):
+            assert clause in prompt, (session, clause)
+        assert "{{" not in prompt

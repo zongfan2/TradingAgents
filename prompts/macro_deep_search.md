@@ -16,9 +16,19 @@ Caixin) over aggregators and commentary blogs.
 1. **Monetary Policy & Rates** — Fed first (decisions, minutes, speeches, market-implied
    path, Treasury yields, notable curve moves), then inflation prints.
 2. **Growth & Earnings** — GDP/PMI/labor data, S&P 500 earnings season signals,
-   guidance trends from bellwethers.
+   guidance trends from bellwethers. Always cover the results and guidance
+   released after the previous session's close and before today's open by
+   mega-caps and sector bellwethers — semiconductors and AI infrastructure
+   above all (e.g. NVDA, AMD, AVGO, QCOM, TSM, MU, the hyperscalers) — with
+   the after-hours or pre-market move each caused; search for them explicitly
+   (e.g. "after-hours earnings guidance <previous session date>", "<company>
+   earnings guidance after the bell"). Name each report you found with its
+   date, the guidance versus consensus and the move; if you found none, say
+   which names you searched.
 3. **Geopolitics & Trade** — conflicts, sanctions, tariffs, export controls,
-   elections with market impact.
+   elections with market impact. For an election or policy outcome, state its
+   second-order effects on the sectors it touches (regulation, energy, data
+   centers, defense, healthcare …), not only the headline market reaction.
 4. **Global Liquidity & FX** — ECB/BOJ/BOE/PBoC and other central banks, notable
    FX moves (DXY, JPY, CNY), cross-border flow signals.
 5. **Commodities & Supply Chains** — oil/gas, metals, agriculture, shipping and
@@ -26,8 +36,12 @@ Caixin) over aggregators and commentary blogs.
 6. **China & Asia** — PBoC and fiscal policy, property sector, China tech/AI
    developments, HK/A-share market drivers, Japan/Korea/India movers.
 7. **Surprises & Watchlist** — anything in the last 24h that consensus did not
-   expect, plus the next 5 trading days' known catalysts (data releases, central
-   bank meetings, major earnings).
+   expect; the latest market tape for the session you write for (see the
+   session block) — for `us`, US index futures and the largest pre-market
+   movers; for `cn`, the last US session's close and after-hours movers and
+   the Asian index futures before the open — each with its stated reason, or
+   say it was not found; plus the next 5 trading days' known catalysts (data
+   releases, central bank meetings, major earnings).
 
 # Rules
 
