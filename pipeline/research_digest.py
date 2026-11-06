@@ -97,7 +97,7 @@ _UNSAFE = re.compile(
     re.IGNORECASE)
 #: Domain-like tokens (ASCII, so CJK neighbours do not hide one); only a
 #: numeric exchange symbol (0700.HK, 600256.SS) is not a link.
-_DOMAIN = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9-]+\.[A-Za-z]{2,}(?![A-Za-z])")
+_DOMAIN = re.compile(r"(?<![A-Za-z0-9.])(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?![A-Za-z.])")  # whole multi-label hosts
 _SYMBOL = re.compile(r"\d+\.(?:HK|SS|SZ|BJ)", re.IGNORECASE)
 _NUMBER = re.compile(r"(?<![\d.])\d+(?:\.\d+)?(?!\d)(?!\.\d)")  # "520." is 520
 #: The summary call: one small, cheap model; a tight timeout so the digest
@@ -401,7 +401,14 @@ class _Ticker:
             # The brief arm's own outcome: the stage keeps the first event of
             # its strongest outcome, which can be the feeds arm's skip.
             events = [e for e in execute.get("events") or [] if isinstance(e, dict)]
-            brief = [e for e in events if isinstance(e.get("details"), dict) and e["details"].get("arm") == "brief"]
+            decided_run = ((self.decide or {}).get("details") or {}).get("run_id")
+            # An outcome event of the brief arm — never an info event such as
+            # the `superseded` note on an older attempt — preferring the run
+            # this digest shows.
+            brief = [e for e in events if isinstance(e.get("details"), dict) and e["details"].get("arm") == "brief"
+                     and e.get("code") != "superseded" and e.get("outcome") != "info"]
+            own = [e for e in brief if e["details"].get("run_id") in (None, decided_run)]
+            brief = own or brief
             decided_arm = ((self.decide or {}).get("details") or {}).get("arm")
             stage_arm = (execute.get("details") or {}).get("arm") if isinstance(execute.get("details"), dict) else None
             if brief:

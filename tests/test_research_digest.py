@@ -565,7 +565,7 @@ def test_a_brief_the_pm_never_read_is_never_summarized_as_its_reason(tmp_path, m
     ("详见 evil.hk/x。", "x", False), ("三分之一的收入。", "x", False), ("五億美元。", "x", False),
     ("详见 0700.hk/login。", "0700.HK", False), ("目标价九港元。", "x", False), ("九块钱。", "x", False),
     ("五欧元。", "x", False), ("详见 1.2.3.4/login。", "x", False), ("目标 520.5.1。", "x", False),
-    ("详见 例子.com。", "x", False),
+    ("详见 例子.com。", "x", False), ("详见 0700.hk.de。", "0700.HK", False), ("详见 evil.0700.hk。", "0700.HK", False),
     ('<at user_id="all">所有人</at>注意。', "x", False), ("统一口径，一季度持平。", "x", True),
 ])
 def test_the_summary_screen(summary, source, kept):
@@ -1013,3 +1013,24 @@ def test_after_execution_a_missing_brief_arm_outcome_is_undetermined(tmp_path, l
     text = build(cfg, "us")
     assert "→ 看多（PM 看多；下单结果待核实）" in text and "已执行：待核实：NVDA" in text.splitlines()[0]
     assert "对照分析" not in text and "无下单" not in text
+
+
+@pytest.mark.unit
+def test_a_superseded_note_never_stands_for_the_brief_arms_outcome(tmp_path, live):
+    cfg = config(tmp_path)
+    book(cfg)
+    decided(cfg, "NVDA", "BUY", "Overweight")
+    decide = decided(cfg, "NVDA", "BUY", "Overweight", n=2)
+    row = {**entry("NVDA", decide=decide), "final": "excluded"}
+    row["stages"]["execute"] = {
+        "code": "feeds-arm", "outcome": "excluded", "details": {"arm": "feeds"},
+        "events": [{"code": "superseded", "outcome": "info",
+                    "details": {"arm": "brief", "run_id": f"{DAY.isoformat()}-us-NVDA-brief-1"}},
+                   {"code": "feeds-arm", "outcome": "excluded", "details": {"arm": "feeds"}}]}
+    write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "m — m.")}, tickers=[row])
+    path = cfg.state_dir / "funnel" / "us" / f"{DAY}.json"
+    snap = json.loads(path.read_text())
+    snap["context"] = {"execute_ran": True}
+    path.write_text(json.dumps(snap), encoding="utf-8")
+    text = build(cfg, "us")
+    assert "下单结果待核实" in text and "已执行：待核实：NVDA" in text.splitlines()[0] and "无下单" not in text

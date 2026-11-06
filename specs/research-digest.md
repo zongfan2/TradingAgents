@@ -108,7 +108,9 @@ line) was hard to read: the user asked why a name with no position was
     header as `待核实：X` — including any scheduled BUY/SELL ledger row of the
     slot that the (valid) snapshot does not show (an older snapshot kept when
     a rebuild failed). After execution the reason is the brief arm's own
-    execute event (the stage may hold the feeds arm's); a brief-arm
+    outcome event (the stage may hold the feeds arm's; info events such as
+    an older attempt's `superseded` note never count; the shown run's event
+    first); a brief-arm
     decision whose execute stage holds only the feeds arm's outcome reads
     `下单结果待核实` (the brief arm's outcome is unknown). A brief-arm run whose ticker or macro evaluation failed adds
     `；简报未采用（评估 fail）` (the brief was withheld). PM ratings in words: Buy 强烈看多 · Overweight 看多 ·
@@ -142,7 +144,8 @@ line) was hard to read: the user asked why a name with no position was
   (持有/减持/增持/评级/买入/买进/卖出/抛售/加仓/增仓/减仓/建仓/清仓/平仓/做空/做多/
   下单/止损/止盈/HOLD/BUY/SELL), exceeds 60 characters, or holds a whole number its source
   (links removed) does not, or contains — case-insensitively — a link or any domain-like token
-  (only a numeric exchange symbol such as `0700.HK` excepted), markup (a Lark `<at>`
+  (whole multi-label hosts; only a numeric exchange symbol such as
+  `0700.HK` standing alone is excepted), markup (a Lark `<at>`
   mention) or a figure in Chinese numerals (two or more numeral
   characters incl. traditional 萬/億, 百分之… / …分之…, …成, …个百分点, a
   numeral before any currency unit: 美元/美分/港元/港币/欧元/日元/英镑/人民币/
