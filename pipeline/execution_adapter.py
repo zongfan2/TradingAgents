@@ -39,6 +39,9 @@ Safety invariants (spec S1-S9, each individually tested):
       asset tradability, quote freshness (``max_quote_age_minutes``); ANY
       guard source error ⇒ skip ``guard-unavailable`` — never submit on
       missing information.
+- S8a entry-zone guard: a BUY whose lower usable quote side is more than
+      1 % below the plan's entry zone skips ``below-entry-zone`` (a gap
+      through the zone is another setup); an unusable quote fails closed.
 - S9  portfolio constraints: BUY on a held ticker without ``add_intent`` is a
       ``maintain`` skip; add-on tranches gated by tranche cap / pyramid-up /
       trading-day spacing / per-ticker notional (each violation its own skip
@@ -697,6 +700,38 @@ def blocking_reason(
 # ---------------------------------------------------------------------------
 
 
+#: S8a: a BUY whose lower quote side (ask or bid) is this far below the plan's entry zone is
+#: skipped — the plan entered at support; a gap through it is a different
+#: setup (2026-10-30: MU zone 925–940, stop 850, filled at 893.92 on a
+#: gap-down; the limit at the zone top fills at once at any lower price).
+ENTRY_ZONE_GAP_TOLERANCE = 0.01
+
+
+def entry_zone_reason(plan: TradePlan, quote: Quote | None) -> str | None:
+    """S8a: ``below-entry-zone`` when the lower usable side of the quote (ask
+    or bid) is more than ENTRY_ZONE_GAP_TOLERANCE below the entry zone's
+    low; ``guard-unavailable`` when the quote has no usable price
+    (fail-closed, like every S8 guard); else None."""
+    if quote is None:
+        return "guard-unavailable"
+    def usable(value: float | None) -> bool:
+        return value is not None and math.isfinite(value) and value > 0
+
+    if any(value is not None and not math.isfinite(value) for value in (quote.ask, quote.bid)):
+        return "guard-unavailable"  # a NaN/inf field: the quote itself is corrupt
+    prices = [value for value in (quote.ask, quote.bid) if usable(value)]
+    if not prices:
+        return "guard-unavailable"
+    # The lower side: the quote feed is one venue (IEX), so a wide quote's ask
+    # can sit inside the zone while the market trades far below it.
+    price = min(prices)
+    if price < plan.entry_zone[0] * (1 - ENTRY_ZONE_GAP_TOLERANCE):
+        logger.info("BUY quote %.2f (lower of ask/bid) below the entry zone %s — the plan's entry is gone",
+                    price, plan.entry_zone)
+        return "below-entry-zone"
+    return None
+
+
 def sized_qty(plan: TradePlan, equity: float, settings: AdapterSettings) -> int:
     """``floor(equity × risk_pct/100 / (entry_zone[1] − stop))``, reduced to
     honor the per-order notional cap (S6). 0 after caps ⇒ the caller skips."""
@@ -911,9 +946,9 @@ class _SubmitRun:
     """One submit invocation: broker snapshot + running S6/S9 state.
 
     Rule order per candidate (spec R1 "applies S1–S9 in order"): S5 blocking →
-    S8 market day → S4 dedupe/recovery → S8 per-ticker guards → S9 position
-    rules → sizing → S6 caps → S9 buying power/total risk → S3-checked
-    submission.
+    S8 market day → S4 dedupe/recovery → S8 per-ticker guards → S9 maintain
+    → S8a entry zone → S9 add-on rules → sizing → S6 caps → S9 buying
+    power/total risk → S3-checked submission.
     """
 
     def __init__(
@@ -1261,15 +1296,19 @@ class _SubmitRun:
         if self.snapshot_reason:
             self.skip(record, self.snapshot_reason, cid)
             return
-        guard_reason, _quote = self._ticker_guard(ticker)
+        guard_reason, quote = self._ticker_guard(ticker)
         if guard_reason:
             self.skip(record, guard_reason, cid)
             return
         position = self._position(ticker)
+        if position is not None and not plan.add_intent:
+            self.skip(record, "maintain", cid)  # a view refresh, never an entry attempt
+            return
+        zone_reason = entry_zone_reason(plan, quote)
+        if zone_reason:
+            self.skip(record, zone_reason, cid)
+            return
         if position is not None:
-            if not plan.add_intent:
-                self.skip(record, "maintain", cid)
-                return
             addon_reason = self._addon_pre_reason(plan, position)
             if addon_reason:
                 self.skip(record, addon_reason, cid)
