@@ -151,6 +151,8 @@ def test_the_digest_groups_tickers_by_outcome_in_plain_words(tmp_path, live):
     ("BUY", "Overweight", None, {"mode": "模拟"}, "看多（PM 看多；模拟）", False),
     ("SELL", "Sell", None, {"mode": "执行已暂停"}, "看空（PM 看空；执行已暂停）", False),
     ("BUY", "Overweight", False, {"mode": rd.LATE}, "看多（PM 看多；已过执行时间，下单待核实）", None),
+    ("BUY", "Overweight", False, {"mode": rd.UNKNOWN_STATE}, "看多（PM 看多；执行状态未知）", None),
+    ("SELL", "Sell", True, {"mode": rd.UNKNOWN_STATE}, "看空（PM 看空；执行状态未知）", None),
     ("BUY", "Overweight", False, {"mode": "模拟"}, "买入（PM 看多；模拟）", False),
     ("BUY", "Overweight", False, {"mode": "执行已暂停"}, "买入（PM 看多；执行已暂停）", False),
     ("SELL", "Sell", True, {}, "卖出（PM 看空；09:45 ET 下单）", True),
@@ -549,6 +551,7 @@ def test_a_brief_the_pm_never_read_is_never_summarized_as_its_reason(tmp_path, m
     ("财报在11月17日。", "catalyst on 2026-11-17", True),
     ("股价目标 520.", "catalyst on 2026-11-17", False),  # a sentence-ending period is not part of it
     ("建议买入。", "x", False), ("等待下单时机。", "x", False), ("不宜做空。", "x", False),
+    ("建议抛售。", "x", False), ("可以增仓。", "x", False), ("应当平仓。", "x", False), ("宜买进。", "x", False),
 ])
 def test_the_summary_screen(summary, source, kept):
     assert (rd._screened(summary, source) is not None) is kept
@@ -741,3 +744,29 @@ def test_a_skipped_row_or_a_missing_ledger_is_never_no_order(tmp_path, live):
                                                                                    pm_rating="Hold"))])
     head = build(cfg, "us").splitlines()[0]
     assert "待核实（决策数据未读到）" in head and "计划下单：无" not in head  # a dropped row and no ledger
+
+
+@pytest.mark.unit
+def test_an_unknown_execution_state_lists_orders_as_undetermined(tmp_path, live, monkeypatch):
+    cfg = config(tmp_path)
+    book(cfg)
+    write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "m — m.")},
+               tickers=[entry("NVDA", decide=decided(cfg, "NVDA", "BUY", "Overweight"))])
+    monkeypatch.setattr(rd, "_execution_mode", lambda c: (_ for _ in ()).throw(OSError("halt file")))
+    head = build(cfg, "us").splitlines()[0]
+    assert "待核实：NVDA" in head and not head.endswith("：无")
+
+
+@pytest.mark.unit
+def test_after_execution_an_unread_input_keeps_the_executed_header(tmp_path, live):
+    cfg = config(tmp_path)
+    book(cfg)
+    write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "m — m.")}, tickers=[
+        {**entry("NVDA", decide=decided(cfg, "NVDA", "BUY", "Overweight")), "final": "order-live"},
+        {"ticker": "BAD", "stages": "not-a-dict"}])  # a malformed row: skipped, so unread
+    path = cfg.state_dir / "funnel" / "us" / f"{DAY}.json"
+    snap = json.loads(path.read_text())
+    snap["context"] = {"execute_ran": True}
+    path.write_text(json.dumps(snap), encoding="utf-8")
+    head = build(cfg, "us").splitlines()[0]
+    assert "已执行：NVDA 已下单；待核实（决策数据未读到）" in head and "计划下单" not in head

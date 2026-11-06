@@ -71,13 +71,17 @@ BLOCKER_NAMES = {
 }
 #: Words a summary must not contain (the action is shown separately; the
 #: user asked why "HOLD" appeared for a name with no position).
-_FORBIDDEN = re.compile(r"持有|减持|增持|评级|买入|卖出|加仓|减仓|建仓|清仓|做空|做多|下单|止损|HOLD|BUY|SELL",
-                        re.IGNORECASE)
+_FORBIDDEN = re.compile(r"持有|减持|增持|评级|买入|买进|卖出|抛售|加仓|增仓|减仓|建仓|清仓|平仓|做空|做多|下单|"
+                        r"止损|止盈|HOLD|BUY|SELL", re.IGNORECASE)
 SUMMARY_MAX_CHARS = 60
 #: Mode past the execution time with step 7 not run: undetermined, not "no order".
 LATE = "已过执行时间，下单待核实"
 #: Inline step 7 (no execution time) left no outcome before this digest.
 INLINE_UNKNOWN = "下单结果待核实"
+#: The execution switch / kill switch could not be read.
+UNKNOWN_STATE = "执行状态未知"
+#: Modes that leave an order undetermined (vs 模拟 / 执行已暂停: no live order).
+UNDETERMINED_MODES = (LATE, INLINE_UNKNOWN, UNKNOWN_STATE)
 _NUMBER = re.compile(r"(?<![\d.])\d+(?:\.\d+)?(?!\d)(?!\.\d)")  # "520." is 520
 #: The summary call: one small, cheap model; a tight timeout so the digest
 #: never waits long for it (DIGEST_DEADLINE_S in the orchestrator bounds all).
@@ -276,7 +280,7 @@ def action_text(code: str | None, rating: str | None, *, session: str, held: boo
         kept = [part for part in parts if part]
         return f"（{'；'.join(kept)}）" if kept else ""
 
-    if mode in (LATE, INLINE_UNKNOWN) and code in ("BUY", "SELL") and blocker in (None, "unknown"):
+    if mode in UNDETERMINED_MODES and code in ("BUY", "SELL") and blocker in (None, "unknown"):
         return ("看多" if code == "BUY" else "看空") + paren(pm, mode), None
     if session == "cn" and code in ("BUY", "SELL"):
         return ("看多" if code == "BUY" else "看空") + "，不下单" + paren(pm, "A股不下单"), False
@@ -578,7 +582,7 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
         settings = load_settings()
         mode = _execution_mode(config) if session == "us" else None
     except Exception:
-        settings, mode = None, "执行状态未知"
+        settings, mode = None, UNKNOWN_STATE
     executed = executed and session == "us"  # built after step 7 (a late retry, an inline execution)
     try:
         execution_at = config.sessions["us"].execution_time
@@ -657,7 +661,9 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
         done = "、".join(planned) if planned else ("" if undecided else "无下单")
         if undecided:
             done += ("；" if done else "") + "待核实：" + "、".join(undecided)
-        head.append(("已执行：" + done) if executed and not unread else
+        if executed and unread:
+            done += ("；" if done else "") + "待核实（决策数据未读到）"
+        head.append(("已执行：" + done) if executed else
                     "计划下单" + (f"（{mode}）" if mode else "") + "：" + orders)
     lines = [" ｜ ".join(head), macro]
     if macro_summary:

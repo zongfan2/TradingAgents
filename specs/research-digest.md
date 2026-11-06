@@ -88,7 +88,10 @@ line) was hard to read: the user asked why a name with no position was
     outcome reads `下单结果待核实`, never a coming order; a decision with no ledger row read reads
     `看多/看空（下单待核实）`; after execution a `final` other than
     `order-live`/`order-dry`/`excluded` (e.g. a submit killed after its
-    intent row) reads `下单结果待核实`. Undetermined names are listed in the
+    intent row) reads `下单结果待核实`; an unreadable execution switch or kill
+    switch (`执行状态未知`) leaves BUY/SELL undetermined too; after execution
+    the header keeps `已执行：` and appends `待核实（决策数据未读到）` when an
+    input was unread. Undetermined names are listed in the
     header as `待核实：X`. A brief-arm run whose ticker or macro evaluation failed adds
     `；简报未采用（评估 fail）` (the brief was withheld). PM ratings in words: Buy 强烈看多 · Overweight 看多 ·
     Hold 中性 · Underweight 看淡 · Sell 看空. An analysis error reads
@@ -118,8 +121,8 @@ line) was hard to read: the user asked why a name with no position was
   that did not read the brief (a feeds run, a withheld eval-fail brief, a
   macro-fail feeds-only day) get no summary. Each returned summary is
   screened: dropped if it contains a forbidden or action word
-  (持有/减持/增持/评级/买入/卖出/加仓/减仓/建仓/清仓/做空/做多/下单/止损/
-  HOLD/BUY/SELL), exceeds 60 characters, or holds a whole number its source
+  (持有/减持/增持/评级/买入/买进/卖出/抛售/加仓/增仓/减仓/建仓/清仓/平仓/做空/做多/
+  下单/止损/止盈/HOLD/BUY/SELL), exceeds 60 characters, or holds a whole number its source
   (links removed) does not; only the names asked are used. A call that used
   a web tool is discarded — by its tool-call fields or a billed search count
   (the CLI keeps web tools on; outside facts would pass every screen).
