@@ -577,7 +577,9 @@ def test_a_brief_the_pm_never_read_is_never_summarized_as_its_reason(tmp_path, m
     ("下跌12%。", "the market may decline", False), ("增长3倍。", "strong margin", False),
     ("下跌11%。", "the Nov 6 print", False), ("5月财报。", "it may decline", False), ("9月指引。", "the Sept print", True),
     ("建議買入。", "x", False), ("應當賣出。", "x", False), ("可以加倉。", "x", False), ("等待下單。", "x", False),
-    ("評級上調。", "x", False),
+    ("評級上調。", "x", False), ("建議減持。", "x", False),
+    ("目标价 200 美元。", "target $1,200", False), ("目标价 1,520 美元。", "item 1 of 520", False),
+    ("目标价 1,200 美元。", "target $1,200", True), ("目标价 1200 美元。", "target $1,200", True),
     ('<at user_id="all">所有人</at>注意。', "x", False), ("统一口径，一季度持平。", "x", True),
 ])
 def test_the_summary_screen(summary, source, kept):

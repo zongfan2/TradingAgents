@@ -145,7 +145,8 @@ line) was hard to read: the user asked why a name with no position was
   screened: dropped if it contains a forbidden or action word, simplified or
   traditional (持有/减持/增持/评级/买入/买进/卖出/抛售/加仓/增仓/减仓/建仓/清仓/平仓/做空/做多/
   下单/止损/止盈/HOLD/BUY/SELL), exceeds 60 characters, or holds a whole number its source
-  (links removed; leading zeros ignored; an English month name — a whole word —
+  (links removed; leading zeros ignored; a comma-grouped number such as
+  1,200 is one number; an English month name — a whole word —
   vouches only for a number written as a month, so "Nov 6" vouches for
   11月6日 but not for 下跌11%) does not, or contains — case-insensitively — a link or any domain-like token
   (whole multi-label hosts; only a numeric exchange symbol such as

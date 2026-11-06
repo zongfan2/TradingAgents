@@ -73,7 +73,7 @@ BLOCKER_NAMES = {
 #: Words a summary must not contain (the action is shown separately; the
 #: user asked why "HOLD" appeared for a name with no position).
 _FORBIDDEN = re.compile(r"持有|减持|增持|评级|买入|买进|卖出|抛售|加仓|增仓|减仓|建仓|清仓|平仓|做空|做多|下单|"
-                        r"止损|止盈|評級|買入|買進|賣出|拋售|加倉|增倉|減倉|建倉|清倉|平倉|下單|止損|"
+                        r"止损|止盈|評級|買入|買進|賣出|拋售|加倉|增倉|減倉|減持|增持|建倉|清倉|平倉|下單|止損|"
                         r"HOLD|BUY|SELL", re.IGNORECASE)
 SUMMARY_MAX_CHARS = 60
 #: Mode past the execution time with step 7 not run: undetermined, not "no order".
@@ -110,7 +110,7 @@ _UNSAFE = re.compile(
 #: numeric exchange symbol (0700.HK, 600256.SS) is not a link.
 _DOMAIN = re.compile(r"(?<![A-Za-z0-9.])(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?![A-Za-z])(?!\.[A-Za-z])")  # whole hosts
 _SYMBOL = re.compile(r"\d+\.(?:HK|SS|SZ|BJ)", re.IGNORECASE)
-_NUMBER = re.compile(r"(?<![\d.])\d+(?:\.\d+)?(?!\d)(?!\.\d)")  # "520." is 520
+_NUMBER = re.compile(r"(?<![\d.,])\d{1,3}(?:,\d{3})+(?:\.\d+)?(?![\d,])|(?<![\d.,])\d+(?:\.\d+)?(?!\d)(?!\.\d)(?!,\d{3})")  # 1,200 is one number
 #: The summary call: one small, cheap model; a tight timeout so the digest
 #: never waits long for it (DIGEST_DEADLINE_S in the orchestrator bounds all).
 DIGEST_SUMMARY_MODEL = "claude-haiku-5-5"
@@ -582,7 +582,9 @@ _MONTHS = {i: re.compile(rf"\b(?:{names})\b", 0 if names == "May" else re.IGNORE
 
 
 def _canonical(number: str) -> str:
-    """``06`` and ``6`` are the same number; decimals keep their digits."""
+    """``06`` and ``6`` are the same number, ``1,200`` and ``1200`` too;
+    decimals keep their digits."""
+    number = number.replace(",", "")
     return number if "." in number else str(int(number))
 
 
