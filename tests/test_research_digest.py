@@ -272,7 +272,9 @@ def test_missing_inputs_still_give_a_digest(tmp_path):
     for corrupt in ("{not json", "[]", "3", '{"tickers": {"MU": 1}}', '{"tickers": 3}',
                     '{"tickers": [{"ticker": "MU", "stages": []}]}',
                     '{"tickers": [{"ticker": "MU", "stages": {"decide": 1}}]}',
-                    '{"tickers": [{"ticker": "MU", "stages": {"decide": {"code": "BUY", "details": 1}}}]}'):
+                    '{"tickers": [{"ticker": "MU", "stages": {"decide": {"code": "BUY", "details": 1}}}]}',
+                    '{"tickers": [{"ticker": "MU", "stages": {"trigger": {"code": ["x"]}}}]}',
+                    '{"tickers": [{"ticker": "MU", "stages": {"trigger": "x"}}]}'):
         (cfg.state_dir / "funnel" / "us" / f"{DAY}.json").write_text(corrupt, encoding="utf-8")
         text = build(cfg, "us")
         assert text.startswith("📊 研究摘要") and "宏观：无简报" in text, corrupt
@@ -552,6 +554,8 @@ def test_a_brief_the_pm_never_read_is_never_summarized_as_its_reason(tmp_path, m
     ("股价目标 520.", "catalyst on 2026-11-17", False),  # a sentence-ending period is not part of it
     ("建议买入。", "x", False), ("等待下单时机。", "x", False), ("不宜做空。", "x", False),
     ("建议抛售。", "x", False), ("可以增仓。", "x", False), ("应当平仓。", "x", False), ("宜买进。", "x", False),
+    ("目标价五百亿美元。", "x", False), ("详见 https://example.com 。", "x", False),
+    ('<at user_id="all">所有人</at>注意。', "x", False), ("统一口径，一季度持平。", "x", True),
 ])
 def test_the_summary_screen(summary, source, kept):
     assert (rd._screened(summary, source) is not None) is kept
@@ -785,3 +789,65 @@ def test_after_execution_an_unread_row_never_reads_as_no_order(tmp_path, live):
     path.write_text(json.dumps(snap), encoding="utf-8")
     head = build(cfg, "us").splitlines()[0]
     assert "已执行：待核实（决策数据未读到）" in head and "无下单" not in head
+
+
+@pytest.mark.unit
+def test_a_lost_brief_arm_event_never_reads_as_no_order(tmp_path, live):
+    cfg = config(tmp_path)
+    book(cfg)
+    decided(cfg, "NVDA", "BUY", "Overweight")  # the brief arm's ledger row
+    write_decision(cfg, ticker="NVDA", arm="feeds", plan=BUY_PLAN, date_iso=DAY.isoformat(), decision="BUY")
+    feeds_only = stage("BUY", arm="feeds", pm_rating="Overweight", plan_valid=True,
+                       run_id=f"{DAY.isoformat()}-us-NVDA-feeds-1")
+    write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "m — m.")}, tickers=[entry("NVDA", decide=feeds_only)])
+    text = build(cfg, "us")
+    assert "→ 看多（PM 看多；下单待核实）" in text and "计划下单：待核实：NVDA" in text.splitlines()[0]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("code", "shown"), [("HOLD", "已下单，见交易消息（最新分析：PM 中性）"),
+                                             ("ERROR", "已下单，见交易消息（最新分析：分析出错）")])
+def test_a_live_order_is_told_even_when_a_later_run_decided_otherwise(code, shown):
+    assert rd.executed_text(code, "Hold" if code == "HOLD" else None, final="order-live", execute=None) == shown
+
+
+@pytest.mark.unit
+def test_the_summary_call_is_bounded_and_every_failure_costs_only_the_summaries(monkeypatch):
+    import subprocess
+
+    from pipeline import claude_cli
+
+    calls, recorded = [], []
+    monkeypatch.setattr(claude_cli, "claude_command", lambda *a, **k: calls.append((a, k)) or ["claude"])
+    monkeypatch.setattr(claude_cli, "call_env", lambda command: {"E": "1"})
+    monkeypatch.setattr(claude_cli, "record_failed_call", lambda *a: recorded.append(("failed", a[0])))
+    monkeypatch.setattr(claude_cli, "record_usage", lambda *a, **k: recorded.append(("usage", k.get("outcome"))))
+    seen = {}
+
+    def run(cmd, **kw):
+        seen.update(kw)
+        return outcome["proc"]()
+
+    monkeypatch.setattr(subprocess, "run", run)
+    good = {"structured_output": {"macro": "m", "tickers": []}}
+    cases = {
+        "ok": (lambda: subprocess.CompletedProcess([], 0, stdout="{}", stderr=""), good),
+        "exit": (lambda: subprocess.CompletedProcess([], 1, stdout="", stderr="x"), good),
+        "envelope": (lambda: subprocess.CompletedProcess([], 0, stdout="junk", stderr=""), None),
+        "no-output": (lambda: subprocess.CompletedProcess([], 0, stdout="{}", stderr=""), {"result": "x"}),
+        "timeout": (lambda: (_ for _ in ()).throw(subprocess.TimeoutExpired("claude", 45, output="")), good),
+    }
+    outcome = {}
+    for name, (proc, envelope) in cases.items():
+        outcome["proc"] = proc
+        if envelope is None:
+            monkeypatch.setattr(claude_cli, "parse_envelope",
+                                lambda stdout: (_ for _ in ()).throw(claude_cli.EnvelopeError("bad")))
+        else:
+            monkeypatch.setattr(claude_cli, "parse_envelope", lambda stdout, e=envelope: e)
+        monkeypatch.setattr(rd, "_run_summary", rd.REAL_RUN_SUMMARY)
+        macro, notes = rd.summaries("macro text", {"HUM": "source"})
+        assert (macro is None and notes == {}) is (name != "ok"), name
+    assert calls[0][0][:2] == ("claude-haiku-5-5", "low") and calls[0][1] == {"role": "collect"}
+    assert seen["timeout"] == rd.DIGEST_SUMMARY_TIMEOUT_S == 45.0 and seen["env"] == {"E": "1"}
+    assert ("failed", "research_digest") in recorded and ("usage", "error") in recorded

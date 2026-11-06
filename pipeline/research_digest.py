@@ -3,7 +3,8 @@
 One message per slot, after its end-of-slot summary, in Chinese: positions
 and planned orders, the macro read, then every ticker grouped by outcome —
 analysed (the action in plain words, never the internal HOLD), blocked
-(a failed brief), and not triggered (one line per reason). Analysed and
+(a failed brief), triggered but not analysed (budget, a failed run), and
+not triggered (one line per reason). Analysed and
 blocked names, and the macro brief, get a one-sentence Chinese summary from
 one small model call (DIGEST_SUMMARY_MODEL); without it the digest still
 goes out. Everything else comes from files the slot already wrote (the
@@ -82,6 +83,9 @@ INLINE_UNKNOWN = "下单结果待核实"
 UNKNOWN_STATE = "执行状态未知"
 #: Modes that leave an order undetermined (vs 模拟 / 执行已暂停: no live order).
 UNDETERMINED_MODES = (LATE, INLINE_UNKNOWN, UNKNOWN_STATE)
+#: A link, markup (a Lark ``<at>`` mention) or a figure in Chinese numerals —
+#: none can be checked against the source, so none may reach the group.
+_UNSAFE = re.compile(r"https?://|www\.|<|>|[零〇一二两三四五六七八九十百千]+[万亿]|[零〇一二两三四五六七八九十百千万亿]+(?:美元|元|%|倍)")
 _NUMBER = re.compile(r"(?<![\d.])\d+(?:\.\d+)?(?!\d)(?!\.\d)")  # "520." is 520
 #: The summary call: one small, cheap model; a tight timeout so the digest
 #: never waits long for it (DIGEST_DEADLINE_S in the orchestrator bounds all).
@@ -238,11 +242,15 @@ def executed_text(code: str | None, rating: str | None, *, final: str | None,
     """After step 7 the trades book holds today's fills, so no line claims a
     pre-order position: the adapter's own outcome for this name is told
     (its funnel ``final`` and execute stage)."""
-    if code == "ERROR":
-        return "分析出错"
     view = RATING_NAMES.get(str(rating), str(rating)) if rating else None
     pm = f"PM {view}" if view else None
     lean = {"BUY": "看多", "SELL": "看空"}.get(str(code))
+    if final == "order-live" and lean is None:
+        # Placed live earlier; a later run of the day decided otherwise.
+        latest = "分析出错" if code == "ERROR" else (pm or "无结论")
+        return f"已下单，见交易消息（最新分析：{latest}）"
+    if code == "ERROR":
+        return "分析出错"
     if lean is None:
         return "不操作" + (f"（{pm}）" if pm else "")
     if final == "order-live":
@@ -347,12 +355,15 @@ class _Ticker:
         trigger = stages.get("trigger") or {}
         # A ticker that met the trigger but has no decision (budget guard,
         # a failed run) is "triggered", never "not triggered" — other.
+        if not isinstance(trigger, dict):
+            raise TypeError("trigger stage")
         if trigger.get("outcome") == "passed":
             self.trigger = "budget-dropped" if trigger.get("code") == "budget-dropped" else "triggered"
         else:
             # A reconstructed stage with no code (no trigger event: the runner
             # failed early, or a core name without a decision row).
-            self.trigger = trigger.get("code") or ("unrecorded" if trigger else None)
+            code = trigger.get("code")
+            self.trigger = code if isinstance(code, str) and code else ("unrecorded" if trigger else None)
         self.final = entry_final
         execute = stages.get("execute")
         self.execute = execute if isinstance(execute, dict) else None
@@ -505,7 +516,7 @@ def _screened(summary: str, source: str) -> str | None:
     """The summary, or None when it breaks the rules the prompt states:
     a forbidden word, too long, or a number its source text does not have."""
     text = " ".join(summary.split())
-    if not text or len(text) > SUMMARY_MAX_CHARS or _FORBIDDEN.search(text):
+    if not text or len(text) > SUMMARY_MAX_CHARS or _FORBIDDEN.search(text) or _UNSAFE.search(text):
         return None
     # Whole numbers only, and never from a link: a URL's digits vouch for nothing.
     known = set(_NUMBER.findall(re.sub(r"https?://\S+", " ", source)))
@@ -609,8 +620,12 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
     for t in analysed:
         details = t.decide.get("details") or {}
         record = records.get(str(details.get("run_id")))
+        brief_row = any(r.arm == "brief" and r.ticker == t.ticker and str(r.date)[:10] == slot_date.isoformat()
+                        and r.session == session for r in records.values())
         try:
-            if record is None and details.get("arm") == "feeds":
+            if details.get("arm") == "feeds" and brief_row:
+                blocker = "unknown"  # the brief arm's event was lost: the adapter reads its row itself
+            elif record is None and details.get("arm") == "feeds":
                 blocker = "feeds-arm"  # the feeds arm never trades, row or not
             else:
                 blocker = order_blocker(record, settings, records) if settings is not None else "unknown"

@@ -451,7 +451,8 @@ reads the paper account. Check it: `~/.tradingagents/scheduler.trade-monitor.err
 The trades group also gets one **research digest** per slot (cn and us,
 right after the end-of-slot summary), in Chinese: positions and planned
 orders, the macro read, and every ticker grouped as analysed (the action in
-plain words), blocked, or not triggered (with the reason)
+plain words), blocked, triggered but not analysed, or not triggered (with
+the reason)
 (specs/research-digest.md). It is built from the slot's files plus one
 small summary call (Haiku, ≈ $0.002) and sent once per slot day, only by a
 full slot run (never by
