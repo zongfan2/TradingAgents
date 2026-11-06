@@ -1102,3 +1102,15 @@ def test_the_console_usage_limit_counts_as_exhausted_credits(tmp_path, monkeypat
     providers = [dict(s.env)["TRADINGAGENTS_LLM_PROVIDER"] for s in child.specs]
     assert providers == ["anthropic", "openai", "openai"]  # marked once, the slot moves on
     assert exhausted_marker(config.state_dir, MONTH).exists() and outcome.summary["errors"] == 0
+
+
+@pytest.mark.unit
+def test_status_names_the_exhaustion_reason_and_how_to_lift_it(tmp_path, monkeypatch, capsys):
+    from pipeline import llm_budget
+
+    monkeypatch.setenv("TRADINGAGENTS_SKIP_DOTENV", "1")
+    monkeypatch.setenv("TRADINGAGENTS_STATE_DIR", str(tmp_path))
+    mark_exhausted(tmp_path, MONTH, USAGE_LIMIT)
+    assert llm_budget.main(["status"], now=NOW) == 0
+    out = capsys.readouterr().out
+    assert "reached your specified API usage limits" in out and "after topping up or raising the limit" in out

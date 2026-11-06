@@ -33,7 +33,8 @@ usable. An unconfirmed month skips the rung, and the Lark LLM line says
 "OpenAI balance unconfirmed" (else "OpenAI left $X").
 
 The decision is made per analysis job and once per CLI process. A
-credit-exhausted failure (Anthropic "credit balance too low"; OpenAI
+credit-exhausted failure (Anthropic "credit balance too low" or its console
+usage limit, L1a; OpenAI
 `insufficient_quota` / "exceeded your current quota") marks that
 provider's month and reruns the run on the next rung — at most
 anthropic → openai → deepseek, never the same rung twice. A CLI process
@@ -251,8 +252,9 @@ installed version (0.164.0 on 2026-11-01).
    never on argv, each in its own call home whose session files — rollout,
    state databases — are deleted once the call is billed) and log usage
    with `billing: openai-api`, each request priced on its own tier.
-4. `claude-first` behaviour is unchanged, except L5 (a refused key steps
-   down to DeepSeek for the rest of the slot).
+4. `claude-first` behaviour is unchanged, except L1a (the console usage
+   limit marks the month) and L5 (a refused key steps down to DeepSeek for
+   the rest of the slot).
 5. L5: under `ladder` or `claude-first` an authentication refusal marks the
    provider refused for the slot only (no month marker) and reruns the run
    on the next rung; one loop handles exhausted credits and refused keys in
@@ -261,3 +263,8 @@ installed version (0.164.0 on 2026-11-01).
    nowhere is left the ERROR row (kind `auth`) is recorded on the profile
    that actually ran, its attempt billed once; fixed routings never move;
    a slot whose runs mostly failed alerts with the error kinds.
+6. L1a: Anthropic's "You have reached your specified API usage limits"
+   counts as exhausted credits — the month is marked and the ladder steps
+   down (analysis and CLI); once the analysis path writes the marker, later
+   CLI processes leave Anthropic whatever the CLI's own wording; the marker's
+   reason is shown by `llm_budget status`.
