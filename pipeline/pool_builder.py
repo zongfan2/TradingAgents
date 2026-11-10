@@ -4,7 +4,9 @@ Spec: ``specs/pool-builder.md`` (stages 1–5, R1–R5); data shape:
 ``specs/pool-data-contract.md`` (v1). One invocation per session slot:
 
 1. **Load** — mirror ``core.<session>.yaml`` (missing ⇒ empty core + stderr
-   warn; unreadable ⇒ hard failure) and load hysteresis state from the most
+   warn; unreadable ⇒ hard failure), append the open positions the yaml does
+   not list from the ledger's ``positions.json`` (R1; never a hard failure),
+   and load hysteresis state from the most
    recent pool file dated **strictly before** the run date (never today's own
    output — R3; streaks carry across weekends/holidays/failed days).
 2. **Nominate** — render ``prompts/pool_nomination.md`` and run a
@@ -85,6 +87,7 @@ from pipeline.contracts.base import (
     validation_error_messages,
 )
 from pipeline.contracts.briefs import CatalystType
+from pipeline.contracts.ledger import _ID_TICKER  # the ticker charset run ids carry
 from pipeline.contracts.pool import (
     OPPORTUNITY_CAP,
     WATCH_CAP,
@@ -937,6 +940,9 @@ def apply_lifecycle(
     rules = rules or LifecycleRules()
     result = LifecycleResult()
     prior_members = {entry.ticker: entry for entry in (prior.opportunity if prior else [])}
+    # Case-insensitive: a held name joins core uppercased, whatever spelling
+    # the nomination gave its opportunity entry (no cross-layer duplicate).
+    core_upper = {ticker.upper() for ticker in core_tickers}
 
     def gate_block(ticker: str) -> TechnicalBlock:
         return gates.get(ticker) or TechnicalBlock(gate="fail")
@@ -944,7 +950,7 @@ def apply_lifecycle(
     # Existing members: retention or exit. Exit is slow — a member leaves only
     # via the streak rules, never because today's gate or score dipped once.
     for ticker, member in prior_members.items():
-        if ticker in core_tickers:
+        if ticker.upper() in core_upper:
             logger.info(
                 "%s is now a core ticker — opportunity membership folds into core", ticker
             )
@@ -1027,7 +1033,7 @@ def apply_lifecycle(
     # Candidates (nominated, non-core, non-member): enter fast or route to
     # watch per the contract's decision table.
     for ticker, nomination in nominated.items():
-        if ticker in core_tickers or ticker in prior_members:
+        if ticker.upper() in core_upper or ticker in prior_members:
             continue
         technical = gate_block(ticker)
         gate = technical.gate
@@ -1200,6 +1206,81 @@ def _filter_session_nominees(
     return nominated
 
 
+#: Note on a core entry the builder appended for an open position.
+HELD_NOTE = "held position (auto-added while held)"
+#: A broker symbol the pipeline can carry in run ids (the ledger contract's
+#: ticker charset, the runner's normalize_tickers rule); anything else (a
+#: crypto pair, an empty row) is left out with a warning.
+_HELD_SYMBOL = re.compile(_ID_TICKER)
+
+
+def held_core_entries(session: str, core_tickers: set[str], ledger_dir: str | Path | None = None,
+                      run_date: date | None = None) -> list[CoreEntry]:
+    """Open positions of ``session``'s market (the ledger's positions.json:
+    a filled quantity or a resting order) that the core yaml does not list,
+    as core entries in ticker order. A position bought from the opportunity
+    layer is then collected and analysed every slot like core, until it is
+    closed (user decision 2026-11-09). Only in a session whose core is
+    analysed (``core_analysis_sessions``): elsewhere core gets no brief and
+    no analysis, so a held name keeps its opportunity coverage instead. No
+    snapshot adds nothing; an unreadable one, an unreadable config or an
+    id-illegal symbol adds nothing for it, with a warning — the yaml core
+    still stands and the build never fails on it. A snapshot not refreshed
+    on ``run_date`` (the session's calendar) is still used — a closed name
+    costs one extra analysis, a missed one costs the watch — but warned
+    about: a position opened since its refresh is missing. Symbols are the
+    broker's position symbols, the namespace the runner's position context
+    already assumes; a class share spelled differently by the broker (BRK.B)
+    and the yaml (BRK-B) would be listed twice."""
+    from pipeline.config import core_analysis_sessions
+    from pipeline.contracts.ledger import PositionsSnapshot
+
+    try:
+        if session not in core_analysis_sessions():
+            return []
+        path = Path(ledger_dir or load_config().ledger_dir) / "positions.json"
+    except ValueError as exc:  # a junk config value elsewhere: the yaml core still stands
+        print(f"pool-builder: warning: config unreadable ({_one_line(exc)}) — no held names added to core",
+              file=sys.stderr)
+        return []
+    try:
+        snapshot = PositionsSnapshot.parse_lenient(json.loads(path.read_text(encoding="utf-8")))
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError, ValidationError) as exc:
+        print(f"pool-builder: warning: positions snapshot unreadable ({_one_line(exc)}) — "
+              "no held names added to core", file=sys.stderr)
+        return []
+    # Judged on the session's own calendar date: every slot's settle step
+    # refreshes the snapshot first, so one not refreshed on the run date may
+    # miss a position opened since (yesterday's 09:45 entries included).
+    try:
+        taken = session_date(session, snapshot.as_of) if run_date is not None else None
+    except (OverflowError, ValueError):  # a corrupted as_of: the names stand, the warning cannot be judged
+        print(f"pool-builder: warning: positions snapshot as_of {snapshot.as_of!r} cannot be dated", file=sys.stderr)
+        taken = None
+    if taken is not None and taken < run_date:
+        print(f"pool-builder: warning: positions snapshot not refreshed since {taken} (as_of "
+              f"{snapshot.as_of.isoformat()}) — held names from it are added, a newer position may be missing",
+              file=sys.stderr)
+    elif taken is not None and taken > run_date:
+        print(f"pool-builder: warning: rebuilding {run_date} with the positions of {taken} — held names are "
+              "as of then, not as of that date", file=sys.stderr)
+    listed = {ticker.upper() for ticker in core_tickers}
+    held: set[str] = set()
+    for position in snapshot.positions:
+        if not (position.qty or position.open_orders):
+            continue
+        symbol = str(position.ticker).strip().upper()
+        if not _HELD_SYMBOL.fullmatch(symbol):
+            print(f"pool-builder: warning: held symbol {position.ticker!r} is not a pipeline ticker — "
+                  "not added to core", file=sys.stderr)
+            continue
+        if session_for_ticker(symbol) == session:
+            held.add(symbol)
+    return [CoreEntry(ticker=ticker, note=HELD_NOTE) for ticker in sorted(held - listed)]
+
+
 def build_pool(
     session: str,
     as_of: date | str | None = None,
@@ -1212,6 +1293,7 @@ def build_pool(
     gate_rules: GateRules | None = None,
     lifecycle_rules: LifecycleRules | None = None,
     funnel: FunnelEvents | None = None,
+    ledger_dir: str | Path | None = None,
 ) -> BuildResult:
     """Run stages 1–5 for one session slot; raises :class:`BuilderError` only
     on the R4 hard failures (unreadable core, contract-invalid output, write
@@ -1242,7 +1324,9 @@ def build_pool(
     except BuilderError:
         append_log_line(log_path, as_of.isoformat(), session, backend, "-", "failed")
         raise
+    core = core + held_core_entries(session, {entry.ticker for entry in core}, ledger_dir, as_of)
     core_tickers = {entry.ticker for entry in core}
+    core_upper = {ticker.upper() for ticker in core_tickers}
     prior = load_prior_pool(directory, session, as_of)
     prior_opportunity = list(prior.opportunity) if prior else []
     prior_watch = list(prior.watch) if prior else []
@@ -1281,8 +1365,8 @@ def build_pool(
         # R4: prior layers verbatim; no gating, no streak movement.
         core_entries = core
         lifecycle = LifecycleResult(
-            opportunity=[e for e in prior_opportunity if e.ticker not in core_tickers],
-            watch=[e for e in prior_watch if e.ticker not in core_tickers],
+            opportunity=[e for e in prior_opportunity if e.ticker.upper() not in core_upper],
+            watch=[e for e in prior_watch if e.ticker.upper() not in core_upper],
         )
     else:
         nominated = _filter_session_nominees(nominations, session, nominee_drops)

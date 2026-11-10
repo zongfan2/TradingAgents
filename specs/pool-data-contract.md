@@ -60,9 +60,34 @@ collector / analysis runner / webui (readers).
 Hard requirements:
 
 1. `core` mirrors `core.<session>.yaml` tickers/notes verbatim (order
-   preserved). The builder never adds, drops, or reorders core entries; it MAY
-   annotate them with informative `score`/`technical` fields (renderable, never
-   gating — core coverage is unconditional).
+   preserved). The builder never drops or reorders the yaml's core entries;
+   it MAY annotate them with informative `score`/`technical` fields
+   (renderable, never gating — core coverage is unconditional). The one
+   addition (user decision 2026-11-09): after the yaml entries, every open
+   position of the session's market in the ledger's `positions.json` (a row
+   with a filled quantity — the adapter writes one per broker position; a
+   row carrying only open orders would count too) that the yaml does not list is
+   appended, in ticker order, with the note `held position (auto-added while
+   held)` — so a name bought from the opportunity layer is collected and
+   analysed every slot until it is closed. Its opportunity entry folds into
+   core (no cross-layer duplicate). Only in a session whose core is analysed
+   (`core_analysis_sessions`; elsewhere core gets no brief and no analysis,
+   so the held name keeps its opportunity coverage, which the normal exit
+   rules can still end — acceptable while no core-off session trades). A missing snapshot adds
+   nothing; an unreadable snapshot or config, or a symbol outside the ledger
+   ticker charset, adds nothing for it with a stderr warning — never a failed
+   build. When no pool file exists, consumers' fallback to
+   `core.<session>.yaml` alone has no held names (the degraded mode the
+   reading rule already accepts). A snapshot not refreshed on the run date
+   (the session's calendar date; every slot's settle step refreshes it
+   first) is still used, with a stderr warning: a position opened since its
+   last refresh is then missing until the next good refresh. Rebuilding a
+   past date uses the current snapshot, with a warning. The fold of a held
+   name's opportunity/watch entry into core is case-insensitive. Symbols
+   are the broker's position symbols (the namespace the runner's position
+   context already assumes): a class share the broker and the yaml spell
+   differently (BRK.B / BRK-B) would be listed twice — none is in any pool
+   today.
 2. Every `opportunity`/`watch` entry has `score` (0–10 float), `catalyst_type`
    (`earnings|product|regulatory|M&A|guidance|flow|macro-exposure|other`),
    `rationale`, ≥1 citation URL, and a `technical` block with `gate`.

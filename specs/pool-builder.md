@@ -13,7 +13,10 @@ price structure must confirm it.
 
 ## Stages
 
-1. **Load** — read `core.<session>.yaml` (missing file ⇒ empty core + warn) and
+1. **Load** — read `core.<session>.yaml` (missing file ⇒ empty core + warn),
+   append the open positions it does not list from the ledger's
+   `positions.json` (R1; a missing snapshot adds nothing; a stale or
+   unreadable one degrades with a warning; never a failed build), and
    the most recent pool file for the session dated **strictly before** the run
    date (hysteresis state carries across weekends, holidays, and failed days;
    a same-day rerun never reads its own output; no prior file at all ⇒ fresh
@@ -63,7 +66,14 @@ price structure must confirm it.
 - **R1 — Core is read-only truth**: the builder never edits
   `core.<session>.yaml` and never drops a core ticker from the pool file, even
   when the technical gate would fail it (the gate applies to the opportunity
-  path only).
+  path only). Open positions the yaml does not list join core after the yaml
+  entries while held (pool-data-contract rule 1, user decision 2026-11-09:
+  a position must always be watched for a sell signal — in a session whose
+  core is analysed, the only one that executes today (us); in a core-off
+  session a held name keeps only its opportunity coverage, which can lapse
+  by the exit rules — a known gap while such a session never trades; before this, a name
+  bought from the opportunity layer could leave the pool and lose its brief
+  and its analysis).
 - **R2 — Deterministic gate**: given the same OHLCV, the gate's verdict is
   reproducible; all thresholds come from config, defaults documented here.
 - **R3 — Idempotent**: same-day rerun overwrites (hysteresis is computed from
@@ -83,8 +93,10 @@ price structure must confirm it.
 
 ## Non-goals
 
-- No position awareness beyond the core file (holdings sync with the broker is
-  the execution adapter's world; the user curates core manually).
+- No position awareness beyond the core file and the ledger's
+  `positions.json` (read only to keep open positions in core while held, R1;
+  holdings sync with the broker is the execution adapter's world; the user
+  curates the core yaml manually).
 - No intraday updates; no fundamental screening (a future gate stage).
 
 ## Acceptance criteria
@@ -97,4 +109,5 @@ price structure must confirm it.
    scores and logs them.
 2. Nomination validation rejects malformed model output and retries once.
 3. A full dry run against recorded fixtures produces a contract-valid pool
-   file; core entries mirror the yaml verbatim.
+   file; core entries mirror the yaml verbatim, followed by any open
+   positions of the session the yaml does not list (R1).
