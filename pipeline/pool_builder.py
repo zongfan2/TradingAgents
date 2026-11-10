@@ -941,6 +941,9 @@ def apply_lifecycle(
     rules = rules or LifecycleRules()
     result = LifecycleResult()
     prior_members = {entry.ticker: entry for entry in (prior.opportunity if prior else [])}
+    # Case-insensitive: a held name joins core uppercased, whatever spelling
+    # the nomination gave its opportunity entry (no cross-layer duplicate).
+    core_upper = {ticker.upper() for ticker in core_tickers}
 
     def gate_block(ticker: str) -> TechnicalBlock:
         return gates.get(ticker) or TechnicalBlock(gate="fail")
@@ -948,7 +951,7 @@ def apply_lifecycle(
     # Existing members: retention or exit. Exit is slow — a member leaves only
     # via the streak rules, never because today's gate or score dipped once.
     for ticker, member in prior_members.items():
-        if ticker in core_tickers:
+        if ticker.upper() in core_upper:
             logger.info(
                 "%s is now a core ticker — opportunity membership folds into core", ticker
             )
@@ -1031,7 +1034,7 @@ def apply_lifecycle(
     # Candidates (nominated, non-core, non-member): enter fast or route to
     # watch per the contract's decision table.
     for ticker, nomination in nominated.items():
-        if ticker in core_tickers or ticker in prior_members:
+        if ticker.upper() in core_upper or ticker in prior_members:
             continue
         technical = gate_block(ticker)
         gate = technical.gate
@@ -1250,6 +1253,9 @@ def held_core_entries(session: str, core_tickers: set[str], ledger_dir: str | Pa
     if run_date is not None and position_snapshot_stale(snapshot.as_of, run_date, snapshot.next_session):
         print(f"pool-builder: warning: positions snapshot is stale (as_of {snapshot.as_of.isoformat()}) — "
               "held names from it are added, a newer position may be missing", file=sys.stderr)
+    elif run_date is not None and snapshot.as_of.astimezone(timezone.utc).date() > run_date:
+        print(f"pool-builder: warning: rebuilding {run_date} with today's positions (as_of "
+              f"{snapshot.as_of.isoformat()}) — held names are as of now, not as of that date", file=sys.stderr)
     listed = {ticker.upper() for ticker in core_tickers}
     held: set[str] = set()
     for position in snapshot.positions:
@@ -1310,6 +1316,7 @@ def build_pool(
         raise
     core = core + held_core_entries(session, {entry.ticker for entry in core}, ledger_dir, as_of)
     core_tickers = {entry.ticker for entry in core}
+    core_upper = {ticker.upper() for ticker in core_tickers}
     prior = load_prior_pool(directory, session, as_of)
     prior_opportunity = list(prior.opportunity) if prior else []
     prior_watch = list(prior.watch) if prior else []
@@ -1348,8 +1355,8 @@ def build_pool(
         # R4: prior layers verbatim; no gating, no streak movement.
         core_entries = core
         lifecycle = LifecycleResult(
-            opportunity=[e for e in prior_opportunity if e.ticker not in core_tickers],
-            watch=[e for e in prior_watch if e.ticker not in core_tickers],
+            opportunity=[e for e in prior_opportunity if e.ticker.upper() not in core_upper],
+            watch=[e for e in prior_watch if e.ticker.upper() not in core_upper],
         )
     else:
         nominated = _filter_session_nominees(nominations, session, nominee_drops)

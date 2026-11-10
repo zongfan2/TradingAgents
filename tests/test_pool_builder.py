@@ -2011,3 +2011,21 @@ def test_a_stale_snapshot_still_covers_its_names_with_a_warning(pool_dir, tmp_pa
     assert "positions snapshot is stale" in capsys.readouterr().err
     pool_builder.held_core_entries("us", {"MSFT"}, tmp_path / "ledger", date(2026, 11, 10))
     assert "stale" not in capsys.readouterr().err
+
+
+@pytest.mark.unit
+def test_a_held_name_folds_its_opportunity_entry_in_any_case(pool_dir, tmp_path):
+    write_core(pool_dir, [{"ticker": "MSFT"}])
+    write_prior_pool(pool_dir, FRIDAY.isoformat(), opportunity=[prior_opportunity("Hum")])
+    write_positions(tmp_path, [("HUM", 5.0, [])])
+    build_pool("us", as_of=RUN_DATE, runner=FakeRunner(["[]"]), fetch_ohlcv=FakeFetcher())
+    pool = read_written_pool(pool_dir)
+    assert [c.ticker for c in pool.core] == ["MSFT", "HUM"] and pool.opportunity == []
+
+
+@pytest.mark.unit
+def test_rebuilding_a_past_date_warns_that_positions_are_today_s(tmp_path, capsys):
+    write_positions(tmp_path, [("HUM", 5.0, [])])  # as_of 2026-11-10
+    pool_pinned = pool_builder.held_core_entries("us", set(), tmp_path / "ledger", date(2026, 11, 2))
+    assert [c.ticker for c in pool_pinned] == ["HUM"]
+    assert "held names are as of now" in capsys.readouterr().err

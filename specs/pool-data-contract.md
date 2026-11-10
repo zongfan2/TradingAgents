@@ -81,6 +81,8 @@ Hard requirements:
    reading rule already accepts). A stale snapshot (older than 1 trading day,
    the runner's rule) is still used, with a stderr warning: a position opened
    since its last refresh is then missing until the next good refresh.
+   Rebuilding a past date uses today's snapshot, with a warning. The fold
+   of a held name's opportunity/watch entry into core is case-insensitive.
 2. Every `opportunity`/`watch` entry has `score` (0–10 float), `catalyst_type`
    (`earnings|product|regulatory|M&A|guidance|flow|macro-exposure|other`),
    `rationale`, ≥1 citation URL, and a `technical` block with `gate`.
