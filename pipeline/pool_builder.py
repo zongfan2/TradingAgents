@@ -1254,7 +1254,11 @@ def held_core_entries(session: str, core_tickers: set[str], ledger_dir: str | Pa
     # Judged on the session's own calendar date: every slot's settle step
     # refreshes the snapshot first, so one not refreshed on the run date may
     # miss a position opened since (yesterday's 09:45 entries included).
-    taken = session_date(session, snapshot.as_of) if run_date is not None else None
+    try:
+        taken = session_date(session, snapshot.as_of) if run_date is not None else None
+    except (OverflowError, ValueError):  # a corrupted as_of: the names stand, the warning cannot be judged
+        print(f"pool-builder: warning: positions snapshot as_of {snapshot.as_of!r} cannot be dated", file=sys.stderr)
+        taken = None
     if taken is not None and taken < run_date:
         print(f"pool-builder: warning: positions snapshot not refreshed since {taken} (as_of "
               f"{snapshot.as_of.isoformat()}) — held names from it are added, a newer position may be missing",

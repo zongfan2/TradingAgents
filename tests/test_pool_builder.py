@@ -2039,3 +2039,25 @@ def test_build_pool_passes_its_run_date_to_the_snapshot_check(pool_dir, tmp_path
     write_positions(tmp_path, [("HUM", 5.0, [])])  # 2026-11-09 in New York
     build_pool("us", as_of=date(2026, 11, 10), runner=FakeRunner(["[]"]), fetch_ohlcv=FakeFetcher())
     assert "positions snapshot not refreshed since 2026-11-09" in capsys.readouterr().err
+
+
+@pytest.mark.unit
+def test_a_carried_forward_pool_folds_a_held_member_in_any_case(pool_dir, tmp_path):
+    write_core(pool_dir, [{"ticker": "MSFT"}])
+    write_prior_pool(pool_dir, FRIDAY.isoformat(), opportunity=[prior_opportunity("Hum")],
+                     watch=[prior_watch("crwd")])
+    write_positions(tmp_path, [("HUM", 5.0, []), ("CRWD", 1.0, [])])
+    build_pool("us", as_of=RUN_DATE, runner=FakeRunner(["not json", "still not json"]), fetch_ohlcv=FakeFetcher())
+    pool = read_written_pool(pool_dir)
+    assert pool.carried_forward and [c.ticker for c in pool.core] == ["MSFT", "CRWD", "HUM"]
+    assert pool.opportunity == [] and pool.watch == []
+
+
+@pytest.mark.unit
+def test_a_corrupted_snapshot_date_never_fails_the_build(pool_dir, tmp_path, capsys):
+    write_core(pool_dir, [{"ticker": "MSFT"}])
+    write_positions(tmp_path, [("HUM", 5.0, [])])
+    path = tmp_path / "ledger" / "positions.json"
+    path.write_text(path.read_text().replace("2026-11-10T00:30:07Z", "0001-01-01T00:00:00Z"))
+    result = build_pool("us", as_of=RUN_DATE, runner=FakeRunner(["[]"]), fetch_ohlcv=FakeFetcher())
+    assert result.outcome == "written" and [c.ticker for c in read_written_pool(pool_dir).core] == ["MSFT", "HUM"]
