@@ -75,7 +75,6 @@ from pipeline.common import (
     append_log_line,
     archive_existing,
     atomic_write,
-    position_snapshot_stale,
     render_template,
     session_date,
     session_for_ticker,
@@ -1226,11 +1225,13 @@ def held_core_entries(session: str, core_tickers: set[str], ledger_dir: str | Pa
     no analysis, so a held name keeps its opportunity coverage instead. No
     snapshot adds nothing; an unreadable one, an unreadable config or an
     id-illegal symbol adds nothing for it, with a warning — the yaml core
-    still stands and the build never fails on it. A stale snapshot (the
-    runner's rule: older than 1 trading day before ``run_date``) is still
-    used — a closed name costs one extra analysis, a missed one costs the
-    watch — but warned about: a position opened since its refresh is
-    missing."""
+    still stands and the build never fails on it. A snapshot not refreshed
+    on ``run_date`` (the session's calendar) is still used — a closed name
+    costs one extra analysis, a missed one costs the watch — but warned
+    about: a position opened since its refresh is missing. Symbols are the
+    broker's position symbols, the namespace the runner's position context
+    already assumes; a class share spelled differently by the broker (BRK.B)
+    and the yaml (BRK-B) would be listed twice."""
     from pipeline.config import core_analysis_sessions
     from pipeline.contracts.ledger import PositionsSnapshot
 
@@ -1250,12 +1251,17 @@ def held_core_entries(session: str, core_tickers: set[str], ledger_dir: str | Pa
         print(f"pool-builder: warning: positions snapshot unreadable ({_one_line(exc)}) — "
               "no held names added to core", file=sys.stderr)
         return []
-    if run_date is not None and position_snapshot_stale(snapshot.as_of, run_date, snapshot.next_session):
-        print(f"pool-builder: warning: positions snapshot is stale (as_of {snapshot.as_of.isoformat()}) — "
-              "held names from it are added, a newer position may be missing", file=sys.stderr)
-    elif run_date is not None and snapshot.as_of.astimezone(timezone.utc).date() > run_date:
-        print(f"pool-builder: warning: rebuilding {run_date} with today's positions (as_of "
-              f"{snapshot.as_of.isoformat()}) — held names are as of now, not as of that date", file=sys.stderr)
+    # Judged on the session's own calendar date: every slot's settle step
+    # refreshes the snapshot first, so one not refreshed on the run date may
+    # miss a position opened since (yesterday's 09:45 entries included).
+    taken = session_date(session, snapshot.as_of) if run_date is not None else None
+    if taken is not None and taken < run_date:
+        print(f"pool-builder: warning: positions snapshot not refreshed since {taken} (as_of "
+              f"{snapshot.as_of.isoformat()}) — held names from it are added, a newer position may be missing",
+              file=sys.stderr)
+    elif taken is not None and taken > run_date:
+        print(f"pool-builder: warning: rebuilding {run_date} with the positions of {taken} — held names are "
+              "as of then, not as of that date", file=sys.stderr)
     listed = {ticker.upper() for ticker in core_tickers}
     held: set[str] = set()
     for position in snapshot.positions:

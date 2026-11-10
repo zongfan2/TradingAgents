@@ -165,7 +165,7 @@ Written (atomic rewrite) by every adapter `refresh` from live broker state.
 Readers: **decision context** — the runner injects a held ticker's
 snapshot into the trader prompt; and **coverage** — the pool builder appends
 every held name the core yaml does not list to the session's core layer
-(pool-data-contract rule 1, 2026-11-09), using a stale snapshot with a
+(pool-data-contract rule 1, 2026-11-09), using a snapshot not refreshed on the run date with a
 warning rather than dropping coverage. The adapter itself never reads it (it
 checks live broker state at submit time), and an `as_of` older than 1
 trading day means the runner injects "position data unavailable" instead of

@@ -2005,12 +2005,12 @@ def test_a_core_yaml_entry_in_another_case_is_not_added_twice(pool_dir, tmp_path
 @pytest.mark.unit
 def test_a_stale_snapshot_still_covers_its_names_with_a_warning(pool_dir, tmp_path, capsys):
     write_core(pool_dir, [{"ticker": "MSFT"}])
-    write_positions(tmp_path, [("HUM", 5.0, [])])  # as_of 2026-11-10
-    late = date(2026, 11, 13)
-    assert [c.ticker for c in pool_builder.held_core_entries("us", {"MSFT"}, tmp_path / "ledger", late)] == ["HUM"]
-    assert "positions snapshot is stale" in capsys.readouterr().err
-    pool_builder.held_core_entries("us", {"MSFT"}, tmp_path / "ledger", date(2026, 11, 10))
-    assert "stale" not in capsys.readouterr().err
+    write_positions(tmp_path, [("HUM", 5.0, [])])  # as_of 2026-11-10T00:30Z: 11-09 in New York
+    nxt = date(2026, 11, 10)  # the next us slot: yesterday's entries may be missing
+    assert [c.ticker for c in pool_builder.held_core_entries("us", {"MSFT"}, tmp_path / "ledger", nxt)] == ["HUM"]
+    assert "not refreshed since 2026-11-09" in capsys.readouterr().err
+    pool_builder.held_core_entries("cn", set(), tmp_path / "ledger", date(2026, 11, 10))  # 08:30 Shanghai, same day
+    assert capsys.readouterr().err == ""
 
 
 @pytest.mark.unit
@@ -2028,4 +2028,6 @@ def test_rebuilding_a_past_date_warns_that_positions_are_today_s(tmp_path, capsy
     write_positions(tmp_path, [("HUM", 5.0, [])])  # as_of 2026-11-10
     pool_pinned = pool_builder.held_core_entries("us", set(), tmp_path / "ledger", date(2026, 11, 2))
     assert [c.ticker for c in pool_pinned] == ["HUM"]
-    assert "held names are as of now" in capsys.readouterr().err
+    assert "rebuilding 2026-11-02 with the positions of 2026-11-09" in capsys.readouterr().err
+    pool_builder.held_core_entries("us", set(), tmp_path / "ledger", date(2026, 11, 9))  # a same-day NY rerun
+    assert capsys.readouterr().err == ""

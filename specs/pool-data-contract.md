@@ -78,11 +78,16 @@ Hard requirements:
    ticker charset, adds nothing for it with a stderr warning — never a failed
    build. When no pool file exists, consumers' fallback to
    `core.<session>.yaml` alone has no held names (the degraded mode the
-   reading rule already accepts). A stale snapshot (older than 1 trading day,
-   the runner's rule) is still used, with a stderr warning: a position opened
-   since its last refresh is then missing until the next good refresh.
-   Rebuilding a past date uses today's snapshot, with a warning. The fold
-   of a held name's opportunity/watch entry into core is case-insensitive.
+   reading rule already accepts). A snapshot not refreshed on the run date
+   (the session's calendar date; every slot's settle step refreshes it
+   first) is still used, with a stderr warning: a position opened since its
+   last refresh is then missing until the next good refresh. Rebuilding a
+   past date uses the current snapshot, with a warning. The fold of a held
+   name's opportunity/watch entry into core is case-insensitive. Symbols
+   are the broker's position symbols (the namespace the runner's position
+   context already assumes): a class share the broker and the yaml spell
+   differently (BRK.B / BRK-B) would be listed twice — none is in any pool
+   today.
 2. Every `opportunity`/`watch` entry has `score` (0–10 float), `catalyst_type`
    (`earnings|product|regulatory|M&A|guidance|flow|macro-exposure|other`),
    `rationale`, ≥1 citation URL, and a `technical` block with `gate`.
