@@ -678,6 +678,8 @@ def test_the_scoreboard_counts_multi_session_excess_once_closed(tmp_path):
                                      "分歧": {"n": 1, "mean_excess_pct": -6.0}}  # FN 48/50: both ends present
     assert dr.forward_excess(prices, "FN", "us", DAY, 3) is None  # its end close is missing
     assert dr.forward_excess(prices, "FN", "us", DAY, 2) == pytest.approx(1.0)
+    no_start = {**prices, "NVDA": prices["NVDA"][1:]}  # the close before the decision day is missing
+    assert dr.forward_excess(no_start, "NVDA", "us", DAY, 3) is None
 
 
 @pytest.mark.unit

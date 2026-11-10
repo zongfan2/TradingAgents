@@ -407,8 +407,9 @@ def _with_moves(names: list[dict], session: str, day: date, prices: dict) -> lis
 def forward_excess(prices: dict, ticker: str, session: str, day: date, sessions: int) -> float | None:
     """% excess vs the benchmark from the close before ``day`` to the close
     of the ``sessions``-th session from ``day`` on (the benchmark's bars are
-    the calendar). None until that session has closed, or when a close the
-    span needs is missing (never a span across a gap)."""
+    the calendar). None until that session has closed, or when the start or
+    end close (the name's or the benchmark's) is missing; only those two
+    closes are needed, so a missing bar inside the span does not matter."""
     bench = prices.get(_benchmark(ticker, session), [])
     dates = [d for d, _c in bench]
     if day not in dates:
