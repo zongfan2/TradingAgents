@@ -72,7 +72,8 @@ Hard requirements:
    analysed every slot until it is closed. Its opportunity entry folds into
    core (no cross-layer duplicate). Only in a session whose core is analysed
    (`core_analysis_sessions`; elsewhere core gets no brief and no analysis,
-   so the held name keeps its opportunity coverage). A missing snapshot adds
+   so the held name keeps its opportunity coverage, which the normal exit
+   rules can still end — acceptable while no core-off session trades). A missing snapshot adds
    nothing; an unreadable snapshot or config, or a symbol outside the ledger
    ticker charset, adds nothing for it with a stderr warning — never a failed
    build. When no pool file exists, consumers' fallback to

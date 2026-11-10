@@ -1931,6 +1931,7 @@ def test_a_closed_position_leaves_core_and_a_bad_snapshot_adds_nothing(pool_dir,
     write_core(pool_dir, [{"ticker": "MSFT"}])
     build_pool("us", as_of=RUN_DATE, runner=FakeRunner(["[]"]), fetch_ohlcv=FakeFetcher())
     assert [c.ticker for c in read_written_pool(pool_dir).core] == ["MSFT"]  # no snapshot
+    assert "positions" not in capsys.readouterr().err  # a missing snapshot is silent
     (tmp_path / "ledger").mkdir()
     (tmp_path / "ledger" / "positions.json").write_text("{broken", encoding="utf-8")
     build_pool("us", as_of=RUN_DATE, runner=FakeRunner(["[]"]), fetch_ohlcv=FakeFetcher())

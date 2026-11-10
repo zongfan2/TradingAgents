@@ -15,8 +15,8 @@ price structure must confirm it.
 
 1. **Load** — read `core.<session>.yaml` (missing file ⇒ empty core + warn),
    append the open positions it does not list from the ledger's
-   `positions.json` (R1; a missing, stale or unreadable snapshot degrades
-   with a warning, never fails the build), and
+   `positions.json` (R1; a missing snapshot adds nothing; a stale or
+   unreadable one degrades with a warning; never a failed build), and
    the most recent pool file for the session dated **strictly before** the run
    date (hysteresis state carries across weekends, holidays, and failed days;
    a same-day rerun never reads its own output; no prior file at all ⇒ fresh
@@ -68,7 +68,10 @@ price structure must confirm it.
   when the technical gate would fail it (the gate applies to the opportunity
   path only). Open positions the yaml does not list join core after the yaml
   entries while held (pool-data-contract rule 1, user decision 2026-11-09:
-  a position must always be watched for a sell signal; before this, a name
+  a position must always be watched for a sell signal — in a session whose
+  core is analysed, the only one that executes today (us); in a core-off
+  session a held name keeps only its opportunity coverage, which can lapse
+  by the exit rules — a known gap while such a session never trades; before this, a name
   bought from the opportunity layer could leave the pool and lose its brief
   and its analysis).
 - **R2 — Deterministic gate**: given the same OHLCV, the gate's verdict is
