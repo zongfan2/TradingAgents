@@ -58,6 +58,7 @@ from pipeline.common import (
     SESSIONS,
     atomic_write,
     locked_append,
+    position_snapshot_stale,
     session_date,
     session_for_ticker,
     sha256_file,
@@ -1058,29 +1059,6 @@ def _attempt_number(run_id: str) -> int:
         return int(run_id.rsplit("-", 1)[1])
     except (IndexError, ValueError):
         return 0
-
-
-def position_snapshot_stale(
-    as_of: datetime, slot_date: date, next_session: date | None = None
-) -> bool:
-    """Contract: ``as_of`` older than 1 trading day ⇒ stale.
-
-    A Friday refresh is still the most recent trading day's state on Monday
-    (only weekend days in between); a whole trading session between ``as_of``
-    and the slot means that session's refresh was missed.
-
-    ``next_session`` is the snapshot's broker-calendar session after
-    ``as_of`` (ledger contract): stale iff that session is earlier than the
-    slot. Without it, sessions are approximated as weekdays — a holiday then
-    reads as a missed refresh, which degrades to "position data unavailable",
-    never to stale numbers.
-    """
-    as_of_day = as_of.astimezone(timezone.utc).date()
-    if as_of_day >= slot_date:
-        return False
-    if next_session is not None:
-        return next_session < slot_date
-    return _weekdays_between(as_of_day, slot_date) >= 1
 
 
 def position_context_for(

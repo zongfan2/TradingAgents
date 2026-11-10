@@ -14,7 +14,7 @@ import hashlib
 import os
 import re
 import tempfile
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -230,3 +230,29 @@ def render_template(text: str, mapping: dict[str, object]) -> str:
         detail = ", ".join(unresolved) if unresolved else "malformed '{{' sequence"
         raise TemplateError(f"unresolved template placeholders: {detail}")
     return out
+
+
+def position_snapshot_stale(
+    as_of: datetime, slot_date: date, next_session: date | None = None
+) -> bool:
+    """Contract: ``as_of`` older than 1 trading day ⇒ stale (ledger
+    contract; shared by the analysis runner and the pool builder).
+
+    A Friday refresh is still the most recent trading day's state on Monday
+    (only weekend days in between); a whole trading session between ``as_of``
+    and the slot means that session's refresh was missed.
+
+    ``next_session`` is the snapshot's broker-calendar session after
+    ``as_of`` (ledger contract): stale iff that session is earlier than the
+    slot. Without it, sessions are approximated as weekdays — a holiday then
+    reads as a missed refresh, which degrades to "position data unavailable",
+    never to stale numbers.
+    """
+    as_of_day = as_of.astimezone(timezone.utc).date()
+    if as_of_day >= slot_date:
+        return False
+    if next_session is not None:
+        return next_session < slot_date
+    between = sum(1 for offset in range(1, max(0, (slot_date - as_of_day).days))
+                  if (as_of_day + timedelta(days=offset)).weekday() < 5)
+    return between >= 1

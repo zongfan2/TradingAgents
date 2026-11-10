@@ -4,7 +4,9 @@ Spec: ``specs/pool-builder.md`` (stages 1–5, R1–R5); data shape:
 ``specs/pool-data-contract.md`` (v1). One invocation per session slot:
 
 1. **Load** — mirror ``core.<session>.yaml`` (missing ⇒ empty core + stderr
-   warn; unreadable ⇒ hard failure) and load hysteresis state from the most
+   warn; unreadable ⇒ hard failure), append the open positions the yaml does
+   not list from the ledger's ``positions.json`` (R1; never a hard failure),
+   and load hysteresis state from the most
    recent pool file dated **strictly before** the run date (never today's own
    output — R3; streaks carry across weekends/holidays/failed days).
 2. **Nominate** — render ``prompts/pool_nomination.md`` and run a
@@ -73,6 +75,7 @@ from pipeline.common import (
     append_log_line,
     archive_existing,
     atomic_write,
+    position_snapshot_stale,
     render_template,
     session_date,
     session_for_ticker,
@@ -1244,12 +1247,9 @@ def held_core_entries(session: str, core_tickers: set[str], ledger_dir: str | Pa
         print(f"pool-builder: warning: positions snapshot unreadable ({_one_line(exc)}) — "
               "no held names added to core", file=sys.stderr)
         return []
-    if run_date is not None:
-        from pipeline.analysis_runner import position_snapshot_stale
-
-        if position_snapshot_stale(snapshot.as_of, run_date, snapshot.next_session):
-            print(f"pool-builder: warning: positions snapshot is stale (as_of {snapshot.as_of.isoformat()}) — "
-                  "held names from it are added, a newer position may be missing", file=sys.stderr)
+    if run_date is not None and position_snapshot_stale(snapshot.as_of, run_date, snapshot.next_session):
+        print(f"pool-builder: warning: positions snapshot is stale (as_of {snapshot.as_of.isoformat()}) — "
+              "held names from it are added, a newer position may be missing", file=sys.stderr)
     listed = {ticker.upper() for ticker in core_tickers}
     held: set[str] = set()
     for position in snapshot.positions:

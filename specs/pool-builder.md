@@ -13,7 +13,10 @@ price structure must confirm it.
 
 ## Stages
 
-1. **Load** — read `core.<session>.yaml` (missing file ⇒ empty core + warn) and
+1. **Load** — read `core.<session>.yaml` (missing file ⇒ empty core + warn),
+   append the open positions it does not list from the ledger's
+   `positions.json` (R1; a missing, stale or unreadable snapshot degrades
+   with a warning, never fails the build), and
    the most recent pool file for the session dated **strictly before** the run
    date (hysteresis state carries across weekends, holidays, and failed days;
    a same-day rerun never reads its own output; no prior file at all ⇒ fresh
