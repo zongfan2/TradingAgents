@@ -25,7 +25,7 @@ def prices_for(*tickers, moves=None):
     """Two sessions: the day before and DAY, with each ticker's % move."""
     moves = moves or {}
     out = {}
-    for t in (*tickers, "SPY", "000300.SS", "^HSI"):
+    for t in (*tickers, *dr.BENCHMARKS.values()):
         m = moves.get(t, 0.0)
         out[t] = [(date(2026, 11, 3), 100.0), (DAY, 100.0 * (1 + m / 100))]
     return out
@@ -307,8 +307,11 @@ def test_the_scoreboard_counts_decision_day_excess_by_impact_and_rating(tmp_path
     board = dr.build_facts(cfg, DAY, prices=prices_for("NVDA", "FN", moves={"NVDA": 3.0, "FN": -2.0, "SPY": 1.0}))
     sb = board["scoreboard"]
     assert sb["sessions"] == 1
-    assert sb["impact"] == {"偏空": {"n": 1, "mean_excess_pct": 2.0}, "分歧": {"n": 1, "mean_excess_pct": -3.0}}
-    assert sb["pm_rating"] == {"Overweight": {"n": 1, "mean_excess_pct": 2.0}}
+    one = sb["horizons"]["1d"]
+    assert one["impact"] == {"偏空": {"n": 1, "mean_excess_pct": 2.0}, "分歧": {"n": 1, "mean_excess_pct": -3.0}}
+    assert one["pm_rating"] == {"Overweight": {"n": 1, "mean_excess_pct": 2.0}}
+    assert one["decision"] == {"BUY": {"n": 1, "mean_excess_pct": 2.0}}
+    assert sb["horizons"]["3d"]["impact"] == {}  # not closed yet: left out, never a partial span
 
 
 @pytest.mark.unit
@@ -653,3 +656,41 @@ def test_the_review_schema_survives_the_strict_form():
 
     text = json.dumps(strict_output_schema(dr.REVIEW_SCHEMA))
     assert "maxLength" not in text and "maxItems" not in text
+
+
+@pytest.mark.unit
+def test_the_scoreboard_counts_multi_session_excess_once_closed(tmp_path):
+    from datetime import timedelta
+
+    cfg = config(tmp_path)
+    slot(cfg)  # DAY: NVDA BUY (偏空 brief), FN not analysed (分歧)
+    days = [date(2026, 11, 3), DAY, DAY + timedelta(days=1), DAY + timedelta(days=2), DAY + timedelta(days=5),
+            DAY + timedelta(days=6)]
+    nvda = [100, 101, 102, 104, 103, 99]
+    spy = [100, 100, 101, 101, 102, 102]
+    prices = {"NVDA": list(zip(days, map(float, nvda), strict=True)),
+              "FN": list(zip(days[:3] + days[4:], (50.0, 50.0, 51.0, 49.0, 48.0), strict=True)),  # no bar on day 3
+              **{b: [(d, 1.0) for d in days] for b in dr.BENCHMARKS.values()}}
+    prices["SPY"] = list(zip(days, map(float, spy), strict=True))
+    board = dr.build_facts(cfg, DAY, prices=prices)["scoreboard"]["horizons"]
+    assert board["3d"]["decision"] == {"BUY": {"n": 1, "mean_excess_pct": 3.0}}  # 104/100 vs 101/100
+    assert board["5d"]["impact"] == {"偏空": {"n": 1, "mean_excess_pct": -3.0},  # 99/100 vs 102/100
+                                     "分歧": {"n": 1, "mean_excess_pct": -6.0}}  # FN 48/50: both ends present
+    assert dr.forward_excess(prices, "FN", "us", DAY, 3) is None  # its end close is missing
+    assert dr.forward_excess(prices, "FN", "us", DAY, 2) == pytest.approx(1.0)
+
+
+@pytest.mark.unit
+def test_the_cn_benchmark_is_the_csi300_etf():
+    assert dr.BENCHMARKS["cn"] == "510300.SS"
+    assert dr._benchmark("600183.SS", "cn") == "510300.SS" and dr._benchmark("0700.HK", "cn") == "^HSI"
+
+
+@pytest.mark.unit
+def test_the_prompt_judges_on_multi_session_horizons(tmp_path, archive, monkeypatch):
+    cfg = config(tmp_path)
+    slot(cfg)
+    monkeypatch.setattr(dr, "closes", lambda tickers, fetch=None, **k: prices_for("NVDA", "FN"))
+    prompts = []
+    dr.review_day(cfg, DAY, send=None, runner=lambda prompt: prompts.append(prompt) or review())
+    assert "以 3d/5d 为准" in prompts[0] and '"horizons"' in prompts[0]
