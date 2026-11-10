@@ -2031,3 +2031,11 @@ def test_rebuilding_a_past_date_warns_that_positions_are_today_s(tmp_path, capsy
     assert "rebuilding 2026-11-02 with the positions of 2026-11-09" in capsys.readouterr().err
     pool_builder.held_core_entries("us", set(), tmp_path / "ledger", date(2026, 11, 9))  # a same-day NY rerun
     assert capsys.readouterr().err == ""
+
+
+@pytest.mark.unit
+def test_build_pool_passes_its_run_date_to_the_snapshot_check(pool_dir, tmp_path, capsys):
+    write_core(pool_dir, [{"ticker": "MSFT"}])
+    write_positions(tmp_path, [("HUM", 5.0, [])])  # 2026-11-09 in New York
+    build_pool("us", as_of=date(2026, 11, 10), runner=FakeRunner(["[]"]), fetch_ohlcv=FakeFetcher())
+    assert "positions snapshot not refreshed since 2026-11-09" in capsys.readouterr().err

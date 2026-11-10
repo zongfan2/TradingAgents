@@ -236,7 +236,7 @@ def position_snapshot_stale(
     as_of: datetime, slot_date: date, next_session: date | None = None
 ) -> bool:
     """Contract: ``as_of`` older than 1 trading day ⇒ stale (ledger
-    contract; shared by the analysis runner and the pool builder).
+    contract; the analysis runner's rule).
 
     A Friday refresh is still the most recent trading day's state on Monday
     (only weekend days in between); a whole trading session between ``as_of``
