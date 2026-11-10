@@ -1999,3 +1999,14 @@ def test_a_core_yaml_entry_in_another_case_is_not_added_twice(pool_dir, tmp_path
     write_core(pool_dir, [{"ticker": "msft"}])
     write_positions(tmp_path, [("MSFT", 16.0, [])])
     assert pool_builder.held_core_entries("us", {"msft"}, tmp_path / "ledger") == []
+
+
+@pytest.mark.unit
+def test_a_stale_snapshot_still_covers_its_names_with_a_warning(pool_dir, tmp_path, capsys):
+    write_core(pool_dir, [{"ticker": "MSFT"}])
+    write_positions(tmp_path, [("HUM", 5.0, [])])  # as_of 2026-11-10
+    late = date(2026, 11, 13)
+    assert [c.ticker for c in pool_builder.held_core_entries("us", {"MSFT"}, tmp_path / "ledger", late)] == ["HUM"]
+    assert "positions snapshot is stale" in capsys.readouterr().err
+    pool_builder.held_core_entries("us", {"MSFT"}, tmp_path / "ledger", date(2026, 11, 10))
+    assert "stale" not in capsys.readouterr().err

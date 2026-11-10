@@ -64,8 +64,9 @@ Hard requirements:
    it MAY annotate them with informative `score`/`technical` fields
    (renderable, never gating — core coverage is unconditional). The one
    addition (user decision 2026-11-09): after the yaml entries, every open
-   position of the session's market in the ledger's `positions.json` (a
-   filled quantity or a resting order) that the yaml does not list is
+   position of the session's market in the ledger's `positions.json` (a row
+   with a filled quantity — the adapter writes one per broker position; a
+   row carrying only open orders would count too) that the yaml does not list is
    appended, in ticker order, with the note `held position (auto-added while
    held)` — so a name bought from the opportunity layer is collected and
    analysed every slot until it is closed. Its opportunity entry folds into
@@ -76,7 +77,9 @@ Hard requirements:
    ticker charset, adds nothing for it with a stderr warning — never a failed
    build. When no pool file exists, consumers' fallback to
    `core.<session>.yaml` alone has no held names (the degraded mode the
-   reading rule already accepts).
+   reading rule already accepts). A stale snapshot (older than 1 trading day,
+   the runner's rule) is still used, with a stderr warning: a position opened
+   since its last refresh is then missing until the next good refresh.
 2. Every `opportunity`/`watch` entry has `score` (0–10 float), `catalyst_type`
    (`earnings|product|regulatory|M&A|guidance|flow|macro-exposure|other`),
    `rationale`, ≥1 citation URL, and a `technical` block with `gate`.

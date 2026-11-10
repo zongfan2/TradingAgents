@@ -1209,7 +1209,8 @@ HELD_NOTE = "held position (auto-added while held)"
 _HELD_SYMBOL = re.compile(_ID_TICKER)
 
 
-def held_core_entries(session: str, core_tickers: set[str], ledger_dir: str | Path | None = None) -> list[CoreEntry]:
+def held_core_entries(session: str, core_tickers: set[str], ledger_dir: str | Path | None = None,
+                      run_date: date | None = None) -> list[CoreEntry]:
     """Open positions of ``session``'s market (the ledger's positions.json:
     a filled quantity or a resting order) that the core yaml does not list,
     as core entries in ticker order. A position bought from the opportunity
@@ -1219,7 +1220,11 @@ def held_core_entries(session: str, core_tickers: set[str], ledger_dir: str | Pa
     no analysis, so a held name keeps its opportunity coverage instead. No
     snapshot adds nothing; an unreadable one, an unreadable config or an
     id-illegal symbol adds nothing for it, with a warning — the yaml core
-    still stands and the build never fails on it."""
+    still stands and the build never fails on it. A stale snapshot (the
+    runner's rule: older than 1 trading day before ``run_date``) is still
+    used — a closed name costs one extra analysis, a missed one costs the
+    watch — but warned about: a position opened since its refresh is
+    missing."""
     from pipeline.config import core_analysis_sessions
     from pipeline.contracts.ledger import PositionsSnapshot
 
@@ -1239,6 +1244,12 @@ def held_core_entries(session: str, core_tickers: set[str], ledger_dir: str | Pa
         print(f"pool-builder: warning: positions snapshot unreadable ({_one_line(exc)}) — "
               "no held names added to core", file=sys.stderr)
         return []
+    if run_date is not None:
+        from pipeline.analysis_runner import position_snapshot_stale
+
+        if position_snapshot_stale(snapshot.as_of, run_date, snapshot.next_session):
+            print(f"pool-builder: warning: positions snapshot is stale (as_of {snapshot.as_of.isoformat()}) — "
+                  "held names from it are added, a newer position may be missing", file=sys.stderr)
     listed = {ticker.upper() for ticker in core_tickers}
     held: set[str] = set()
     for position in snapshot.positions:
@@ -1297,7 +1308,7 @@ def build_pool(
     except BuilderError:
         append_log_line(log_path, as_of.isoformat(), session, backend, "-", "failed")
         raise
-    core = core + held_core_entries(session, {entry.ticker for entry in core}, ledger_dir)
+    core = core + held_core_entries(session, {entry.ticker for entry in core}, ledger_dir, as_of)
     core_tickers = {entry.ticker for entry in core}
     prior = load_prior_pool(directory, session, as_of)
     prior_opportunity = list(prior.opportunity) if prior else []

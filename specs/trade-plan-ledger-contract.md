@@ -162,11 +162,14 @@ resolves to the full configuration that produced the run.
 ```
 
 Written (atomic rewrite) by every adapter `refresh` from live broker state.
-Sole purpose: **decision context** — the runner injects a held ticker's
-snapshot into the trader prompt. The adapter itself never reads it (it checks
-live broker state at submit time), and an `as_of` older than 1 trading day
-means the runner injects "position data unavailable" instead of stale
-numbers.
+Readers: **decision context** — the runner injects a held ticker's
+snapshot into the trader prompt; and **coverage** — the pool builder appends
+every held name the core yaml does not list to the session's core layer
+(pool-data-contract rule 1, 2026-11-09), using a stale snapshot with a
+warning rather than dropping coverage. The adapter itself never reads it (it
+checks live broker state at submit time), and an `as_of` older than 1
+trading day means the runner injects "position data unavailable" instead of
+stale numbers.
 
 `next_session` (optional, nullable) is the first US trading session strictly
 after `as_of`'s UTC date, from the broker calendar at write time; it must
