@@ -1954,3 +1954,48 @@ def test_a_held_name_reaches_core_on_a_carried_forward_pool(pool_dir, tmp_path):
     build_pool("us", as_of=RUN_DATE, runner=FakeRunner(["not json", "still not json"]), fetch_ohlcv=FakeFetcher())
     pool = read_written_pool(pool_dir)
     assert pool.carried_forward and [c.ticker for c in pool.core] == ["MSFT", "HUM"]
+
+
+@pytest.mark.unit
+def test_a_closed_position_drops_out_of_core_on_the_next_pool(pool_dir, tmp_path):
+    write_core(pool_dir, [{"ticker": "MSFT"}])
+    write_positions(tmp_path, [("HUM", 5.0, [])])
+    build_pool("us", as_of=FRIDAY, runner=FakeRunner(["[]"]), fetch_ohlcv=FakeFetcher())
+    assert [c.ticker for c in read_written_pool(pool_dir, date_str=FRIDAY.isoformat()).core] == ["MSFT", "HUM"]
+    write_positions(tmp_path, [("HUM", 0.0, [])])  # closed
+    build_pool("us", as_of=RUN_DATE, runner=FakeRunner(["[]"]), fetch_ohlcv=FakeFetcher())
+    pool = read_written_pool(pool_dir)
+    assert [c.ticker for c in pool.core] == ["MSFT"]
+    assert "HUM" not in {e.ticker for e in (*pool.opportunity, *pool.watch)}
+
+
+@pytest.mark.unit
+def test_held_names_join_core_only_where_core_is_analysed(pool_dir, tmp_path, monkeypatch):
+    monkeypatch.setenv("TRADINGAGENTS_CORE_ANALYSIS_SESSIONS", "us")
+    write_core(pool_dir, [{"ticker": "600183.SS"}], session="cn")
+    write_prior_pool(pool_dir, FRIDAY.isoformat(), session="cn", opportunity=[prior_opportunity("0700.HK")])
+    write_positions(tmp_path, [("0700.HK", 100.0, [])])
+    build_pool("cn", as_of=RUN_DATE, runner=FakeRunner(["[]"]), fetch_ohlcv=FakeFetcher())
+    pool = read_written_pool(pool_dir, session="cn")
+    assert [c.ticker for c in pool.core] == ["600183.SS"]  # catalyst-only cn: it keeps its opportunity coverage
+    assert [e.ticker for e in pool.opportunity] == ["0700.HK"]
+
+
+@pytest.mark.unit
+def test_an_odd_symbol_or_a_junk_config_never_fails_the_build(pool_dir, tmp_path, monkeypatch, capsys):
+    write_core(pool_dir, [{"ticker": "MSFT"}])
+    write_positions(tmp_path, [("", 1.0, []), ("BTC/USD", 1.0, []), ("hum ", 2.0, [])])
+    result = build_pool("us", as_of=RUN_DATE, runner=FakeRunner(["[]"]), fetch_ohlcv=FakeFetcher())
+    assert result.outcome == "written"
+    assert [c.ticker for c in read_written_pool(pool_dir).core] == ["MSFT", "HUM"]
+    assert capsys.readouterr().err.count("is not a pipeline ticker") == 2
+    monkeypatch.setenv("TRADINGAGENTS_CORE_ANALYSIS_SESSIONS", "mars")
+    assert pool_builder.held_core_entries("us", {"MSFT"}, tmp_path / "ledger") == []
+    assert "no held names added to core" in capsys.readouterr().err
+
+
+@pytest.mark.unit
+def test_a_core_yaml_entry_in_another_case_is_not_added_twice(pool_dir, tmp_path):
+    write_core(pool_dir, [{"ticker": "msft"}])
+    write_positions(tmp_path, [("MSFT", 16.0, [])])
+    assert pool_builder.held_core_entries("us", {"msft"}, tmp_path / "ledger") == []

@@ -69,8 +69,14 @@ Hard requirements:
    appended, in ticker order, with the note `held position (auto-added while
    held)` — so a name bought from the opportunity layer is collected and
    analysed every slot until it is closed. Its opportunity entry folds into
-   core (no cross-layer duplicate). A missing or unreadable snapshot adds
-   nothing (stderr warning).
+   core (no cross-layer duplicate). Only in a session whose core is analysed
+   (`core_analysis_sessions`; elsewhere core gets no brief and no analysis,
+   so the held name keeps its opportunity coverage). A missing snapshot adds
+   nothing; an unreadable snapshot or config, or a symbol outside the ledger
+   ticker charset, adds nothing for it with a stderr warning — never a failed
+   build. When no pool file exists, consumers' fallback to
+   `core.<session>.yaml` alone has no held names (the degraded mode the
+   reading rule already accepts).
 2. Every `opportunity`/`watch` entry has `score` (0–10 float), `catalyst_type`
    (`earnings|product|regulatory|M&A|guidance|flow|macro-exposure|other`),
    `rationale`, ≥1 citation URL, and a `technical` block with `gate`.

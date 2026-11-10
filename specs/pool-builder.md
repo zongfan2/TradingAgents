@@ -87,8 +87,10 @@ price structure must confirm it.
 
 ## Non-goals
 
-- No position awareness beyond the core file (holdings sync with the broker is
-  the execution adapter's world; the user curates core manually).
+- No position awareness beyond the core file and the ledger's
+  `positions.json` (read only to keep open positions in core while held, R1;
+  holdings sync with the broker is the execution adapter's world; the user
+  curates the core yaml manually).
 - No intraday updates; no fundamental screening (a future gate stage).
 
 ## Acceptance criteria
@@ -101,4 +103,5 @@ price structure must confirm it.
    scores and logs them.
 2. Nomination validation rejects malformed model output and retries once.
 3. A full dry run against recorded fixtures produces a contract-valid pool
-   file; core entries mirror the yaml verbatim.
+   file; core entries mirror the yaml verbatim, followed by any open
+   positions of the session the yaml does not list (R1).

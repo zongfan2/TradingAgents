@@ -85,6 +85,7 @@ from pipeline.contracts.base import (
     validation_error_messages,
 )
 from pipeline.contracts.briefs import CatalystType
+from pipeline.contracts.ledger import _ID_TICKER  # the ticker charset run ids carry
 from pipeline.contracts.pool import (
     OPPORTUNITY_CAP,
     WATCH_CAP,
@@ -1202,6 +1203,10 @@ def _filter_session_nominees(
 
 #: Note on a core entry the builder appended for an open position.
 HELD_NOTE = "held position (auto-added while held)"
+#: A broker symbol the pipeline can carry in run ids (the ledger contract's
+#: ticker charset, the runner's normalize_tickers rule); anything else (a
+#: crypto pair, an empty row) is left out with a warning.
+_HELD_SYMBOL = re.compile(_ID_TICKER)
 
 
 def held_core_entries(session: str, core_tickers: set[str], ledger_dir: str | Path | None = None) -> list[CoreEntry]:
@@ -1209,11 +1214,18 @@ def held_core_entries(session: str, core_tickers: set[str], ledger_dir: str | Pa
     a filled quantity or a resting order) that the core yaml does not list,
     as core entries in ticker order. A position bought from the opportunity
     layer is then collected and analysed every slot like core, until it is
-    closed (user decision 2026-11-09). No or an unreadable snapshot adds
-    nothing (a warning): the yaml core still stands."""
+    closed (user decision 2026-11-09). Only in a session whose core is
+    analysed (``core_analysis_sessions``): elsewhere core gets no brief and
+    no analysis, so a held name keeps its opportunity coverage instead. No
+    snapshot adds nothing; an unreadable one, an unreadable config or an
+    id-illegal symbol adds nothing for it, with a warning — the yaml core
+    still stands and the build never fails on it."""
+    from pipeline.config import core_analysis_sessions
     from pipeline.contracts.ledger import PositionsSnapshot
 
     try:
+        if session not in core_analysis_sessions():
+            return []
         path = Path(ledger_dir or load_config().ledger_dir) / "positions.json"
     except ValueError as exc:  # a junk config value elsewhere: the yaml core still stands
         print(f"pool-builder: warning: config unreadable ({_one_line(exc)}) — no held names added to core",
@@ -1228,11 +1240,18 @@ def held_core_entries(session: str, core_tickers: set[str], ledger_dir: str | Pa
               "no held names added to core", file=sys.stderr)
         return []
     listed = {ticker.upper() for ticker in core_tickers}
-    held = sorted({
-        p.ticker.upper() for p in snapshot.positions
-        if (p.qty or p.open_orders) and session_for_ticker(p.ticker) == session
-    } - listed)
-    return [CoreEntry(ticker=ticker, note=HELD_NOTE) for ticker in held]
+    held: set[str] = set()
+    for position in snapshot.positions:
+        if not (position.qty or position.open_orders):
+            continue
+        symbol = str(position.ticker).strip().upper()
+        if not _HELD_SYMBOL.fullmatch(symbol):
+            print(f"pool-builder: warning: held symbol {position.ticker!r} is not a pipeline ticker — "
+                  "not added to core", file=sys.stderr)
+            continue
+        if session_for_ticker(symbol) == session:
+            held.add(symbol)
+    return [CoreEntry(ticker=ticker, note=HELD_NOTE) for ticker in sorted(held - listed)]
 
 
 def build_pool(

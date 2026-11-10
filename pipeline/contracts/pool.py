@@ -63,8 +63,10 @@ class TechnicalBlock(ContractModel):
 
 
 class CoreEntry(ContractModel):
-    """Mirror of a ``core.<session>.yaml`` row; ``score``/``technical`` are
-    informative annotations the builder MAY add (renderable, never gating)."""
+    """Mirror of a ``core.<session>.yaml`` row, or an open position the yaml
+    does not list (note ``held position (auto-added while held)``, contract
+    rule 1); ``score``/``technical`` are informative annotations the builder
+    MAY add (renderable, never gating)."""
 
     ticker: str = Field(min_length=1)
     note: str | None = None
