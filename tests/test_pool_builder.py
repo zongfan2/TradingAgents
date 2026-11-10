@@ -187,6 +187,8 @@ def pool_dir(tmp_path, monkeypatch):
     directory = tmp_path / "pools"
     directory.mkdir()
     monkeypatch.setenv(pool_builder.POOL_DIR_ENV, str(directory))
+    # No test reads the real positions snapshot (held names join core).
+    monkeypatch.setenv("TRADINGAGENTS_LEDGER_DIR", str(tmp_path / "ledger"))
     # These tests' fixtures are claude-flavored; the shipped default backend
     # is codex per D19, so pin the config env (the resolution itself is
     # covered by the dedicated default-backend test below).
@@ -1892,3 +1894,63 @@ def test_build_pool_default_emitter_config_error_never_escapes(pool_dir, monkeyp
     assert result.outcome == "written"
     assert "| written" in builder_log(pool_dir)
     assert "funnel events skipped in _emit_pool_funnel" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Held positions join core while held (user decision 2026-11-09)
+# ---------------------------------------------------------------------------
+
+
+def write_positions(tmp_path, positions):
+    ledger = tmp_path / "ledger"
+    ledger.mkdir(exist_ok=True)
+    (ledger / "positions.json").write_text(json.dumps({
+        "as_of": "2026-11-10T00:30:07Z", "next_session": None, "equity": 100000.0,
+        "positions": [{"ticker": t, "qty": qty, "avg_entry": 10.0, "last_fill_at": "2026-11-09T14:45:00Z",
+                       "market_value": 10.0 * qty, "unrealized_pl": 0.0, "tranches": 1,
+                       "open_orders": orders} for t, qty, orders in positions]}), encoding="utf-8")
+
+
+@pytest.mark.unit
+def test_a_held_name_joins_core_after_the_yaml_and_folds_its_opportunity_entry(pool_dir, tmp_path):
+    write_core(pool_dir, [{"ticker": "MSFT"}, {"ticker": "AAPL", "note": "long"}])
+    write_prior_pool(pool_dir, FRIDAY.isoformat(), opportunity=[prior_opportunity("HUM")])
+    write_positions(tmp_path, [("MSFT", 16.0, []), ("HUM", 5.0, []), ("0700.HK", 100.0, []),
+                               ("CRWD", 0.0, [{"client_order_id": "x", "leg": "entry", "price": 300.0}]),
+                               ("TSLA", 0.0, [])])
+    build_pool("us", as_of=RUN_DATE, runner=FakeRunner(["[]"]), fetch_ohlcv=FakeFetcher())
+    pool = read_written_pool(pool_dir)
+    assert [(c.ticker, c.note) for c in pool.core] == [
+        ("MSFT", None), ("AAPL", "long"),  # the yaml first, verbatim
+        ("CRWD", pool_builder.HELD_NOTE), ("HUM", pool_builder.HELD_NOTE)]  # a resting entry counts; flat TSLA does not
+    assert pool.opportunity == []  # HUM folds into core, never a cross-layer duplicate
+
+
+@pytest.mark.unit
+def test_a_closed_position_leaves_core_and_a_bad_snapshot_adds_nothing(pool_dir, tmp_path, capsys):
+    write_core(pool_dir, [{"ticker": "MSFT"}])
+    build_pool("us", as_of=RUN_DATE, runner=FakeRunner(["[]"]), fetch_ohlcv=FakeFetcher())
+    assert [c.ticker for c in read_written_pool(pool_dir).core] == ["MSFT"]  # no snapshot
+    (tmp_path / "ledger").mkdir()
+    (tmp_path / "ledger" / "positions.json").write_text("{broken", encoding="utf-8")
+    build_pool("us", as_of=RUN_DATE, runner=FakeRunner(["[]"]), fetch_ohlcv=FakeFetcher())
+    assert [c.ticker for c in read_written_pool(pool_dir).core] == ["MSFT"]
+    assert "no held names added to core" in capsys.readouterr().err
+
+
+@pytest.mark.unit
+def test_a_held_cn_name_joins_only_the_cn_core(pool_dir, tmp_path):
+    write_core(pool_dir, [{"ticker": "600183.SS"}], session="cn")
+    write_positions(tmp_path, [("0700.HK", 100.0, []), ("MSFT", 16.0, [])])
+    build_pool("cn", as_of=RUN_DATE, runner=FakeRunner(["[]"]), fetch_ohlcv=FakeFetcher())
+    pool = read_written_pool(pool_dir, session="cn")
+    assert [c.ticker for c in pool.core] == ["600183.SS", "0700.HK"]
+
+
+@pytest.mark.unit
+def test_a_held_name_reaches_core_on_a_carried_forward_pool(pool_dir, tmp_path):
+    write_core(pool_dir, [{"ticker": "MSFT"}])
+    write_positions(tmp_path, [("HUM", 5.0, [])])
+    build_pool("us", as_of=RUN_DATE, runner=FakeRunner(["not json", "still not json"]), fetch_ohlcv=FakeFetcher())
+    pool = read_written_pool(pool_dir)
+    assert pool.carried_forward and [c.ticker for c in pool.core] == ["MSFT", "HUM"]

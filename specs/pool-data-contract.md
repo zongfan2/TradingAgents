@@ -60,9 +60,17 @@ collector / analysis runner / webui (readers).
 Hard requirements:
 
 1. `core` mirrors `core.<session>.yaml` tickers/notes verbatim (order
-   preserved). The builder never adds, drops, or reorders core entries; it MAY
-   annotate them with informative `score`/`technical` fields (renderable, never
-   gating — core coverage is unconditional).
+   preserved). The builder never drops or reorders the yaml's core entries;
+   it MAY annotate them with informative `score`/`technical` fields
+   (renderable, never gating — core coverage is unconditional). The one
+   addition (user decision 2026-11-09): after the yaml entries, every open
+   position of the session's market in the ledger's `positions.json` (a
+   filled quantity or a resting order) that the yaml does not list is
+   appended, in ticker order, with the note `held position (auto-added while
+   held)` — so a name bought from the opportunity layer is collected and
+   analysed every slot until it is closed. Its opportunity entry folds into
+   core (no cross-layer duplicate). A missing or unreadable snapshot adds
+   nothing (stderr warning).
 2. Every `opportunity`/`watch` entry has `score` (0–10 float), `catalyst_type`
    (`earnings|product|regulatory|M&A|guidance|flow|macro-exposure|other`),
    `rationale`, ≥1 citation URL, and a `technical` block with `gate`.

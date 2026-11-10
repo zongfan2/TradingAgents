@@ -1200,6 +1200,41 @@ def _filter_session_nominees(
     return nominated
 
 
+#: Note on a core entry the builder appended for an open position.
+HELD_NOTE = "held position (auto-added while held)"
+
+
+def held_core_entries(session: str, core_tickers: set[str], ledger_dir: str | Path | None = None) -> list[CoreEntry]:
+    """Open positions of ``session``'s market (the ledger's positions.json:
+    a filled quantity or a resting order) that the core yaml does not list,
+    as core entries in ticker order. A position bought from the opportunity
+    layer is then collected and analysed every slot like core, until it is
+    closed (user decision 2026-11-09). No or an unreadable snapshot adds
+    nothing (a warning): the yaml core still stands."""
+    from pipeline.contracts.ledger import PositionsSnapshot
+
+    try:
+        path = Path(ledger_dir or load_config().ledger_dir) / "positions.json"
+    except ValueError as exc:  # a junk config value elsewhere: the yaml core still stands
+        print(f"pool-builder: warning: config unreadable ({_one_line(exc)}) — no held names added to core",
+              file=sys.stderr)
+        return []
+    try:
+        snapshot = PositionsSnapshot.parse_lenient(json.loads(path.read_text(encoding="utf-8")))
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError, ValidationError) as exc:
+        print(f"pool-builder: warning: positions snapshot unreadable ({_one_line(exc)}) — "
+              "no held names added to core", file=sys.stderr)
+        return []
+    listed = {ticker.upper() for ticker in core_tickers}
+    held = sorted({
+        p.ticker.upper() for p in snapshot.positions
+        if (p.qty or p.open_orders) and session_for_ticker(p.ticker) == session
+    } - listed)
+    return [CoreEntry(ticker=ticker, note=HELD_NOTE) for ticker in held]
+
+
 def build_pool(
     session: str,
     as_of: date | str | None = None,
@@ -1212,6 +1247,7 @@ def build_pool(
     gate_rules: GateRules | None = None,
     lifecycle_rules: LifecycleRules | None = None,
     funnel: FunnelEvents | None = None,
+    ledger_dir: str | Path | None = None,
 ) -> BuildResult:
     """Run stages 1–5 for one session slot; raises :class:`BuilderError` only
     on the R4 hard failures (unreadable core, contract-invalid output, write
@@ -1242,6 +1278,7 @@ def build_pool(
     except BuilderError:
         append_log_line(log_path, as_of.isoformat(), session, backend, "-", "failed")
         raise
+    core = core + held_core_entries(session, {entry.ticker for entry in core}, ledger_dir)
     core_tickers = {entry.ticker for entry in core}
     prior = load_prior_pool(directory, session, as_of)
     prior_opportunity = list(prior.opportunity) if prior else []

@@ -63,7 +63,11 @@ price structure must confirm it.
 - **R1 — Core is read-only truth**: the builder never edits
   `core.<session>.yaml` and never drops a core ticker from the pool file, even
   when the technical gate would fail it (the gate applies to the opportunity
-  path only).
+  path only). Open positions the yaml does not list join core after the yaml
+  entries while held (pool-data-contract rule 1, user decision 2026-11-09:
+  a position must always be watched for a sell signal; before this, a name
+  bought from the opportunity layer could leave the pool and lose its brief
+  and its analysis).
 - **R2 — Deterministic gate**: given the same OHLCV, the gate's verdict is
   reproducible; all thresholds come from config, defaults documented here.
 - **R3 — Idempotent**: same-day rerun overwrites (hysteresis is computed from
