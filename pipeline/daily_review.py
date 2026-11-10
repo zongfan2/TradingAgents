@@ -43,7 +43,11 @@ SCOREBOARD_SESSIONS = 20
 #: A move at least this large on the day makes a non-analysed name worth naming.
 MISSED_MOVE_PCT = 5.0
 REVIEW_TIMEOUT_S = 300.0
-BENCHMARKS = {"us": "SPY", "cn": "000300.SS", "hk": "^HSI"}
+#: cn: the CSI 300 ETF — Yahoo serves the CSI 300 index (000300.SS) as a
+#: single latest bar, so the index never had a day change (2026-11-09).
+BENCHMARKS = {"us": "SPY", "cn": "510300.SS", "hk": "^HSI"}
+#: Scoreboard horizons in sessions, from the close before the decision day.
+HORIZONS = (1, 3, 5)
 VERDICTS = ("需要优化", "继续观察", "暂不调整")
 SEVERITIES = ("高", "中", "低")
 #: Size bounds (prompt and check — not the schema: codex sends it in OpenAI
@@ -400,33 +404,58 @@ def _with_moves(names: list[dict], session: str, day: date, prices: dict) -> lis
     return names
 
 
+def forward_excess(prices: dict, ticker: str, session: str, day: date, sessions: int) -> float | None:
+    """% excess vs the benchmark from the close before ``day`` to the close
+    of the ``sessions``-th session from ``day`` on (the benchmark's bars are
+    the calendar). None until that session has closed, or when the start or
+    end close (the name's or the benchmark's) is missing; only those two
+    closes are needed, so a missing bar inside the span does not matter."""
+    bench = prices.get(_benchmark(ticker, session), [])
+    dates = [d for d, _c in bench]
+    if day not in dates:
+        return None
+    i = dates.index(day)
+    if i == 0 or i + sessions - 1 >= len(dates):
+        return None
+    start, end = bench[i - 1], bench[i + sessions - 1]
+    closes_by_date = dict(prices.get(ticker, []))
+    t0, t1 = closes_by_date.get(start[0]), closes_by_date.get(end[0])
+    if None in (start[1], end[1], t0, t1):
+        return None
+    return ((t1 / t0 - 1) - (end[1] / start[1] - 1)) * 100
+
+
 def _scoreboard(config: PipelineConfig, day: date, prices: dict) -> dict:
-    """Rolling: the excess return of the decision day's own session (the
-    pre-market decision's day; it includes the overnight gap before the
-    09:45 execution) by brief impact word and by PM rating, over the last
-    SCOREBOARD_SESSIONS us sessions with a funnel snapshot."""
-    buckets: dict[str, dict[str, list[float]]] = {"impact": defaultdict(list), "pm_rating": defaultdict(list)}
+    """Rolling, over the last SCOREBOARD_SESSIONS us sessions with a funnel
+    snapshot: the excess return after each decision over HORIZONS sessions
+    (from the close before the pre-market decision, so the first includes
+    the overnight gap before the 09:45 execution), by decision, brief impact
+    word and PM rating. A horizon not yet closed is left out of its bucket."""
+    kinds = ("decision", "impact", "pm_rating")
+    buckets = {h: {kind: defaultdict(list) for kind in kinds} for h in HORIZONS}
     d, seen = day, 0
     while seen < SCOREBOARD_SESSIONS and (day - d).days < 60:
         if d.weekday() < 5:
             try:
-                names = _with_moves(_names(config, "us", d), "us", d, prices)
+                names = _names(config, "us", d)
             except Exception as exc:
                 logger.warning("daily review: scoreboard skipped %s (%s)", d, type(exc).__name__)
                 names = []
             if names:
                 seen += 1
             for row in names:
-                if row["excess_pct"] is None:
-                    continue
-                if row["impact"]:
-                    buckets["impact"][row["impact"]].append(row["excess_pct"])
-                if row["pm_rating"]:
-                    buckets["pm_rating"][row["pm_rating"]].append(row["excess_pct"])
+                for h in HORIZONS:
+                    excess = forward_excess(prices, row["ticker"], "us", d, h)
+                    if excess is None:
+                        continue
+                    for kind in kinds:
+                        if row[kind]:
+                            buckets[h][kind][row[kind]].append(excess)
         d -= timedelta(days=1)
-    return {"sessions": seen, "definition": "decision-day session excess vs benchmark", **{
-        kind: {key: {"n": len(v), "mean_excess_pct": round(sum(v) / len(v), 2)} for key, v in sorted(group.items())}
-        for kind, group in buckets.items()}}
+    return {"sessions": seen, "definition": "excess vs SPY over 1/3/5 sessions from the close before the decision",
+            "horizons": {f"{h}d": {kind: {key: {"n": len(v), "mean_excess_pct": round(sum(v) / len(v), 2)}
+                                          for key, v in sorted(group.items())}
+                                   for kind, group in buckets[h].items()} for h in HORIZONS}}
 
 
 def _error_kinds(config: PipelineConfig, day: date) -> dict[str, int]:
@@ -535,7 +564,8 @@ REVIEW_PROMPT = """你是一个交易研究流水线的复盘员。下面是 {da
 price_reads 记录行情读取被跳过（skipped，时间预算用完）和失败（failed）的股票数，大于 0 时相关统计不完整，要在总结里说明）；
 brief_used 不为空表示分析用的是那一天的旧简报（当天简报缺失时按合约沿用前一天的）；
 未分析却大幅波动的股票（missed_moves）；宏观判断；分析出错的原因分类（unrecorded 表示出错但没有留下用量记录、原因未知，常见于调用前就被拒，如认证失败）；账户、持仓与成交；
-以及最近 {sessions} 个交易日的滚动统计（决策当天的超额收益，按简报方向、按 PM 评级，含样本数）。
+以及最近 {sessions} 个交易日的滚动统计（scoreboard.horizons：决策后 1d/3d/5d 个交易日相对基准的超额收益，
+按分析结论 decision、简报方向 impact、PM 评级 pm_rating 分组，含样本数；尚未走完的区间不计入）。
 
 请用中文复盘：
 1. summary：两三句话总结今天的操作和结果。
@@ -543,6 +573,8 @@ brief_used 不为空表示分析用的是那一天的旧简报（当天简报缺
 3. verdict：策略是否需要优化——"需要优化"、"继续观察"或"暂不调整"。
 4. proposals：如果需要优化，给出具体改动（改什么规则或阈值）、理由、依据（必须引用样本数和数字）、风险。
    样本数少于 10 的规律不足以支撑策略改动，只能列入 watch。
+   判断规律以 3d/5d 为准：1d 只反映一天的行情（板块普涨普跌时尤其失真），1d 与 3d/5d 方向相反时，
+   不得据 1d 提出策略改动；引用滚动统计时写明区间（如"5d n=15 平均 -8.55%"）。
 5. watch：需要继续积累数据观察的现象。
 
 规则：只使用下面的事实，不要搜索、不要引用外部信息、不要编造任何数字；数字写阿拉伯数字；

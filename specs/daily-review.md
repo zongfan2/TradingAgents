@@ -57,7 +57,8 @@ prompt):
 
 - per us/cn name of the day: brief impact word, catalyst score, eval verdict,
   trigger code, decision and PM rating, execute outcome, the day's close
-  change and excess vs the benchmark (SPY / 000300.SS / ^HSI);
+  change and excess vs the benchmark (SPY / 510300.SS — the CSI 300 ETF: Yahoo serves the 000300.SS index
+  as a single latest bar — / ^HSI);
 - names without a decision that moved ≥ 5 % that day (missed moves);
 - the macro brief's six Impact words and eval verdict;
 - account equity change, fills, open positions (us);
@@ -71,9 +72,15 @@ prompt):
   failed — a truncated read is a fact in the prompt and a warning line in
   the message, never a quiet null;
 - a rolling scoreboard over the last 20 us sessions with a snapshot: the
-  **decision day's own session** excess return (the pre-market decision's
-  day — it includes the overnight gap before the 09:45 execution) by brief
-  impact word and by PM rating, with counts.
+  excess return over **1, 3 and 5 sessions** from the close before the
+  pre-market decision (so it includes the overnight gap before the 09:45
+  execution), by decision, brief impact word and PM rating, with counts; a
+  horizon not yet closed, or whose start or end close is missing, is left out
+  (only the two end closes are needed: a missing bar inside the span does not
+  change the return between them). The
+  prompt has the model judge patterns on 3d/5d — 1d is one session's tape
+  (2026-11-09: a sector rally made Underweight look inverted on 1d while its
+  3d/5d agreed) — and never propose a change from 1d against 3d/5d.
 
 One model call (the evaluator's model, `claude_command(..., role="eval")`,
 schema-bound JSON, 300 s timeout, usage component `daily_review`) writes, in
