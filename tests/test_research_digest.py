@@ -1177,6 +1177,7 @@ def test_an_old_slot_never_says_not_analysed(tmp_path, live):
     held_slot(cfg)
     later = rd.build_digest(cfg, "us", DAY, now=SLOT_END.replace(day=7)).splitlines()
     assert not any("TSLA" in line and "今日没有分析" in line for line in later)
+    assert "⚠️ 持仓提醒：MSFT 简报偏空，但分析没有给出卖出——是否卖出由你决定" in later  # the rest still shows
 
 
 @pytest.mark.unit
@@ -1184,3 +1185,37 @@ def test_no_held_alert_for_cn_or_unknown_holdings(tmp_path):
     assert rd.held_alerts("cn", {"0700.HK"}, []) == []
     assert rd.held_alerts("us", None, []) == [] and rd.held_alerts("us", set(), []) == []
     assert rd.held_alerts("us", {"NVDA"}, [], bought={"NVDA"}) == []  # bought in this slot
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("code", ["HOLD", "ERROR"])
+def test_a_ledger_decision_the_snapshot_misses_reads_to_be_verified(tmp_path, live, code):
+    cfg = config(tmp_path)
+    write_slot(cfg, briefs={}, tickers=[])  # an older snapshot kept on a failed rebuild: MU not in it
+    write_decision(cfg, ticker="MU", plan=BUY_PLAN, date_iso=DAY.isoformat(), decision=code)
+    book(cfg, held=["MU"])
+    assert alert_lines(cfg) == ["⚠️ 持仓提醒：MU 决策数据未读到，是否已分析待核实"]
+
+
+@pytest.mark.unit
+def test_a_superseded_shown_decision_reads_to_be_verified(tmp_path, live):
+    cfg = config(tmp_path)
+    write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "bearish — x.")},
+               tickers=[entry("NVDA", evaluate="warn", trigger="core", decide=decided(cfg, "NVDA", "HOLD", "Hold"))])
+    write_decision(cfg, ticker="NVDA", n=2, plan=SELL_PLAN, date_iso=DAY.isoformat(), decision="SELL")  # newer
+    book(cfg, held=["NVDA"])
+    assert alert_lines(cfg) == ["⚠️ 持仓提醒：NVDA 简报偏空，最新分析结论与下单待核实"]
+
+
+@pytest.mark.unit
+def test_after_execution_a_placed_sell_and_a_fresh_buy_are_not_flagged(tmp_path, live):
+    cfg = config(tmp_path)
+    write_slot(cfg, briefs={"MU": ticker_brief("MU", 7.0, "bearish — z."), "NVDA": ticker_brief("NVDA", 7.0, "bearish — y.")},
+               tickers=[{**entry("MU", decide=decided(cfg, "MU", "SELL", "Sell", plan=SELL_PLAN)), "final": "order-live"},
+                        {**entry("NVDA", decide=decided(cfg, "NVDA", "BUY", "Overweight")), "final": "order-live"}])
+    path = cfg.state_dir / "funnel" / "us" / f"{DAY}.json"
+    snap = json.loads(path.read_text())
+    snap["context"] = {"execute_ran": True}
+    path.write_text(json.dumps(snap), encoding="utf-8")
+    book(cfg, held=["MU", "NVDA"])  # the book after step 7: NVDA bought this slot
+    assert alert_lines(cfg) == []

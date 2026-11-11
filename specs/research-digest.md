@@ -45,12 +45,16 @@ line) was hard to read: the user asked why a name with no position was
   `⚠️ 持仓提醒：<T> …` when its brief's final Impact is bearish and no sell
   order follows (no SELL; a SELL the adapter will not place — blocked,
   模拟, 执行已暂停, a feeds-arm decision — reads `分析给出卖出但不会下单`;
-  an undetermined SELL reads `是否下单待核实`) — bearish briefs averaged
+  an undetermined one reads 待核实, below) — bearish briefs averaged
   −6.7 % excess over 5 sessions, n=18; when its analysis errored; or when
   it has no decision this slot (`今日没有分析`, only for the current slot's
-  digest — a retried older digest has other holdings — and `决策数据未读到，
-  是否已分析待核实` when the slot's decisions were not all read). A name
-  bought by this slot's order is not flagged. Unknown holdings or the cn
+  digest — a retried older digest has other holdings). What the digest
+  cannot pin down reads 待核实: no decision shown while the slot's decisions
+  were not all read or the ledger has a same-slot row for the name
+  (`决策数据未读到，是否已分析待核实`), and a shown decision step 7 may not
+  read (a newer attempt, a lost brief-arm event, an undetermined order) for
+  a bearish or errored name (`最新分析结论与下单待核实`). A name bought by
+  this slot's order is not flagged. Unknown holdings or the cn
   session give none.
 - **Macro**: the revision-bound eval verdict and each of sections 1–6's
   Impact direction (one phrase when all six agree), found by the contract's

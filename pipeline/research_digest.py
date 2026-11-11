@@ -22,7 +22,6 @@ import json
 import logging
 import re
 import subprocess
-from collections.abc import Sequence
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -663,40 +662,44 @@ def _window_passed(execution_time: str | None, slot_date: date, now: datetime) -
 
 
 def held_alerts(session: str, held: set[str] | None, tickers: list, *, sell_orders: set[str] = frozenset(),
-                sell_pending: set[str] = frozenset(),
-                bought: set[str] = frozenset(), unread: bool = False, unseen: Sequence[str] = (),
-                current: bool = True) -> list[str]:
+                undetermined: set[str] = frozenset(), bought: set[str] = frozenset(), unread: bool = False,
+                recorded: set[str] = frozenset(), current: bool = True) -> list[str]:
     """Lines for the held names that need the user's eye (user decision
     2026-11-10; never an order): a bearish brief with no sell order to
     follow (no SELL, or a SELL the adapter will not place — bearish briefs
     averaged −6.7 % over 5 sessions, n=18), an analysis error, or no
-    analysis this slot. A name with no decision on record reads 待核实 when
-    the slot's decisions were not all read (``unread``, ``unseen``), and is
-    left out when the digest is not the current slot's (holdings then are
-    not the slot's). A name bought in this slot (``bought``) is not flagged.
-    us only (cn never trades); unknown holdings give none."""
+    analysis this slot. Whatever the digest cannot pin down reads 待核实:
+    a shown decision step 7 may not read (``undetermined``: a newer attempt,
+    a lost brief-arm event, an unknown mode), or no decision shown while the
+    slot's decisions were not all read (``unread``) or the ledger has one
+    (``recorded``). 今日没有分析 only for the current slot's digest (a
+    retried older one has other holdings). A name bought by this slot's
+    order (``bought``) is not flagged. us only; unknown holdings give none."""
     if session != "us" or not held:
         return []
     by_ticker = {t.ticker.upper(): t for t in tickers}
-    unseen_upper = {u.upper() for u in unseen}
+    upper_of = lambda names: {n.upper() for n in names}  # noqa: E731
+    bought_u, recorded_u, undetermined_u = upper_of(bought), upper_of(recorded), upper_of(undetermined)
     out = []
     for symbol in sorted(held):
         upper = symbol.upper()
-        if upper in {b.upper() for b in bought}:
+        if upper in bought_u:
             continue
         t = by_ticker.get(upper)
         code = (t.decide or {}).get("code") if t is not None else None
-        impact = _last_impact(t.body) if t is not None and t.has_brief else None
-        if code == "ERROR":
-            out.append(f"⚠️ 持仓提醒：{symbol} 分析出错，今日没有结论——是否卖出由你决定")
-        elif code is None:
-            if unread or upper in unseen_upper:
+        bearish = (t is not None and t.has_brief and (impact := _last_impact(t.body)) is not None
+                   and impact[0] == IMPACT_NAMES.get("bearish"))
+        if code is None:
+            if unread or upper in recorded_u:
                 out.append(f"⚠️ 持仓提醒：{symbol} 决策数据未读到，是否已分析待核实")
             elif current:
                 out.append(f"⚠️ 持仓提醒：{symbol} 今日没有分析——是否卖出由你决定")
-        elif impact is not None and impact[0] == IMPACT_NAMES.get("bearish") and upper not in sell_orders:
-            reason = ("分析给出卖出，是否下单待核实" if upper in sell_pending else
-                      "分析给出卖出但不会下单" if code == "SELL" else "但分析没有给出卖出")
+        elif upper in undetermined_u and (code == "ERROR" or bearish):
+            out.append(f"⚠️ 持仓提醒：{symbol} {'简报偏空，' if bearish else ''}最新分析结论与下单待核实")
+        elif code == "ERROR":
+            out.append(f"⚠️ 持仓提醒：{symbol} 分析出错，今日没有结论——是否卖出由你决定")
+        elif bearish and upper not in sell_orders:
+            reason = "分析给出卖出但不会下单" if code == "SELL" else "但分析没有给出卖出"
             out.append(f"⚠️ 持仓提醒：{symbol} 简报偏空，{reason}——是否卖出由你决定")
     return out
 
@@ -761,7 +764,7 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
 
     actions: dict[str, str] = {}
     sell_orders: set[str] = set()  # held names whose SELL is (or will be) an order
-    sell_pending: set[str] = set()  # a SELL whose order is undetermined
+    undetermined: set[str] = set()  # a shown decision step 7 may not read, or an unknown order
     bought: set[str] = set()  # names this slot's order bought (after step 7)
     planned: list[str] = []
     undecided: list[str] = list(unseen) if session == "us" and mode not in ("模拟", "执行已暂停") else []
@@ -815,8 +818,8 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
         code = t.decide.get("code")
         if code == "SELL" and (ordered or t.final == "order-live"):
             sell_orders.add(t.ticker.upper())
-        elif code == "SELL" and (ordered is None or t.ticker in undecided):
-            sell_pending.add(t.ticker.upper())
+        elif ordered is None or t.ticker in undecided or blocker in ("later-attempt", "unknown"):
+            undetermined.add(t.ticker.upper())
         if code == "BUY" and t.final == "order-live":
             bought.add(t.ticker)
         if ordered:
@@ -857,9 +860,12 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
         current = slot_date == session_date(session, now)
     except Exception:
         current = False
-    alerts = held_alerts(session, held, tickers, sell_orders=sell_orders, sell_pending=sell_pending,
-                         bought=bought, unread=unread,
-                         unseen=unseen, current=current)
+    # Any same-slot ledger row (manual too) means a decision exists even when
+    # the snapshot does not show it (an older snapshot kept on a failed rebuild).
+    recorded = {r.ticker for r in records.values()
+                if r.session == session and str(r.date)[:10] == slot_date.isoformat()}
+    alerts = held_alerts(session, held, tickers, sell_orders=sell_orders, undetermined=undetermined,
+                         bought=bought, unread=unread, recorded=recorded, current=current)
     lines = [" ｜ ".join(head), *alerts, macro]
     if macro_summary:
         lines.append(f"  要点：{macro_summary}")
