@@ -661,6 +661,29 @@ def _window_passed(execution_time: str | None, slot_date: date, now: datetime) -
                            tzinfo=ZoneInfo(SESSION_TZ["us"]))
 
 
+def held_alerts(session: str, held: set[str] | None, tickers: list) -> list[str]:
+    """Lines for the held names that need the user's eye (user decision
+    2026-11-10; never an order): a bearish brief the analysis did not turn
+    into a SELL (bearish briefs averaged −6.7 % over 5 sessions, n=18), an
+    analysis error, or no analysis at all this slot. us only (cn never
+    trades); unknown holdings give none."""
+    if session != "us" or not held:
+        return []
+    by_ticker = {t.ticker.upper(): t for t in tickers}
+    out = []
+    for symbol in sorted(held):
+        t = by_ticker.get(symbol.upper())
+        code = (t.decide or {}).get("code") if t is not None else None
+        impact = _last_impact(t.body) if t is not None and t.has_brief else None
+        if code == "ERROR":
+            out.append(f"⚠️ 持仓提醒：{symbol} 分析出错，今日没有结论——是否卖出由你决定")
+        elif code is None:
+            out.append(f"⚠️ 持仓提醒：{symbol} 今日没有分析——是否卖出由你决定")
+        elif impact is not None and impact[0] == IMPACT_NAMES.get("bearish") and code != "SELL":
+            out.append(f"⚠️ 持仓提醒：{symbol} 简报偏空，但分析没有给出卖出——是否卖出由你决定")
+    return out
+
+
 def build_digest(config: PipelineConfig, session: str, slot_date: date, now: datetime | None = None) -> str:
     """The digest text for one slot; never raises on a missing or partial input."""
     try:
@@ -801,7 +824,7 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
             done += ("；" if done else "") + "待核实（决策数据未读到）"
         head.append(("已执行：" + done) if executed else
                     "计划下单" + (f"（{mode}）" if mode else "") + "：" + orders)
-    lines = [" ｜ ".join(head), macro]
+    lines = [" ｜ ".join(head), *held_alerts(session, held, tickers), macro]
     if macro_summary:
         lines.append(f"  要点：{macro_summary}")
     if analysed:

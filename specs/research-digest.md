@@ -40,6 +40,13 @@ line) was hard to read: the user asked why a name with no position was
   positions are **unknown** — the
   segment is left out and no line claims 无持仓) and the planned orders
   (us) or `A股不下单` (cn).
+- **Held alerts** (us, user decision 2026-11-10; right under the header,
+  one line each, never an order): for every held name of the trades book,
+  `⚠️ 持仓提醒：<T> …——是否卖出由你决定` when its brief's final Impact is
+  bearish and the analysis did not decide SELL (bearish briefs averaged
+  −6.7 % excess over 5 sessions, n=18), when its analysis errored, or when
+  it was not analysed this slot. Unknown holdings or the cn session give
+  none.
 - **Macro**: the revision-bound eval verdict and each of sections 1–6's
   Impact direction (one phrase when all six agree), found by the contract's
   heading rule.
@@ -219,3 +226,5 @@ periodic job finishes it, with an age bound so it cannot retry forever.
 6. No trades webhook or notifications off → nothing sent anywhere; a failure
    never changes the slot's outcome.
 7. Tests are offline (the summary call is stubbed by an autouse fixture).
+8. A held name with a bearish brief and no SELL, an analysis error, or no
+   analysis gets one `⚠️ 持仓提醒` line under the header (us only).

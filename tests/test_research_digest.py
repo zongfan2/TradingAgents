@@ -1121,3 +1121,31 @@ def test_the_core_session_off_label_names_the_slots_market(tmp_path, session, ti
     write_slot(cfg, session, briefs={ticker: ticker_brief(ticker, 3.0, "m — m.")},
                tickers=[entry(ticker, trigger="core-session-off")])
     assert f"• {market}核心股本时段不分析：{ticker} 3.0" in build(cfg, session)
+
+
+@pytest.mark.unit
+def test_held_names_needing_a_look_are_flagged_at_the_top(tmp_path):
+    cfg = config(tmp_path)
+    write_slot(cfg, briefs={"MSFT": ticker_brief("MSFT", 6.0, "bearish — guidance cut."),
+                            "NVDA": ticker_brief("NVDA", 7.0, "bearish — x."),
+                            "AMD": ticker_brief("AMD", 7.0, "bullish — y."),
+                            "MU": ticker_brief("MU", 7.0, "bearish — z.")},
+               tickers=[entry("MSFT", evaluate="warn", trigger="core", decide=decided(cfg, "MSFT", "HOLD", "Hold")),
+                        entry("NVDA", evaluate="warn", trigger="core", decide=decided(cfg, "NVDA", "ERROR", None)),
+                        entry("AMD", evaluate="warn", trigger="core", decide=decided(cfg, "AMD", "HOLD", "Hold")),
+                        entry("MU", evaluate="warn", trigger="core", decide=decided(cfg, "MU", "SELL", "Sell"))])
+    book(cfg, held=["MSFT", "NVDA", "AMD", "MU", "TSLA"])
+    lines = rd.build_digest(cfg, "us", DAY).splitlines()
+    alerts = [line for line in lines if line.startswith("⚠️ 持仓提醒")]
+    assert alerts == [
+        "⚠️ 持仓提醒：MSFT 简报偏空，但分析没有给出卖出——是否卖出由你决定",
+        "⚠️ 持仓提醒：NVDA 分析出错，今日没有结论——是否卖出由你决定",
+        "⚠️ 持仓提醒：TSLA 今日没有分析——是否卖出由你决定",
+    ]  # AMD bullish and MU already SELL: nothing to flag
+    assert lines.index(alerts[0]) == 1  # right under the header
+
+
+@pytest.mark.unit
+def test_no_held_alert_for_cn_or_unknown_holdings(tmp_path):
+    assert rd.held_alerts("cn", {"0700.HK"}, []) == []
+    assert rd.held_alerts("us", None, []) == [] and rd.held_alerts("us", set(), []) == []
