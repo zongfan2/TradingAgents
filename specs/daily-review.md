@@ -29,7 +29,7 @@ US trading date `day`, into `<root>/<category>/<day>/…` (root: env
 | `decisions` | `decisions.jsonl` — the ledger rows dated `day` |
 | `orders` | `orders.jsonl` — the ledger order rows whose client order id is dated `day` |
 | `digests` | `<session>.txt` — the research digest as sent (research_digest writes `state_dir/research_digest/<session>/<date>.txt` when it queues one) |
-| `prices` | `closes.csv` — date, ticker, close, change % for the day's names and benchmarks (a change across a missing close, or a missing bar — the name's previous bar is not the benchmark's previous session —, is empty, never a two-session move) |
+| `prices` | `closes.csv` — date, ticker, close, change % for the day's names and benchmarks (a change across a missing close, or a missing bar — the name's previous bar is not the benchmark's previous session —, is empty, never a two-session move); `quote_filled.json` — the names whose archived close came from the live quote (R2), kept until a later archive refreshes that row from a listed close |
 | `llm_usage` | `cli.jsonl` (the CLI usage log the writer uses, rows whose New York date is `day`), `analysis.jsonl` |
 | `broker` | `account.json`, `positions.json`, `fills.json` — read-only Alpaca snapshot (only when archived on the day itself) |
 | `reviews` | `review.md`, `review.json` (R2) |
@@ -55,6 +55,23 @@ re-queues and archives that same text — no second model call. The review archi
 facts (no brief prose — that is web-derived text and stays out of the
 prompt):
 
+- a day's close Yahoo has not listed yet (a NaN close, or no row — 510300.SS
+  and ^HSI on 2026-11-10) is filled from Yahoo's chart quote
+  (`regularMarketPrice`, its `regularMarketTime`, `previousClose`) for the
+  benchmarks and the day's names only, read after that market's close
+  (Shanghai 16:00, Hong Kong 17:00 — Yahoo's Asian quotes are delayed —,
+  New York 16:30 local), only when the
+  quote's own trade time is on the day at or after the regular close less
+  10 minutes (a holiday, a suspension or an intraday price never passes),
+  its previous close equals the series' last close before the day within
+  0.2 % (no missed session), and no later bar exists; a listed close is
+  never replaced. A shortened session (a US early close, a Hong Kong
+  half-day) closes before that time, so its late close is not filled — the
+  move stays null, never a wrong one;
+- `core_analysed` per market: a market whose core is not analysed by
+  configuration (llm-cost R6; cn today) lists its core names
+  `core-session-off`, and the prompt tells the model this is by design, not
+  a fault to report;
 - per us/cn name of the day: brief impact word, catalyst score, eval verdict,
   trigger code, decision and PM rating, execute outcome, the day's close
   change and excess vs the benchmark (SPY / 510300.SS — the CSI 300 ETF: Yahoo serves the 000300.SS index
@@ -69,8 +86,11 @@ prompt):
   that left no usage row (a run refused before any call, such as a 401)
   counted as `unrecorded`, and the day's fills;
 - `price_reads`: how many price reads were skipped (budget spent) or
-  failed — a truncated read is a fact in the prompt and a warning line in
-  the message, never a quiet null;
+  failed, and how many closes were filled from the quote (`quote_filled`,
+  named in `quote_filled_tickers`) — so an archived close from the quote is
+  identifiable in `review.json` and, for an archive that fetches for itself,
+  in `prices/<day>/quote_filled.json` (R1). A truncated read is a fact in the
+  prompt and a warning line in the message, never a quiet null;
 - a rolling scoreboard over the last 20 us sessions with a snapshot: the
   excess return over **1, 3 and 5 sessions** from the close before the
   pre-market decision (so it includes the overnight gap before the 09:45

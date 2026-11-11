@@ -16,6 +16,7 @@ import csv
 import io
 import json
 import logging
+import math
 import os
 import re
 import subprocess
@@ -127,18 +128,91 @@ def _day_tickers(config: PipelineConfig, day: date) -> dict[str, set[str]]:
 PRICE_BUDGET_S = 240.0
 
 
+#: Per market: local zone, the regular close, and a time safely after it.
+#: A quote counts as the day's close only when its own last-trade time is on
+#: the day at or after the close (less a few minutes), read after the margin.
+#: Read margins cover Yahoo's delayed Asian quotes (up to ~30 minutes).
+_SESSION_CLOSE = {"cn": ("Asia/Shanghai", time(15, 0), time(16, 0)),
+                  "hk": ("Asia/Hong_Kong", time(16, 0), time(17, 0)),
+                  "us": ("America/New_York", time(16, 0), time(16, 30))}
+#: How long before the close a last trade may be (a closing auction prints
+#: just before the bell; a thin name's last trade can be earlier).
+CLOSE_TRADE_SLACK = timedelta(minutes=10)
+#: The quote's previous close must equal the series' last close before the
+#: day within this fraction: else the series misses a session.
+QUOTE_PREV_TOLERANCE = 0.002
+
+
+def _market(ticker: str) -> str:
+    upper = ticker.upper()
+    if upper.endswith((".SS", ".SZ")):
+        return "cn"
+    return "hk" if upper.endswith(".HK") or upper == "^HSI" else "us"
+
+
+def _yahoo_quote(ticker: str) -> tuple[float, datetime, float]:
+    """(regular-market price, its trade time, previous close) from Yahoo's
+    chart metadata."""
+    import yfinance as yf
+
+    handle = yf.Ticker(ticker)
+    handle.history(period="5d", interval="1d", auto_adjust=False)
+    meta = handle.history_metadata or {}
+    return (float(meta["regularMarketPrice"]),
+            datetime.fromtimestamp(int(meta["regularMarketTime"]), timezone.utc),
+            float(meta["previousClose"]))
+
+
+def fill_day_close(ticker: str, series: list, day: date, now: datetime, quote=None) -> tuple[list, bool]:
+    """Yahoo often lists the latest session late (a NaN close, or no row at
+    all — 510300.SS and ^HSI on 2026-11-10). After that market's close, the
+    quote's regular-market price is the day's close when its own trade time
+    is on ``day``, at or after the close less CLOSE_TRADE_SLACK (so a
+    holiday, a suspension or an intraday price never passes), and its
+    previous close equals the series' last close before the day (the series
+    misses no session). Never with a later bar; a listed close is never
+    replaced. Returns the series and whether it was filled."""
+    if any(d == day and c is not None for d, c in series) or any(d > day for d, _c in series):
+        return series, False
+    zone_name, close_at, read_after = _SESSION_CLOSE[_market(ticker)]
+    zone = ZoneInfo(zone_name)
+    if now.astimezone(zone) < datetime.combine(day, read_after, tzinfo=zone):
+        return series, False
+    prior = [c for d, c in series if d < day and c is not None]
+    if not prior:
+        return series, False
+    try:
+        last, traded_at, previous = (quote or _yahoo_quote)(ticker)
+        traded = traded_at.astimezone(zone)
+    except Exception as exc:
+        logger.warning("daily review: quote for %s unavailable (%s)", ticker, type(exc).__name__)
+        return series, False
+    if (traded.date() != day
+            or traded < datetime.combine(day, close_at, tzinfo=zone) - CLOSE_TRADE_SLACK
+            or not all(math.isfinite(v) and v > 0 for v in (last, previous))
+            or abs(previous / prior[-1] - 1) > QUOTE_PREV_TOLERANCE):
+        return series, False
+    return sorted([(d, c) for d, c in series if d != day] + [(day, last)]), True
+
+
 def closes(tickers: set[str], fetch=None, budget_s: float = PRICE_BUDGET_S, *, first=(),
-           stats: dict | None = None) -> dict[str, list[tuple[date, float]]]:
+           stats: dict | None = None, day: date | None = None, quote=None,
+           now: datetime | None = None, fill: set[str] | None = None) -> dict[str, list[tuple[date, float]]]:
     """ticker -> clean daily closes (the price tape's source); a ticker whose
     read fails is left out (never an empty series). ``first`` (in order) is
     read before the rest, so a spent budget skips the oldest names, never the
-    benchmarks or the day's; ``stats`` receives the skipped and failed counts."""
+    benchmarks or the day's; ``stats`` receives the skipped, failed and
+    quote-filled counts. With ``day``, a close Yahoo has not listed yet is
+    filled from the quote after that market's close (fill_day_close) — for
+    the ``fill`` names only when given (the benchmarks and the day's names:
+    one quote round trip each, from the shared budget)."""
     import time as _time
 
     from pipeline import price_tape
 
     order = [t for t in dict.fromkeys(first) if t in tickers] + sorted(set(tickers) - set(first))
-    out, failed, skipped = {}, 0, 0
+    out, failed, skipped, filled = {}, 0, 0, []
+    now = now or datetime.now(timezone.utc)
     deadline = _time.monotonic() + budget_s
     for i, ticker in enumerate(order):
         if _time.monotonic() > deadline:
@@ -153,12 +227,16 @@ def closes(tickers: set[str], fetch=None, budget_s: float = PRICE_BUDGET_S, *, f
             continue
         # An unusable close stays in place as None: a change never spans it.
         series = [(d, c if c == c and c > 0 else None) for d, c in bars]
+        if day is not None and (fill is None or ticker in fill):
+            series, was_filled = fill_day_close(ticker, series, day, now, quote)
+            if was_filled:
+                filled.append(ticker)
         if any(c is not None for _d, c in series):
             out[ticker] = series
         else:
             failed += 1
     if stats is not None:
-        stats.update(skipped=skipped, failed=failed)
+        stats.update(skipped=skipped, failed=failed, quote_filled=len(filled), quote_filled_tickers=sorted(filled))
     return out
 
 
@@ -292,7 +370,21 @@ def _archive_into(config, day, root, iso, counts, *, broker, fetch, prices) -> N
            counts, "llm_usage")
     tickers = set().union(*_day_tickers(config, day).values()) | set(BENCHMARKS.values())
     if prices is None:
-        prices = closes(tickers, fetch, first=BENCHMARKS.values())
+        fetched: dict = {}
+        prices = closes(tickers, fetch, first=BENCHMARKS.values(), day=day, stats=fetched)
+        # The names whose archived close came from the quote (a retry, the
+        # archive CLI fetch for themselves): an older marker keeps a name
+        # until this run refreshes its row from a listed close (closes.csv
+        # never drops a row, so neither does the marker).
+        marker = root / "prices" / iso / "quote_filled.json"
+        filled = set(fetched.get("quote_filled_tickers", []))
+        listed = {t for t, series in prices.items() if t not in filled
+                  and any(d == day and c is not None for d, c in series)}
+        try:
+            older = set(json.loads(marker.read_text(encoding="utf-8")))
+        except (OSError, ValueError, TypeError):
+            older = set()
+        _write(marker, json.dumps(sorted((older - listed) | filled)), counts, "prices")
     session_of = {t: session for session, names in _day_tickers(config, day).items() for t in names}
     rows = [[iso, ticker, f"{close:.4f}",
              "" if (c := name_change(prices, ticker, session_of.get(ticker, "us"), day)) is None else f"{c:.2f}"]
@@ -471,12 +563,14 @@ def _error_kinds(config: PipelineConfig, day: date) -> dict[str, int]:
 
 def history_prices(config: PipelineConfig, day: date, fetch=None, stats: dict | None = None) -> dict:
     """Closes for the benchmarks, the day's names, then the scoreboard
-    window's, newest day first (a spent budget skips the oldest)."""
+    window's, newest day first (a spent budget skips the oldest). Only the
+    benchmarks and the day's names get a late close filled from the quote."""
+    fill = set(BENCHMARKS.values()).union(*_day_tickers(config, day).values())
     first: list[str] = list(BENCHMARKS.values())
     for back in range(60):
         for _session, names in sorted(_day_tickers(config, day - timedelta(days=back)).items(), reverse=True):
             first += sorted(names)
-    return closes(set(first), fetch, first=first, stats=stats)
+    return closes(set(first), fetch, first=first, stats=stats, day=day, fill=fill)
 
 
 def build_facts(config: PipelineConfig, day: date, *, prices: dict | None = None, broker=None,
@@ -489,7 +583,15 @@ def build_facts(config: PipelineConfig, day: date, *, prices: dict | None = None
         prices = history_prices(config, day, stats=price_stats)
     facts: dict[str, Any] = {"date": day.isoformat()}
     if price_stats:  # a truncated or failed price read is a fact, not a quiet null
-        facts["price_reads"] = {"skipped": price_stats.get("skipped", 0), "failed": price_stats.get("failed", 0)}
+        facts["price_reads"] = {"skipped": price_stats.get("skipped", 0), "failed": price_stats.get("failed", 0),
+                                "quote_filled": price_stats.get("quote_filled", 0),
+                                "quote_filled_tickers": price_stats.get("quote_filled_tickers", [])}
+    try:
+        from pipeline.config import core_analysis_sessions
+
+        analysed = core_analysis_sessions()
+    except ValueError:
+        analysed = None
     for session in ("us", "cn"):
         names = _with_moves(_names(config, session, day), session, day, prices)
         try:
@@ -499,6 +601,9 @@ def build_facts(config: PipelineConfig, day: date, *, prices: dict | None = None
             macro = "宏观简报无法读取"
         bench = day_change(prices.get(BENCHMARKS[session], []), day)
         facts[session] = {
+            # By configuration (specs/llm-cost.md R6), not a fault: a session
+            # whose core is not analysed lists its core names core-session-off.
+            "core_analysed": None if analysed is None else session in analysed,
             "macro": macro,
             "benchmark_move_pct": None if bench is None else round(bench, 2),
             "names": names,
@@ -561,7 +666,10 @@ REVIEW_PROMPT = """你是一个交易研究流水线的复盘员。下面是 {da
 包括：美股（us）与 A股/港股（cn）每只股票的简报方向（impact: 偏多/偏空/中性/分歧）、催化剂分数、
 评估结论、触发代码、分析结论（decision: BUY/SELL/HOLD/ERROR）与 PM 评级、执行结果、
 当天涨跌（move_pct）和相对基准的超额（excess_pct；为 null 表示没有读到行情，不是零——
-price_reads 记录行情读取被跳过（skipped，时间预算用完）和失败（failed）的股票数，大于 0 时相关统计不完整，要在总结里说明）；
+price_reads 记录行情读取被跳过（skipped，时间预算用完）和失败（failed）的股票数，大于 0 时相关统计不完整，要在总结里说明；
+quote_filled 是 Yahoo 日线尚未更新、用收盘后实时报价补上当天收盘的股票数，属正常情况）；
+core_analysed 为 false 的市场按配置只做催化剂触发的研究，核心股不采集、不分析
+（trigger 为 core-session-off），这是有意设计，不要当作问题或遗漏报告；
 brief_used 不为空表示分析用的是那一天的旧简报（当天简报缺失时按合约沿用前一天的）；
 未分析却大幅波动的股票（missed_moves）；宏观判断；分析出错的原因分类（unrecorded 表示出错但没有留下用量记录、原因未知，常见于调用前就被拒，如认证失败）；账户、持仓与成交；
 以及最近 {sessions} 个交易日的滚动统计（scoreboard.horizons：决策后 1d/3d/5d 个交易日相对基准的超额收益，

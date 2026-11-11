@@ -1,7 +1,7 @@
 """Daily post-close review and archive — specs/daily-review.md."""
 
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -43,6 +43,12 @@ def offline_broker(monkeypatch):
         raise RuntimeError("offline")
 
     monkeypatch.setattr(trade_notify, "AlpacaReadOnly", refuse)
+
+    def no_quote(ticker):
+        raise RuntimeError("offline")
+
+    no_quote.real = dr._yahoo_quote  # for the one test that pins the reader against a fake yfinance
+    monkeypatch.setattr(dr, "_yahoo_quote", no_quote)
     monkeypatch.setattr(trade_notify, "alpaca_keys", lambda: ("key", "secret"))
     return built
 
@@ -435,7 +441,7 @@ def test_benchmarks_and_the_days_names_are_read_before_older_ones(tmp_path):
     stats = {}
     dr.history_prices(cfg, DAY, fetch=fetch, stats=stats)
     assert read[:3] == list(dr.BENCHMARKS.values()) and set(read[3:5]) == {"NVDA", "FN"}
-    assert stats == {"skipped": 0, "failed": 0}
+    assert stats == {"skipped": 0, "failed": 0, "quote_filled": 0, "quote_filled_tickers": []}
     stats = {}
     out = dr.closes(set(read), fetch=lambda t: [], first=read, stats=stats)
     assert out == {} and stats["failed"] == len(read)
@@ -446,14 +452,14 @@ def test_a_truncated_price_read_is_a_fact_and_in_the_message(tmp_path, archive, 
     cfg = config(tmp_path)
     slot(cfg)
 
-    def partial(tickers, fetch=None, budget_s=0, *, first=(), stats=None):
+    def partial(tickers, fetch=None, budget_s=0, *, first=(), stats=None, **k):
         stats.update(skipped=7, failed=1)
         return prices_for("NVDA", "FN")
 
     monkeypatch.setattr(dr, "closes", partial)
     prompts = []
     text = dr.review_day(cfg, DAY, send=None, runner=lambda prompt: prompts.append(prompt) or review())
-    assert '"price_reads": {"skipped": 7, "failed": 1}' in prompts[0]
+    assert '"price_reads": {"skipped": 7, "failed": 1, "quote_filled": 0, "quote_filled_tickers": []}' in prompts[0]
     assert "行情读取不完整：跳过 7 只、失败 1 只" in text
 
 
@@ -696,3 +702,136 @@ def test_the_prompt_judges_on_multi_session_horizons(tmp_path, archive, monkeypa
     prompts = []
     dr.review_day(cfg, DAY, send=None, runner=lambda prompt: prompts.append(prompt) or review())
     assert "以 3d/5d 为准" in prompts[0] and '"horizons"' in prompts[0]
+
+
+AFTER_ALL_CLOSES = datetime(2026, 11, 4, 22, tzinfo=timezone.utc)  # 17:00 New York, 06:00 next day in Asia
+#: The day's closing trade time per market, in UTC.
+CLOSE_TRADE = {"510300.SS": datetime(2026, 11, 4, 7, 0, tzinfo=timezone.utc),   # 15:00 Shanghai
+               "^HSI": datetime(2026, 11, 4, 8, 8, tzinfo=timezone.utc),        # 16:08 Hong Kong
+               "SPY": datetime(2026, 11, 4, 21, 0, tzinfo=timezone.utc)}        # 16:00 New York
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("ticker", "series"), [
+    ("510300.SS", [(date(2026, 11, 3), 4.13), (DAY, float("nan"))]),  # listed with a NaN close
+    ("^HSI", [(date(2026, 11, 3), 24448.95)]),                         # not listed at all
+    ("SPY", [(date(2026, 11, 3), 752.69), (DAY, float("nan"))]),
+])
+def test_a_late_listed_close_is_filled_from_the_quote_after_the_close(ticker, series):
+    prev = series[0][1]
+    quote = lambda t: (prev * 1.01, CLOSE_TRADE[t], prev)  # noqa: E731
+    stats = {}
+    out = dr.closes({ticker}, fetch=lambda t: series, day=DAY, quote=quote, now=AFTER_ALL_CLOSES, stats=stats)
+    assert dr.day_change(out[ticker], DAY) == pytest.approx(1.0) and stats["quote_filled"] == 1
+    assert stats["quote_filled_tickers"] == [ticker]
+
+
+@pytest.mark.unit
+def test_the_quote_never_fills_a_session_it_is_not_about():
+    d1, d2 = date(2026, 11, 3), date(2026, 11, 2)
+    series = [(d2, 4.130), (d1, 4.133)]  # no row for DAY
+    fill = lambda q: dr.fill_day_close("510300.SS", series, DAY, AFTER_ALL_CLOSES, lambda t: q)  # noqa: E731
+    on_day = CLOSE_TRADE["510300.SS"]
+    assert fill((4.15, on_day, 4.133)) == (sorted([*series, (DAY, 4.15)]), True)
+    # a holiday after a flat session: the last trade is the day before, whatever the prices
+    assert fill((4.133, on_day - timedelta(days=1), 4.130)) == (series, False)
+    # a suspended name: its last trade is days old, last == previous
+    assert fill((4.133, on_day - timedelta(days=6), 4.133)) == (series, False)
+    # an intraday last trade (before the close less the slack)
+    assert fill((4.15, on_day - timedelta(hours=2), 4.133)) == (series, False)
+    # the series misses a session: the previous close is not its last close
+    assert fill((4.15, on_day, 4.20)) == (series, False)
+    assert fill((float("nan"), on_day, 4.133)) == (series, False)
+    before_read = datetime(2026, 11, 4, 7, 10, tzinfo=timezone.utc)  # 15:10 Shanghai: before the margin
+    assert dr.fill_day_close("510300.SS", series, DAY, before_read, lambda t: (4.15, on_day, 4.133)) == (series, False)
+    broken = lambda t: (_ for _ in ()).throw(ConnectionError("down"))  # noqa: E731
+    assert dr.fill_day_close("510300.SS", series, DAY, AFTER_ALL_CLOSES, broken) == (series, False)
+    later = [*series, (date(2026, 11, 5), 4.2)]  # a later bar: a past-day run
+    assert dr.fill_day_close("510300.SS", later, DAY, AFTER_ALL_CLOSES, lambda t: (4.15, on_day, 4.133))[1] is False
+    kept = [*series, (DAY, 4.14)]  # a listed close is never replaced
+    assert dr.fill_day_close("510300.SS", kept, DAY, AFTER_ALL_CLOSES, lambda t: (4.15, on_day, 4.133)) == (kept, False)
+
+
+@pytest.mark.unit
+def test_only_the_benchmarks_and_the_days_names_ask_for_a_quote(tmp_path):
+    cfg = config(tmp_path)
+    slot(cfg)  # DAY: NVDA, FN
+    funnel = cfg.state_dir / "funnel" / "us"
+    (funnel / f"{DAY.replace(day=1).isoformat()}.json").write_text(json.dumps({"tickers": [{"ticker": "OLD"}]}))
+    asked = []
+
+    def quote(t):
+        asked.append(t)
+        raise RuntimeError("offline")
+
+    import functools
+    from unittest import mock
+
+    with mock.patch.object(dr, "_yahoo_quote", quote), \
+            mock.patch.object(dr, "closes", functools.partial(dr.closes, now=AFTER_ALL_CLOSES)):
+        dr.history_prices(cfg, DAY, fetch=lambda t: [(date(2026, 11, 3), 1.0)])
+    assert sorted(asked) == sorted({*dr.BENCHMARKS.values(), "NVDA", "FN"})
+
+
+@pytest.mark.unit
+def test_the_core_off_session_is_marked_as_configuration(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRADINGAGENTS_CORE_ANALYSIS_SESSIONS", "us")
+    cfg = config(tmp_path)
+    slot(cfg)
+    facts = dr.build_facts(cfg, DAY, prices=prices_for("NVDA", "FN"))
+    assert facts["us"]["core_analysed"] is True and facts["cn"]["core_analysed"] is False
+    assert "core-session-off" in dr.REVIEW_PROMPT and "不要当作问题" in dr.REVIEW_PROMPT
+
+
+@pytest.mark.unit
+def test_the_quote_reader_maps_yahoos_chart_metadata(monkeypatch):
+    import yfinance
+
+    class FakeTicker:
+        history_metadata = {"regularMarketPrice": 749.92, "regularMarketTime": 1794344400, "previousClose": 752.69}
+
+        def __init__(self, ticker):
+            pass
+
+        def history(self, **kwargs):
+            return None
+
+    monkeypatch.setattr(yfinance, "Ticker", FakeTicker)
+    price, traded, previous = dr._yahoo_quote.real("SPY")
+    assert (price, previous) == (749.92, 752.69)
+    assert traded == datetime(2026, 11, 10, 21, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.unit
+def test_a_shortened_session_is_not_filled():
+    series = [(date(2026, 11, 3), 752.69)]
+    early = datetime(2026, 11, 4, 18, 0, tzinfo=timezone.utc)  # 13:00 New York: an early close's last trade
+    assert dr.fill_day_close("SPY", series, DAY, AFTER_ALL_CLOSES, lambda t: (760.0, early, 752.69)) == (series, False)
+
+
+@pytest.mark.unit
+def test_a_junk_core_sessions_config_leaves_core_analysed_unknown(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRADINGAGENTS_CORE_ANALYSIS_SESSIONS", "jp")
+    cfg = config(tmp_path)
+    slot(cfg)
+    facts = dr.build_facts(cfg, DAY, prices=prices_for("NVDA", "FN"))
+    assert facts["us"]["core_analysed"] is None and facts["cn"]["core_analysed"] is None
+
+
+@pytest.mark.unit
+def test_an_archive_that_fetches_for_itself_names_its_quote_fills(tmp_path, archive, monkeypatch):
+    import functools
+
+    cfg = config(tmp_path)
+    slot(cfg)
+    series = {"SPY": [(date(2026, 11, 3), 752.69), (DAY, float("nan"))]}
+    monkeypatch.setattr(dr, "closes", functools.partial(dr.closes, now=AFTER_ALL_CLOSES,
+                                                        quote=lambda t: (760.0, CLOSE_TRADE["SPY"], 752.69)))
+    dr.archive_day(cfg, DAY, fetch=lambda t: series.get(t, [(date(2026, 11, 3), 1.0), (DAY, 1.0)]))
+    assert json.loads((archive / "prices" / DAY.isoformat() / "quote_filled.json").read_text()) == ["SPY"]
+    marker = archive / "prices" / DAY.isoformat() / "quote_filled.json"
+    dr.archive_day(cfg, DAY, fetch=lambda t: (_ for _ in ()).throw(OSError("down")))  # a failed refetch
+    assert json.loads(marker.read_text()) == ["SPY"]  # the quote-derived row is still there, so is its name
+    series["SPY"] = [(date(2026, 11, 3), 752.69), (DAY, 761.0)]  # Yahoo lists the close now
+    dr.archive_day(cfg, DAY, fetch=lambda t: series.get(t, [(date(2026, 11, 3), 1.0), (DAY, 1.0)]))
+    assert json.loads(marker.read_text()) == []
