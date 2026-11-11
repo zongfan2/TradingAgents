@@ -29,7 +29,7 @@ US trading date `day`, into `<root>/<category>/<day>/…` (root: env
 | `decisions` | `decisions.jsonl` — the ledger rows dated `day` |
 | `orders` | `orders.jsonl` — the ledger order rows whose client order id is dated `day` |
 | `digests` | `<session>.txt` — the research digest as sent (research_digest writes `state_dir/research_digest/<session>/<date>.txt` when it queues one) |
-| `prices` | `closes.csv` — date, ticker, close, change % for the day's names and benchmarks (a change across a missing close, or a missing bar — the name's previous bar is not the benchmark's previous session —, is empty, never a two-session move); `quote_filled.json` — the names whose archived close came from the live quote (R2), kept until a later archive refreshes that row from a listed close |
+| `prices` | `closes.csv` — date, ticker, close, change % for the day's names and benchmarks (a change across a missing close, or a missing bar — the name's previous bar is not the benchmark's previous session —, is empty, never a two-session move); `quote_filled.json` — the names whose archived close came from the live quote (R2): written by every archive run, from its own fills or the review's (handed over with its prices), and kept until a later archive refreshes that row from a listed close |
 | `llm_usage` | `cli.jsonl` (the CLI usage log the writer uses, rows whose New York date is `day`), `analysis.jsonl` |
 | `broker` | `account.json`, `positions.json`, `fills.json` — read-only Alpaca snapshot (only when archived on the day itself) |
 | `reviews` | `review.md`, `review.json` (R2) |
@@ -88,8 +88,8 @@ prompt):
 - `price_reads`: how many price reads were skipped (budget spent) or
   failed, and how many closes were filled from the quote (`quote_filled`,
   named in `quote_filled_tickers`) — so an archived close from the quote is
-  identifiable in `review.json` and, for an archive that fetches for itself,
-  in `prices/<day>/quote_filled.json` (R1). A truncated read is a fact in the
+  identifiable in `review.json` and in `prices/<day>/quote_filled.json`
+  (R1). A truncated read is a fact in the
   prompt and a warning line in the message, never a quiet null;
 - a rolling scoreboard over the last 20 us sessions with a snapshot: the
   excess return over **1, 3 and 5 sessions** from the close before the

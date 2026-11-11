@@ -827,9 +827,12 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
         code = t.decide.get("code")
         # Any newer same-slot attempt (any arm or trigger, manual too) than the
         # shown one: the shown decision may not be the name's latest.
+        # A shown decision without a parseable run id has no attempt to compare:
+        # the adapter's own blocker (lost brief-arm event, later attempt) decides.
         shown_attempt = _attempt_of(str(details.get("run_id") or ""))
-        newer = any(r.ticker == t.ticker and r.session == session and str(r.date)[:10] == slot_date.isoformat()
-                    and _attempt_of(r.run_id) > shown_attempt for r in records.values())
+        newer = shown_attempt > 0 and any(
+            r.ticker == t.ticker and r.session == session and str(r.date)[:10] == slot_date.isoformat()
+            and _attempt_of(r.run_id) > shown_attempt for r in records.values())
         if code == "SELL" and (ordered or t.final == "order-live"):
             sell_orders.add(t.ticker.upper())
         elif (ordered is None or t.ticker in undecided or blocker in ("later-attempt", "unknown") or newer
