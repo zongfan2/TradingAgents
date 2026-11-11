@@ -1219,3 +1219,36 @@ def test_after_execution_a_placed_sell_and_a_fresh_buy_are_not_flagged(tmp_path,
     path.write_text(json.dumps(snap), encoding="utf-8")
     book(cfg, held=["MU", "NVDA"])  # the book after step 7: NVDA bought this slot
     assert alert_lines(cfg) == []
+
+
+@pytest.mark.unit
+def test_a_shown_error_with_a_newer_attempt_reads_to_be_verified(tmp_path, live):
+    cfg = config(tmp_path)
+    write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "bullish — x.")},
+               tickers=[entry("NVDA", evaluate="warn", trigger="core", decide=decided(cfg, "NVDA", "ERROR", None))])
+    write_decision(cfg, ticker="NVDA", n=2, plan=BUY_PLAN, date_iso=DAY.isoformat(), decision="HOLD", trigger="manual")
+    book(cfg, held=["NVDA"])
+    assert alert_lines(cfg) == ["⚠️ 持仓提醒：NVDA 最新分析结论与下单待核实"]
+
+
+@pytest.mark.unit
+def test_a_manual_only_ledger_row_reads_to_be_verified(tmp_path, live):
+    cfg = config(tmp_path)
+    write_slot(cfg, briefs={}, tickers=[])
+    write_decision(cfg, ticker="MU", plan=BUY_PLAN, date_iso=DAY.isoformat(), decision="HOLD", trigger="manual")
+    book(cfg, held=["mu"])  # case-insensitive
+    assert alert_lines(cfg) == ["⚠️ 持仓提醒：mu 决策数据未读到，是否已分析待核实"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("code", ["HOLD", "ERROR"])
+def test_after_execution_a_live_order_under_a_later_hold_or_error_reads_to_be_verified(tmp_path, live, code):
+    cfg = config(tmp_path)
+    write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "bearish — y.")},
+               tickers=[{**entry("NVDA", decide=decided(cfg, "NVDA", code, "Hold")), "final": "order-live"}])
+    path = cfg.state_dir / "funnel" / "us" / f"{DAY}.json"
+    snap = json.loads(path.read_text())
+    snap["context"] = {"execute_ran": True}
+    path.write_text(json.dumps(snap), encoding="utf-8")
+    book(cfg, held=["NVDA"])
+    assert alert_lines(cfg) == ["⚠️ 持仓提醒：NVDA 简报偏空，最新分析结论与下单待核实"]

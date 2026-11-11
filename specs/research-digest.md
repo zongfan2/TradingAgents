@@ -52,7 +52,9 @@ line) was hard to read: the user asked why a name with no position was
   cannot pin down reads 待核实: no decision shown while the slot's decisions
   were not all read or the ledger has a same-slot row for the name
   (`决策数据未读到，是否已分析待核实`), and a shown decision step 7 may not
-  read (a newer attempt, a lost brief-arm event, an undetermined order) for
+  read (any newer same-slot attempt — manual included —, a lost brief-arm
+  event, an undetermined order, or after execution a live order under a
+  shown HOLD/ERROR, whose side is unknown) for
   a bearish or errored name (`最新分析结论与下单待核实`). A name bought by
   this slot's order is not flagged. Unknown holdings or the cn
   session give none.

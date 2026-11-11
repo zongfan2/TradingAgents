@@ -661,6 +661,13 @@ def _window_passed(execution_time: str | None, slot_date: date, now: datetime) -
                            tzinfo=ZoneInfo(SESSION_TZ["us"]))
 
 
+def _attempt_of(run_id: str) -> int:
+    try:
+        return int(run_id.rsplit("-", 1)[1])
+    except (IndexError, ValueError):
+        return 0
+
+
 def held_alerts(session: str, held: set[str] | None, tickers: list, *, sell_orders: set[str] = frozenset(),
                 undetermined: set[str] = frozenset(), bought: set[str] = frozenset(), unread: bool = False,
                 recorded: set[str] = frozenset(), current: bool = True) -> list[str]:
@@ -816,9 +823,15 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
             text += "；简报未采用（评估 fail）"
         actions[t.ticker] = text
         code = t.decide.get("code")
+        # Any newer same-slot attempt (any arm or trigger, manual too) than the
+        # shown one: the shown decision may not be the name's latest.
+        shown_attempt = _attempt_of(str(details.get("run_id") or ""))
+        newer = any(r.ticker == t.ticker and r.session == session and str(r.date)[:10] == slot_date.isoformat()
+                    and _attempt_of(r.run_id) > shown_attempt for r in records.values())
         if code == "SELL" and (ordered or t.final == "order-live"):
             sell_orders.add(t.ticker.upper())
-        elif ordered is None or t.ticker in undecided or blocker in ("later-attempt", "unknown"):
+        elif (ordered is None or t.ticker in undecided or blocker in ("later-attempt", "unknown") or newer
+              or (t.final == "order-live" and code not in ("BUY", "SELL"))):  # an order of unknown side
             undetermined.add(t.ticker.upper())
         if code == "BUY" and t.final == "order-live":
             bought.add(t.ticker)
