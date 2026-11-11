@@ -376,6 +376,7 @@ def _archive_into(config, day, root, iso, counts, *, broker, fetch, prices, quot
            counts, "llm_usage")
     tickers = set().union(*_day_tickers(config, day).values()) | set(BENCHMARKS.values())
     fetched: dict = {}
+    handed = prices is not None  # the review's own read: its quote fills are these prices'
     if prices is None:
         prices = closes(tickers, fetch, first=BENCHMARKS.values(), day=day, stats=fetched)
     # The names whose archived close came from the quote — this run's own
@@ -384,13 +385,15 @@ def _archive_into(config, day, root, iso, counts, *, broker, fetch, prices, quot
     # from a listed close (closes.csv never drops a row, so neither does the
     # marker). Every archive run writes it, so no path leaves a row unnamed.
     marker = root / "prices" / iso / "quote_filled.json"
-    filled = {t for t in (*fetched.get("quote_filled_tickers", []), *(quote_filled or [])) if t in tickers}
+    filled = {t for t in (*fetched.get("quote_filled_tickers", []), *((quote_filled or []) if handed else []))
+              if t in tickers}
     listed = {t for t, series in prices.items() if t in tickers and t not in filled
               and any(d == day and c is not None for d, c in series)}
     try:
-        older = set(json.loads(marker.read_text(encoding="utf-8")))
-    except (OSError, ValueError, TypeError):
-        older = set()
+        loaded = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        loaded = []
+    older = {name for name in loaded if isinstance(name, str)} if isinstance(loaded, list) else set()
     _write(marker, json.dumps(sorted((older - listed) | filled)), counts, "prices")
     session_of = {t: session for session, names in _day_tickers(config, day).items() for t in names}
     rows = [[iso, ticker, f"{close:.4f}",

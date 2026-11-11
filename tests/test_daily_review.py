@@ -874,3 +874,28 @@ def test_the_reviews_own_quote_fills_are_named_in_the_archive(tmp_path, archive,
     monkeypatch.setattr(dr, "closes", read)
     dr.review_day(cfg, DAY, send=None, runner=lambda prompt: review())
     assert json.loads((archive / "prices" / DAY.isoformat() / "quote_filled.json").read_text()) == ["SPY"]
+
+
+@pytest.mark.unit
+def test_a_retry_that_reads_a_listed_close_clears_the_saved_quote_fill(tmp_path, archive, monkeypatch):
+    cfg = config(tmp_path)
+    slot(cfg)
+    marker = archive / "prices" / DAY.isoformat() / "quote_filled.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(json.dumps(["SPY"]))
+    # the saved review says SPY came from the quote; the retry's own read finds it listed
+    monkeypatch.setattr(dr, "closes", lambda tickers, fetch=None, **k: prices_for("NVDA", "FN"))
+    dr.archive_day(cfg, DAY, prices=None, quote_filled=["SPY"])
+    assert json.loads(marker.read_text()) == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("junk", ['[1, "SPY"]', "[null]", '{"SPY": 1}', "not json"])
+def test_a_damaged_marker_never_breaks_the_archive(tmp_path, archive, junk):
+    cfg = config(tmp_path)
+    slot(cfg)
+    marker = archive / "prices" / DAY.isoformat() / "quote_filled.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(junk)
+    counts = dr.archive_day(cfg, DAY, prices=prices_for("NVDA", "FN"), quote_filled=["SPY"])
+    assert not counts.get("error") and json.loads(marker.read_text()) == ["SPY"]
