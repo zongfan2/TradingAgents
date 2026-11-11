@@ -696,11 +696,12 @@ def held_alerts(session: str, held: set[str] | None, tickers: list, *, sell_orde
         code = (t.decide or {}).get("code") if t is not None else None
         bearish = (t is not None and t.has_brief and (impact := _last_impact(t.body)) is not None
                    and impact[0] == IMPACT_NAMES.get("bearish"))
+        lead = "简报偏空，" if bearish else ""
         if code is None:
             if unread or upper in recorded_u:
-                out.append(f"⚠️ 持仓提醒：{symbol} 决策数据未读到，是否已分析待核实")
+                out.append(f"⚠️ 持仓提醒：{symbol} {lead}决策数据未读到，是否已分析待核实")
             elif current:
-                out.append(f"⚠️ 持仓提醒：{symbol} 今日没有分析——是否卖出由你决定")
+                out.append(f"⚠️ 持仓提醒：{symbol} {lead}今日没有分析——是否卖出由你决定")
         elif upper in undetermined_u and (code == "ERROR" or bearish):
             out.append(f"⚠️ 持仓提醒：{symbol} {'简报偏空，' if bearish else ''}最新分析结论与下单待核实")
         elif code == "ERROR":

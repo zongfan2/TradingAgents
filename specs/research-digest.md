@@ -56,7 +56,8 @@ line) was hard to read: the user asked why a name with no position was
   event, an undetermined order, or after execution a live order under a
   shown HOLD/ERROR, whose side is unknown) for
   a bearish or errored name (`最新分析结论与下单待核实`). A name bought by
-  this slot's order is not flagged. Unknown holdings or the cn
+  this slot's order is not flagged. A bearish brief leads any of these
+  lines with `简报偏空，`. Unknown holdings or the cn
   session give none.
 - **Macro**: the revision-bound eval verdict and each of sections 1–6's
   Impact direction (one phrase when all six agree), found by the contract's

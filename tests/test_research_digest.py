@@ -1252,3 +1252,12 @@ def test_after_execution_a_live_order_under_a_later_hold_or_error_reads_to_be_ve
     path.write_text(json.dumps(snap), encoding="utf-8")
     book(cfg, held=["NVDA"])
     assert alert_lines(cfg) == ["⚠️ 持仓提醒：NVDA 简报偏空，最新分析结论与下单待核实"]
+
+
+@pytest.mark.unit
+def test_a_bearish_held_name_without_a_decision_keeps_the_bearish_lead(tmp_path, live):
+    cfg = config(tmp_path)
+    write_slot(cfg, briefs={"MU": ticker_brief("MU", 7.0, "bearish — z.")},
+               tickers=[entry("MU", evaluate="fail", trigger="eval-fail")])
+    book(cfg, held=["MU"])
+    assert alert_lines(cfg) == ["⚠️ 持仓提醒：MU 简报偏空，今日没有分析——是否卖出由你决定"]
