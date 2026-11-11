@@ -899,3 +899,21 @@ def test_a_damaged_marker_never_breaks_the_archive(tmp_path, archive, junk):
     marker.write_text(junk)
     counts = dr.archive_day(cfg, DAY, prices=prices_for("NVDA", "FN"), quote_filled=["SPY"])
     assert not counts.get("error") and json.loads(marker.read_text()) == ["SPY"]
+
+
+@pytest.mark.unit
+def test_quote_fills_are_named_even_when_the_facts_build_fails(tmp_path, archive, monkeypatch):
+    cfg = config(tmp_path)
+    slot(cfg)
+
+    def read(tickers, fetch=None, budget_s=0, *, first=(), stats=None, **k):
+        stats.update(skipped=0, failed=0, quote_filled=1, quote_filled_tickers=["SPY"])
+        return prices_for("NVDA", "FN")
+
+    def broken(*a, **k):
+        raise RuntimeError("facts")
+
+    monkeypatch.setattr(dr, "closes", read)
+    monkeypatch.setattr(dr, "build_facts", broken)
+    dr.review_day(cfg, DAY, send=None, runner=lambda prompt: review())
+    assert json.loads((archive / "prices" / DAY.isoformat() / "quote_filled.json").read_text()) == ["SPY"]

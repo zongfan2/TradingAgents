@@ -826,11 +826,11 @@ def review_day(config: PipelineConfig, day: date, *, broker=None, send=None, run
     from pipeline import trade_notify
 
     prices: dict = {}
+    price_stats: dict = {}  # the price read's own counts: they outlive a failed facts build
     saved = _load_queued(config, day)
     if saved is not None:
         facts, review, text = saved["facts"], saved["review"], saved["text"]
     else:
-        price_stats: dict = {}
         try:
             prices = history_prices(config, day, stats=price_stats)
             facts = build_facts(config, day, prices=prices, broker=broker, price_stats=price_stats)
@@ -863,7 +863,7 @@ def review_day(config: PipelineConfig, day: date, *, broker=None, send=None, run
     archived = False
     try:  # after the model call, so its usage row is in the day's archive
         counts = archive_day(config, day, broker=broker, prices=prices or None,
-                             quote_filled=(facts.get("price_reads") or {}).get("quote_filled_tickers"))
+                             quote_filled=price_stats.get("quote_filled_tickers"))
         root = archive_root(config) / "reviews" / day.isoformat()
         root.mkdir(parents=True, exist_ok=True)
         atomic_write(root / "review.md", text + "\n")
