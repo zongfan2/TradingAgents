@@ -131,8 +131,9 @@ PRICE_BUDGET_S = 240.0
 #: Per market: local zone, the regular close, and a time safely after it.
 #: A quote counts as the day's close only when its own last-trade time is on
 #: the day at or after the close (less a few minutes), read after the margin.
-_SESSION_CLOSE = {"cn": ("Asia/Shanghai", time(15, 0), time(15, 30)),
-                  "hk": ("Asia/Hong_Kong", time(16, 0), time(16, 40)),
+#: Read margins cover Yahoo's delayed Asian quotes (up to ~30 minutes).
+_SESSION_CLOSE = {"cn": ("Asia/Shanghai", time(15, 0), time(16, 0)),
+                  "hk": ("Asia/Hong_Kong", time(16, 0), time(17, 0)),
                   "us": ("America/New_York", time(16, 0), time(16, 30))}
 #: How long before the close a last trade may be (a closing auction prints
 #: just before the bell; a thin name's last trade can be earlier).
@@ -371,9 +372,10 @@ def _archive_into(config, day, root, iso, counts, *, broker, fetch, prices) -> N
     if prices is None:
         fetched: dict = {}
         prices = closes(tickers, fetch, first=BENCHMARKS.values(), day=day, stats=fetched)
-        if fetched.get("quote_filled_tickers"):  # this run's own fills (a retry, the archive CLI): named on disk
-            _write(root / "prices" / iso / "quote_filled.json",
-                   json.dumps(fetched["quote_filled_tickers"]), counts, "prices")
+        # This run's own fills (a retry, the archive CLI), named on disk; an
+        # empty list replaces an older marker once Yahoo lists the closes.
+        _write(root / "prices" / iso / "quote_filled.json",
+               json.dumps(fetched.get("quote_filled_tickers", [])), counts, "prices")
     session_of = {t: session for session, names in _day_tickers(config, day).items() for t in names}
     rows = [[iso, ticker, f"{close:.4f}",
              "" if (c := name_change(prices, ticker, session_of.get(ticker, "us"), day)) is None else f"{c:.2f}"]

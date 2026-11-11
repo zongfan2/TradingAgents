@@ -59,7 +59,8 @@ prompt):
   and ^HSI on 2026-11-10) is filled from Yahoo's chart quote
   (`regularMarketPrice`, its `regularMarketTime`, `previousClose`) for the
   benchmarks and the day's names only, read after that market's close
-  (Shanghai 15:30, Hong Kong 16:40, New York 16:30 local), only when the
+  (Shanghai 16:00, Hong Kong 17:00 — Yahoo's Asian quotes are delayed —,
+  New York 16:30 local), only when the
   quote's own trade time is on the day at or after the regular close less
   10 minutes (a holiday, a suspension or an intraday price never passes),
   its previous close equals the series' last close before the day within
@@ -88,7 +89,8 @@ prompt):
   filled from the quote (`quote_filled`, with the names in
   `quote_filled_tickers`, so an archived close that came from the quote is
   identifiable in `review.json`, and an archive that fetches for itself — a
-  retry, the `archive` CLI — writes `prices/<day>/quote_filled.json`; above) or failed — a truncated read is a fact in the prompt and a warning line in
+  retry, the `archive` CLI — writes `prices/<day>/quote_filled.json` (an empty list once nothing
+  needed the quote); above) or failed — a truncated read is a fact in the prompt and a warning line in
   the message, never a quiet null;
 - a rolling scoreboard over the last 20 us sessions with a snapshot: the
   excess return over **1, 3 and 5 sessions** from the close before the
