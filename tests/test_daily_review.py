@@ -43,6 +43,11 @@ def offline_broker(monkeypatch):
         raise RuntimeError("offline")
 
     monkeypatch.setattr(trade_notify, "AlpacaReadOnly", refuse)
+
+    def no_quote(ticker):
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr(dr, "_yahoo_quote", no_quote)
     monkeypatch.setattr(trade_notify, "alpaca_keys", lambda: ("key", "secret"))
     return built
 
@@ -435,7 +440,7 @@ def test_benchmarks_and_the_days_names_are_read_before_older_ones(tmp_path):
     stats = {}
     dr.history_prices(cfg, DAY, fetch=fetch, stats=stats)
     assert read[:3] == list(dr.BENCHMARKS.values()) and set(read[3:5]) == {"NVDA", "FN"}
-    assert stats == {"skipped": 0, "failed": 0}
+    assert stats == {"skipped": 0, "failed": 0, "quote_filled": 0}
     stats = {}
     out = dr.closes(set(read), fetch=lambda t: [], first=read, stats=stats)
     assert out == {} and stats["failed"] == len(read)
@@ -446,14 +451,14 @@ def test_a_truncated_price_read_is_a_fact_and_in_the_message(tmp_path, archive, 
     cfg = config(tmp_path)
     slot(cfg)
 
-    def partial(tickers, fetch=None, budget_s=0, *, first=(), stats=None):
+    def partial(tickers, fetch=None, budget_s=0, *, first=(), stats=None, **k):
         stats.update(skipped=7, failed=1)
         return prices_for("NVDA", "FN")
 
     monkeypatch.setattr(dr, "closes", partial)
     prompts = []
     text = dr.review_day(cfg, DAY, send=None, runner=lambda prompt: prompts.append(prompt) or review())
-    assert '"price_reads": {"skipped": 7, "failed": 1}' in prompts[0]
+    assert '"price_reads": {"skipped": 7, "failed": 1, "quote_filled": 0}' in prompts[0]
     assert "行情读取不完整：跳过 7 只、失败 1 只" in text
 
 
@@ -696,3 +701,46 @@ def test_the_prompt_judges_on_multi_session_horizons(tmp_path, archive, monkeypa
     prompts = []
     dr.review_day(cfg, DAY, send=None, runner=lambda prompt: prompts.append(prompt) or review())
     assert "以 3d/5d 为准" in prompts[0] and '"horizons"' in prompts[0]
+
+
+AFTER_ALL_CLOSES = datetime(2026, 11, 4, 22, tzinfo=timezone.utc)  # 17:00 New York, 06:00 next day in Asia
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("ticker", "series"), [
+    ("510300.SS", [(date(2026, 11, 3), 4.13), (DAY, float("nan"))]),  # listed with a NaN close
+    ("^HSI", [(date(2026, 11, 3), 24448.95)]),                         # not listed at all
+])
+def test_a_late_listed_close_is_filled_from_the_quote_after_the_close(ticker, series):
+    prev = series[0][1]
+    quote = lambda t: (prev * 1.01, prev)  # noqa: E731
+    stats = {}
+    out = dr.closes({ticker}, fetch=lambda t: series, day=DAY, quote=quote, now=AFTER_ALL_CLOSES, stats=stats)
+    assert dr.day_change(out[ticker], DAY) == pytest.approx(1.0) and stats["quote_filled"] == 1
+
+
+@pytest.mark.unit
+def test_the_quote_never_fills_a_session_it_is_not_about():
+    series = [(date(2026, 11, 3), 100.0), (DAY, float("nan"))]
+    series = [(d, None if c != c else c) for d, c in series]
+    before_close = datetime(2026, 11, 4, 20, tzinfo=timezone.utc)  # 15:00 New York: intraday
+    assert dr.fill_day_close("SPY", series, DAY, before_close, lambda t: (101.0, 100.0)) == (series, False)
+    # the quote's previous close is another session's (a holiday, or the next session started)
+    assert dr.fill_day_close("SPY", series, DAY, AFTER_ALL_CLOSES, lambda t: (101.0, 97.0)) == (series, False)
+    later = [*series, (date(2026, 11, 5), 102.0)]  # a later bar: a past-day run
+    assert dr.fill_day_close("SPY", later, DAY, AFTER_ALL_CLOSES, lambda t: (101.0, 100.0)) == (later, False)
+    assert dr.fill_day_close("SPY", series, DAY, AFTER_ALL_CLOSES, lambda t: (float("nan"), 100.0)) == (series, False)
+    broken = lambda t: (_ for _ in ()).throw(ConnectionError("down"))  # noqa: E731
+    assert dr.fill_day_close("SPY", series, DAY, AFTER_ALL_CLOSES, broken) == (series, False)
+    kept = [(date(2026, 11, 3), 100.0), (DAY, 99.0)]  # a listed close is never replaced
+    assert dr.fill_day_close("SPY", kept, DAY, AFTER_ALL_CLOSES, lambda t: (101.0, 100.0)) == (kept, False)
+
+
+@pytest.mark.unit
+def test_the_core_off_session_is_marked_as_configuration(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRADINGAGENTS_CORE_ANALYSIS_SESSIONS", "us")
+    cfg = config(tmp_path)
+    slot(cfg)
+    facts = dr.build_facts(cfg, DAY, prices=prices_for("NVDA", "FN"))
+    assert facts["us"]["core_analysed"] is True and facts["cn"]["core_analysed"] is False
+    assert "core-session-off" in dr.REVIEW_PROMPT and "不要当作问题" in dr.REVIEW_PROMPT

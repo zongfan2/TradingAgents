@@ -55,6 +55,17 @@ re-queues and archives that same text — no second model call. The review archi
 facts (no brief prose — that is web-derived text and stays out of the
 prompt):
 
+- a day's close Yahoo has not listed yet (a NaN close, or no row — 510300.SS
+  and ^HSI on 2026-11-10) is filled from the live quote's last price, only
+  after that market's close (Shanghai 15:30, Hong Kong 16:40, New York 16:30
+  local), only when the quote's previous close equals the series' last
+  close before the day within 0.2 % (so the quote is about that day, not a
+  holiday or the next session), and only when no later bar exists; a
+  listed close is never replaced;
+- `core_analysed` per market: a market whose core is not analysed by
+  configuration (llm-cost R6; cn today) lists its core names
+  `core-session-off`, and the prompt tells the model this is by design, not
+  a fault to report;
 - per us/cn name of the day: brief impact word, catalyst score, eval verdict,
   trigger code, decision and PM rating, execute outcome, the day's close
   change and excess vs the benchmark (SPY / 510300.SS — the CSI 300 ETF: Yahoo serves the 000300.SS index
@@ -68,8 +79,8 @@ prompt):
 - analysis errors by kind (`llm_usage.error_kind`), with ERROR decisions
   that left no usage row (a run refused before any call, such as a 401)
   counted as `unrecorded`, and the day's fills;
-- `price_reads`: how many price reads were skipped (budget spent) or
-  failed — a truncated read is a fact in the prompt and a warning line in
+- `price_reads`: how many price reads were skipped (budget spent),
+  filled from the quote (`quote_filled`, below) or failed — a truncated read is a fact in the prompt and a warning line in
   the message, never a quiet null;
 - a rolling scoreboard over the last 20 us sessions with a snapshot: the
   excess return over **1, 3 and 5 sessions** from the close before the
