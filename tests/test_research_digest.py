@@ -1121,3 +1121,179 @@ def test_the_core_session_off_label_names_the_slots_market(tmp_path, session, ti
     write_slot(cfg, session, briefs={ticker: ticker_brief(ticker, 3.0, "m — m.")},
                tickers=[entry(ticker, trigger="core-session-off")])
     assert f"• {market}核心股本时段不分析：{ticker} 3.0" in build(cfg, session)
+
+
+def held_slot(cfg, *, mu_plan=SELL_PLAN, **mu_row):
+    write_slot(cfg, briefs={"MSFT": ticker_brief("MSFT", 6.0, "bearish — guidance cut."),
+                            "NVDA": ticker_brief("NVDA", 7.0, "bearish — x."),
+                            "AMD": ticker_brief("AMD", 7.0, "bullish — y."),
+                            "AAPL": ticker_brief("AAPL", 7.0, "mixed — w."),
+                            "MU": ticker_brief("MU", 7.0, "bearish — z.")},
+               tickers=[entry("MSFT", evaluate="warn", trigger="core", decide=decided(cfg, "MSFT", "HOLD", "Hold")),
+                        entry("NVDA", evaluate="warn", trigger="core", decide=decided(cfg, "NVDA", "ERROR", None)),
+                        entry("AMD", evaluate="warn", trigger="core", decide=decided(cfg, "AMD", "HOLD", "Hold")),
+                        entry("AAPL", evaluate="warn", trigger="core", decide=decided(cfg, "AAPL", "HOLD", "Hold")),
+                        entry("MU", evaluate="warn", trigger="core",
+                              decide=decided(cfg, "MU", "SELL", "Sell", plan=mu_plan, **mu_row))])
+    book(cfg, held=["MSFT", "NVDA", "AMD", "AAPL", "MU", "TSLA"])
+
+
+def alert_lines(cfg, **kw):
+    lines = rd.build_digest(cfg, "us", DAY, now=SLOT_END, **kw).splitlines()
+    alerts = [line for line in lines if line.startswith("⚠️ 持仓提醒")]
+    if alerts:
+        assert lines[1:1 + len(alerts)] == alerts and lines[1 + len(alerts)].startswith("宏观")
+    return alerts
+
+
+@pytest.mark.unit
+def test_held_names_needing_a_look_are_flagged_at_the_top(tmp_path, live):
+    cfg = config(tmp_path)
+    held_slot(cfg)
+    assert alert_lines(cfg) == [
+        "⚠️ 持仓提醒：MSFT 简报偏空，但分析没有给出卖出——是否卖出由你决定",
+        "⚠️ 持仓提醒：NVDA 简报偏空，分析出错，今日没有结论——是否卖出由你决定",
+        "⚠️ 持仓提醒：TSLA 今日没有分析——是否卖出由你决定",
+    ]  # AMD bullish, AAPL mixed, MU's SELL will be placed: nothing to flag
+
+
+@pytest.mark.unit
+def test_a_bearish_sell_that_places_no_order_is_flagged(tmp_path):
+    cfg = config(tmp_path)  # execution not enabled: 模拟, the SELL places no order
+    held_slot(cfg)
+    assert "⚠️ 持仓提醒：MU 简报偏空，分析给出卖出但不会下单——是否卖出由你决定" in alert_lines(cfg)
+
+
+@pytest.mark.unit
+def test_unread_decisions_read_to_be_verified_not_unanalysed(tmp_path, live):
+    cfg = config(tmp_path)
+    book(cfg, held=["MU"])  # no funnel snapshot at all
+    assert alert_lines(cfg) == ["⚠️ 持仓提醒：MU 决策数据未读到，是否已分析待核实"]
+
+
+@pytest.mark.unit
+def test_an_old_slot_never_says_not_analysed(tmp_path, live):
+    cfg = config(tmp_path)
+    held_slot(cfg)
+    later = rd.build_digest(cfg, "us", DAY, now=SLOT_END.replace(day=7)).splitlines()
+    assert not any("TSLA" in line and "今日没有分析" in line for line in later)
+    assert "⚠️ 持仓提醒：MSFT 简报偏空，但分析没有给出卖出——是否卖出由你决定" in later  # the rest still shows
+
+
+@pytest.mark.unit
+def test_no_held_alert_for_cn_or_unknown_holdings(tmp_path):
+    assert rd.held_alerts("cn", {"0700.HK"}, []) == []
+    assert rd.held_alerts("us", None, []) == [] and rd.held_alerts("us", set(), []) == []
+    assert rd.held_alerts("us", {"NVDA"}, [], bought={"NVDA"}) == []  # bought in this slot
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("code", ["HOLD", "ERROR"])
+def test_a_ledger_decision_the_snapshot_misses_reads_to_be_verified(tmp_path, live, code):
+    cfg = config(tmp_path)
+    write_slot(cfg, briefs={}, tickers=[])  # an older snapshot kept on a failed rebuild: MU not in it
+    write_decision(cfg, ticker="MU", plan=BUY_PLAN, date_iso=DAY.isoformat(), decision=code)
+    book(cfg, held=["MU"])
+    assert alert_lines(cfg) == ["⚠️ 持仓提醒：MU 决策数据未读到，是否已分析待核实"]
+
+
+@pytest.mark.unit
+def test_a_superseded_shown_decision_reads_to_be_verified(tmp_path, live):
+    cfg = config(tmp_path)
+    write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "bearish — x.")},
+               tickers=[entry("NVDA", evaluate="warn", trigger="core", decide=decided(cfg, "NVDA", "HOLD", "Hold"))])
+    write_decision(cfg, ticker="NVDA", n=2, plan=SELL_PLAN, date_iso=DAY.isoformat(), decision="SELL")  # newer
+    book(cfg, held=["NVDA"])
+    assert alert_lines(cfg) == ["⚠️ 持仓提醒：NVDA 简报偏空，最新分析结论与下单待核实"]
+
+
+@pytest.mark.unit
+def test_after_execution_a_placed_sell_and_a_fresh_buy_are_not_flagged(tmp_path, live):
+    cfg = config(tmp_path)
+    write_slot(cfg, briefs={"MU": ticker_brief("MU", 7.0, "bearish — z."), "NVDA": ticker_brief("NVDA", 7.0, "bearish — y.")},
+               tickers=[{**entry("MU", decide=decided(cfg, "MU", "SELL", "Sell", plan=SELL_PLAN)), "final": "order-live"},
+                        {**entry("NVDA", decide=decided(cfg, "NVDA", "BUY", "Overweight")), "final": "order-live"}])
+    path = cfg.state_dir / "funnel" / "us" / f"{DAY}.json"
+    snap = json.loads(path.read_text())
+    snap["context"] = {"execute_ran": True}
+    path.write_text(json.dumps(snap), encoding="utf-8")
+    book(cfg, held=["MU", "NVDA"])  # the book after step 7: NVDA bought this slot
+    assert alert_lines(cfg) == []
+
+
+@pytest.mark.unit
+def test_a_shown_error_with_a_newer_attempt_reads_to_be_verified(tmp_path, live):
+    cfg = config(tmp_path)
+    write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "bullish — x.")},
+               tickers=[entry("NVDA", evaluate="warn", trigger="core", decide=decided(cfg, "NVDA", "ERROR", None))])
+    write_decision(cfg, ticker="NVDA", n=2, plan=BUY_PLAN, date_iso=DAY.isoformat(), decision="HOLD", trigger="manual")
+    book(cfg, held=["NVDA"])
+    assert alert_lines(cfg) == ["⚠️ 持仓提醒：NVDA 最新分析结论与下单待核实"]
+
+
+@pytest.mark.unit
+def test_a_manual_only_ledger_row_reads_to_be_verified(tmp_path, live):
+    cfg = config(tmp_path)
+    write_slot(cfg, briefs={}, tickers=[])
+    write_decision(cfg, ticker="MU", plan=BUY_PLAN, date_iso=DAY.isoformat(), decision="HOLD", trigger="manual")
+    book(cfg, held=["mu"])  # case-insensitive
+    assert alert_lines(cfg) == ["⚠️ 持仓提醒：mu 决策数据未读到，是否已分析待核实"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("code", ["HOLD", "ERROR"])
+def test_after_execution_a_live_order_under_a_later_hold_or_error_reads_to_be_verified(tmp_path, live, code):
+    cfg = config(tmp_path)
+    write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "bearish — y.")},
+               tickers=[{**entry("NVDA", decide=decided(cfg, "NVDA", code, "Hold")), "final": "order-live"}])
+    path = cfg.state_dir / "funnel" / "us" / f"{DAY}.json"
+    snap = json.loads(path.read_text())
+    snap["context"] = {"execute_ran": True}
+    path.write_text(json.dumps(snap), encoding="utf-8")
+    book(cfg, held=["NVDA"])
+    assert alert_lines(cfg) == ["⚠️ 持仓提醒：NVDA 简报偏空，最新分析结论与下单待核实"]
+
+
+@pytest.mark.unit
+def test_a_bearish_held_name_without_a_decision_keeps_the_bearish_lead(tmp_path, live):
+    cfg = config(tmp_path)
+    write_slot(cfg, briefs={"MU": ticker_brief("MU", 7.0, "bearish — z.")},
+               tickers=[entry("MU", evaluate="fail", trigger="eval-fail")])
+    book(cfg, held=["MU"])
+    assert alert_lines(cfg) == ["⚠️ 持仓提醒：MU 简报偏空，今日没有分析——是否卖出由你决定"]
+
+
+@pytest.mark.unit
+def test_a_newer_error_under_a_shown_bullish_hold_is_flagged(tmp_path, live):
+    cfg = config(tmp_path)
+    write_slot(cfg, briefs={"AMD": ticker_brief("AMD", 7.0, "bullish — y.")},
+               tickers=[entry("AMD", evaluate="warn", trigger="core", decide=decided(cfg, "AMD", "HOLD", "Hold"))])
+    write_decision(cfg, ticker="AMD", n=2, plan=BUY_PLAN, date_iso=DAY.isoformat(), decision="ERROR")
+    book(cfg, held=["AMD"])
+    assert alert_lines(cfg) == ["⚠️ 持仓提醒：AMD 最新分析结论与下单待核实"]
+
+
+@pytest.mark.unit
+def test_a_decide_stage_without_a_conclusion_is_flagged(tmp_path, live):
+    cfg = config(tmp_path)
+    write_slot(cfg, briefs={"AMD": ticker_brief("AMD", 7.0, "bullish — y.")},
+               tickers=[entry("AMD", evaluate="warn", trigger="core", decide={"details": {}})])
+    book(cfg, held=["AMD"])
+    assert alert_lines(cfg) == ["⚠️ 持仓提醒：AMD 分析没有结论——是否卖出由你决定"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("variant", ["paused", "eval-fail", "feeds"])
+def test_a_bearish_sell_the_adapter_will_not_place_is_flagged(tmp_path, live, monkeypatch, variant):
+    cfg = config(tmp_path)
+    if variant == "paused":
+        monkeypatch.setattr(rd, "_execution_mode", lambda c: "执行已暂停")
+        decide = decided(cfg, "MU", "SELL", "Sell", plan=SELL_PLAN)
+    elif variant == "eval-fail":
+        decide = decided(cfg, "MU", "SELL", "Sell", plan=SELL_PLAN, ticker_v="fail")
+    else:
+        decide = stage("SELL", arm="feeds", pm_rating="Sell")
+    write_slot(cfg, briefs={"MU": ticker_brief("MU", 7.0, "bearish — z.")},
+               tickers=[entry("MU", evaluate="warn", trigger="core", decide=decide)])
+    book(cfg, held=["MU"])
+    assert alert_lines(cfg) == ["⚠️ 持仓提醒：MU 简报偏空，分析给出卖出但不会下单——是否卖出由你决定"]

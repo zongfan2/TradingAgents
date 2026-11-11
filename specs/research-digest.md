@@ -40,6 +40,26 @@ line) was hard to read: the user asked why a name with no position was
   positions are **unknown** — the
   segment is left out and no line claims 无持仓) and the planned orders
   (us) or `A股不下单` (cn).
+- **Held alerts** (us, user decision 2026-11-10; right under the header,
+  one line each, never an order): for every held name of the trades book,
+  `⚠️ 持仓提醒：<T> …` when its brief's final Impact is bearish and no sell
+  order follows (no SELL; a SELL the adapter will not place — blocked,
+  模拟, 执行已暂停, a feeds-arm decision — reads `分析给出卖出但不会下单`;
+  an undetermined one reads 待核实, below) — bearish briefs averaged
+  −6.7 % excess over 5 sessions, n=18; when its analysis errored; or when
+  it has no decision this slot (`今日没有分析`, only for the current slot's
+  digest — a retried older digest has other holdings). What the digest
+  cannot pin down reads 待核实: no decision shown while the slot's decisions
+  were not all read or the ledger has a same-slot row for the name
+  (`决策数据未读到，是否已分析待核实`), and a shown decision step 7 may not
+  read (any newer same-slot attempt — manual included —, a lost brief-arm
+  event, an undetermined order, or after execution a live order under a
+  shown HOLD/ERROR, whose side is unknown) for
+  held name, whatever the shown code (`最新分析结论与下单待核实`). A decide
+  stage with no usable conclusion reads `分析没有结论`. A name bought by
+  this slot's order is not flagged. A bearish brief leads any of these
+  lines with `简报偏空，`. Unknown holdings or the cn
+  session give none.
 - **Macro**: the revision-bound eval verdict and each of sections 1–6's
   Impact direction (one phrase when all six agree), found by the contract's
   heading rule.
@@ -219,3 +239,6 @@ periodic job finishes it, with an age bound so it cannot retry forever.
 6. No trades webhook or notifications off → nothing sent anywhere; a failure
    never changes the slot's outcome.
 7. Tests are offline (the summary call is stubbed by an autouse fixture).
+8. A held name with a bearish brief and no sell order to follow, an analysis
+   error, or no decision gets one `⚠️ 持仓提醒` line under the header (us
+   only); unread decisions read 待核实, never 没有分析.

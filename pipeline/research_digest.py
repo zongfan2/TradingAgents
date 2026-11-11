@@ -661,6 +661,58 @@ def _window_passed(execution_time: str | None, slot_date: date, now: datetime) -
                            tzinfo=ZoneInfo(SESSION_TZ["us"]))
 
 
+def _attempt_of(run_id: str) -> int:
+    from pipeline.execution_adapter import _attempt_number  # the adapter's own rule, never a copy
+
+    return _attempt_number(run_id)
+
+
+def held_alerts(session: str, held: set[str] | None, tickers: list, *, sell_orders: set[str] = frozenset(),
+                undetermined: set[str] = frozenset(), bought: set[str] = frozenset(), unread: bool = False,
+                recorded: set[str] = frozenset(), current: bool = True) -> list[str]:
+    """Lines for the held names that need the user's eye (user decision
+    2026-11-10; never an order): a bearish brief with no sell order to
+    follow (no SELL, or a SELL the adapter will not place — bearish briefs
+    averaged −6.7 % over 5 sessions, n=18), an analysis error, or no
+    analysis this slot. Whatever the digest cannot pin down reads 待核实:
+    a shown decision step 7 may not read (``undetermined``: a newer attempt,
+    a lost brief-arm event, an unknown mode), or no decision shown while the
+    slot's decisions were not all read (``unread``) or the ledger has one
+    (``recorded``). 今日没有分析 only for the current slot's digest (a
+    retried older one has other holdings). A name bought by this slot's
+    order (``bought``) is not flagged. us only; unknown holdings give none."""
+    if session != "us" or not held:
+        return []
+    by_ticker = {t.ticker.upper(): t for t in tickers}
+    upper_of = lambda names: {n.upper() for n in names}  # noqa: E731
+    bought_u, recorded_u, undetermined_u = upper_of(bought), upper_of(recorded), upper_of(undetermined)
+    out = []
+    for symbol in sorted(held):
+        upper = symbol.upper()
+        if upper in bought_u:
+            continue
+        t = by_ticker.get(upper)
+        code = (t.decide or {}).get("code") if t is not None else None
+        bearish = (t is not None and t.has_brief and (impact := _last_impact(t.body)) is not None
+                   and impact[0] == IMPACT_NAMES.get("bearish"))
+        lead = "简报偏空，" if bearish else ""
+        if t is None or t.decide is None:
+            if unread or upper in recorded_u:
+                out.append(f"⚠️ 持仓提醒：{symbol} {lead}决策数据未读到，是否已分析待核实")
+            elif current:
+                out.append(f"⚠️ 持仓提醒：{symbol} {lead}今日没有分析——是否卖出由你决定")
+        elif code not in ("BUY", "SELL", "HOLD", "ERROR"):  # a decide stage with no usable conclusion
+            out.append(f"⚠️ 持仓提醒：{symbol} {lead}分析没有结论——是否卖出由你决定")
+        elif upper in undetermined_u:  # its latest decision may be another (an error, a SELL)
+            out.append(f"⚠️ 持仓提醒：{symbol} {lead}最新分析结论与下单待核实")
+        elif code == "ERROR":
+            out.append(f"⚠️ 持仓提醒：{symbol} {lead}分析出错，今日没有结论——是否卖出由你决定")
+        elif bearish and upper not in sell_orders:
+            reason = "分析给出卖出但不会下单" if code == "SELL" else "但分析没有给出卖出"
+            out.append(f"⚠️ 持仓提醒：{symbol} 简报偏空，{reason}——是否卖出由你决定")
+    return out
+
+
 def build_digest(config: PipelineConfig, session: str, slot_date: date, now: datetime | None = None) -> str:
     """The digest text for one slot; never raises on a missing or partial input."""
     try:
@@ -720,6 +772,9 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
     rest = [t for t in tickers if t.decide is None and t.trigger != "eval-fail" and t.trigger not in unanalysed_codes]
 
     actions: dict[str, str] = {}
+    sell_orders: set[str] = set()  # held names whose SELL is (or will be) an order
+    undetermined: set[str] = set()  # a shown decision step 7 may not read, or an unknown order
+    bought: set[str] = set()  # names this slot's order bought (after step 7)
     planned: list[str] = []
     undecided: list[str] = list(unseen) if session == "us" and mode not in ("模拟", "执行已暂停") else []
     for t in analysed:
@@ -769,6 +824,19 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
                 and (record.ticker_eval_verdict == "fail" or record.macro_eval_verdict == "fail")):
             text += "；简报未采用（评估 fail）"
         actions[t.ticker] = text
+        code = t.decide.get("code")
+        # Any newer same-slot attempt (any arm or trigger, manual too) than the
+        # shown one: the shown decision may not be the name's latest.
+        shown_attempt = _attempt_of(str(details.get("run_id") or ""))
+        newer = any(r.ticker == t.ticker and r.session == session and str(r.date)[:10] == slot_date.isoformat()
+                    and _attempt_of(r.run_id) > shown_attempt for r in records.values())
+        if code == "SELL" and (ordered or t.final == "order-live"):
+            sell_orders.add(t.ticker.upper())
+        elif (ordered is None or t.ticker in undecided or blocker in ("later-attempt", "unknown") or newer
+              or (t.final == "order-live" and code not in ("BUY", "SELL"))):  # an order of unknown side
+            undetermined.add(t.ticker.upper())
+        if code == "BUY" and t.final == "order-live":
+            bought.add(t.ticker)
         if ordered:
             planned.append(f"{t.ticker} {text.split('（')[0]}")
         elif ordered is None:
@@ -801,7 +869,19 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
             done += ("；" if done else "") + "待核实（决策数据未读到）"
         head.append(("已执行：" + done) if executed else
                     "计划下单" + (f"（{mode}）" if mode else "") + "：" + orders)
-    lines = [" ｜ ".join(head), macro]
+    try:
+        from pipeline.common import session_date
+
+        current = slot_date == session_date(session, now)
+    except Exception:
+        current = False
+    # Any same-slot ledger row (manual too) means a decision exists even when
+    # the snapshot does not show it (an older snapshot kept on a failed rebuild).
+    recorded = {r.ticker for r in records.values()
+                if r.session == session and str(r.date)[:10] == slot_date.isoformat()}
+    alerts = held_alerts(session, held, tickers, sell_orders=sell_orders, undetermined=undetermined,
+                         bought=bought, unread=unread, recorded=recorded, current=current)
+    lines = [" ｜ ".join(head), *alerts, macro]
     if macro_summary:
         lines.append(f"  要点：{macro_summary}")
     if analysed:
