@@ -64,7 +64,9 @@ prompt):
   10 minutes (a holiday, a suspension or an intraday price never passes),
   its previous close equals the series' last close before the day within
   0.2 % (no missed session), and no later bar exists; a listed close is
-  never replaced;
+  never replaced. A shortened session (a US early close, a Hong Kong
+  half-day) closes before that time, so its late close is not filled — the
+  move stays null, never a wrong one;
 - `core_analysed` per market: a market whose core is not analysed by
   configuration (llm-cost R6; cn today) lists its core names
   `core-session-off`, and the prompt tells the model this is by design, not
@@ -83,7 +85,9 @@ prompt):
   that left no usage row (a run refused before any call, such as a 401)
   counted as `unrecorded`, and the day's fills;
 - `price_reads`: how many price reads were skipped (budget spent),
-  filled from the quote (`quote_filled`, below) or failed — a truncated read is a fact in the prompt and a warning line in
+  filled from the quote (`quote_filled`, with the names in
+  `quote_filled_tickers`, so an archived close that came from the quote is
+  identifiable in `review.json`; above) or failed — a truncated read is a fact in the prompt and a warning line in
   the message, never a quiet null;
 - a rolling scoreboard over the last 20 us sessions with a snapshot: the
   excess return over **1, 3 and 5 sessions** from the close before the

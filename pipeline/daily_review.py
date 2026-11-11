@@ -210,7 +210,7 @@ def closes(tickers: set[str], fetch=None, budget_s: float = PRICE_BUDGET_S, *, f
     from pipeline import price_tape
 
     order = [t for t in dict.fromkeys(first) if t in tickers] + sorted(set(tickers) - set(first))
-    out, failed, skipped, filled = {}, 0, 0, 0
+    out, failed, skipped, filled = {}, 0, 0, []
     now = now or datetime.now(timezone.utc)
     deadline = _time.monotonic() + budget_s
     for i, ticker in enumerate(order):
@@ -228,13 +228,14 @@ def closes(tickers: set[str], fetch=None, budget_s: float = PRICE_BUDGET_S, *, f
         series = [(d, c if c == c and c > 0 else None) for d, c in bars]
         if day is not None and (fill is None or ticker in fill):
             series, was_filled = fill_day_close(ticker, series, day, now, quote)
-            filled += was_filled
+            if was_filled:
+                filled.append(ticker)
         if any(c is not None for _d, c in series):
             out[ticker] = series
         else:
             failed += 1
     if stats is not None:
-        stats.update(skipped=skipped, failed=failed, quote_filled=filled)
+        stats.update(skipped=skipped, failed=failed, quote_filled=len(filled), quote_filled_tickers=sorted(filled))
     return out
 
 
@@ -568,7 +569,8 @@ def build_facts(config: PipelineConfig, day: date, *, prices: dict | None = None
     facts: dict[str, Any] = {"date": day.isoformat()}
     if price_stats:  # a truncated or failed price read is a fact, not a quiet null
         facts["price_reads"] = {"skipped": price_stats.get("skipped", 0), "failed": price_stats.get("failed", 0),
-                                "quote_filled": price_stats.get("quote_filled", 0)}
+                                "quote_filled": price_stats.get("quote_filled", 0),
+                                "quote_filled_tickers": price_stats.get("quote_filled_tickers", [])}
     try:
         from pipeline.config import core_analysis_sessions
 
@@ -651,7 +653,7 @@ REVIEW_PROMPT = """你是一个交易研究流水线的复盘员。下面是 {da
 当天涨跌（move_pct）和相对基准的超额（excess_pct；为 null 表示没有读到行情，不是零——
 price_reads 记录行情读取被跳过（skipped，时间预算用完）和失败（failed）的股票数，大于 0 时相关统计不完整，要在总结里说明；
 quote_filled 是 Yahoo 日线尚未更新、用收盘后实时报价补上当天收盘的股票数，属正常情况）；
-core_analysed 为 false 的市场（目前 A股/港股）按配置只做催化剂触发的研究，核心股不采集、不分析
+core_analysed 为 false 的市场按配置只做催化剂触发的研究，核心股不采集、不分析
 （trigger 为 core-session-off），这是有意设计，不要当作问题或遗漏报告；
 brief_used 不为空表示分析用的是那一天的旧简报（当天简报缺失时按合约沿用前一天的）；
 未分析却大幅波动的股票（missed_moves）；宏观判断；分析出错的原因分类（unrecorded 表示出错但没有留下用量记录、原因未知，常见于调用前就被拒，如认证失败）；账户、持仓与成交；

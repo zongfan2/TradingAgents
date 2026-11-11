@@ -47,6 +47,7 @@ def offline_broker(monkeypatch):
     def no_quote(ticker):
         raise RuntimeError("offline")
 
+    no_quote.real = dr._yahoo_quote  # for the one test that pins the reader against a fake yfinance
     monkeypatch.setattr(dr, "_yahoo_quote", no_quote)
     monkeypatch.setattr(trade_notify, "alpaca_keys", lambda: ("key", "secret"))
     return built
@@ -440,7 +441,7 @@ def test_benchmarks_and_the_days_names_are_read_before_older_ones(tmp_path):
     stats = {}
     dr.history_prices(cfg, DAY, fetch=fetch, stats=stats)
     assert read[:3] == list(dr.BENCHMARKS.values()) and set(read[3:5]) == {"NVDA", "FN"}
-    assert stats == {"skipped": 0, "failed": 0, "quote_filled": 0}
+    assert stats == {"skipped": 0, "failed": 0, "quote_filled": 0, "quote_filled_tickers": []}
     stats = {}
     out = dr.closes(set(read), fetch=lambda t: [], first=read, stats=stats)
     assert out == {} and stats["failed"] == len(read)
@@ -458,7 +459,7 @@ def test_a_truncated_price_read_is_a_fact_and_in_the_message(tmp_path, archive, 
     monkeypatch.setattr(dr, "closes", partial)
     prompts = []
     text = dr.review_day(cfg, DAY, send=None, runner=lambda prompt: prompts.append(prompt) or review())
-    assert '"price_reads": {"skipped": 7, "failed": 1, "quote_filled": 0}' in prompts[0]
+    assert '"price_reads": {"skipped": 7, "failed": 1, "quote_filled": 0, "quote_filled_tickers": []}' in prompts[0]
     assert "行情读取不完整：跳过 7 只、失败 1 只" in text
 
 
@@ -722,6 +723,7 @@ def test_a_late_listed_close_is_filled_from_the_quote_after_the_close(ticker, se
     stats = {}
     out = dr.closes({ticker}, fetch=lambda t: series, day=DAY, quote=quote, now=AFTER_ALL_CLOSES, stats=stats)
     assert dr.day_change(out[ticker], DAY) == pytest.approx(1.0) and stats["quote_filled"] == 1
+    assert stats["quote_filled_tickers"] == [ticker]
 
 
 @pytest.mark.unit
@@ -779,3 +781,38 @@ def test_the_core_off_session_is_marked_as_configuration(tmp_path, monkeypatch):
     facts = dr.build_facts(cfg, DAY, prices=prices_for("NVDA", "FN"))
     assert facts["us"]["core_analysed"] is True and facts["cn"]["core_analysed"] is False
     assert "core-session-off" in dr.REVIEW_PROMPT and "不要当作问题" in dr.REVIEW_PROMPT
+
+
+@pytest.mark.unit
+def test_the_quote_reader_maps_yahoos_chart_metadata(monkeypatch):
+    import yfinance
+
+    class FakeTicker:
+        history_metadata = {"regularMarketPrice": 749.92, "regularMarketTime": 1794344400, "previousClose": 752.69}
+
+        def __init__(self, ticker):
+            pass
+
+        def history(self, **kwargs):
+            return None
+
+    monkeypatch.setattr(yfinance, "Ticker", FakeTicker)
+    price, traded, previous = dr._yahoo_quote.real("SPY")
+    assert (price, previous) == (749.92, 752.69)
+    assert traded == datetime(2026, 11, 10, 21, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.unit
+def test_a_shortened_session_is_not_filled():
+    series = [(date(2026, 11, 3), 752.69)]
+    early = datetime(2026, 11, 4, 18, 0, tzinfo=timezone.utc)  # 13:00 New York: an early close's last trade
+    assert dr.fill_day_close("SPY", series, DAY, AFTER_ALL_CLOSES, lambda t: (760.0, early, 752.69)) == (series, False)
+
+
+@pytest.mark.unit
+def test_a_junk_core_sessions_config_leaves_core_analysed_unknown(tmp_path, monkeypatch):
+    monkeypatch.setenv("TRADINGAGENTS_CORE_ANALYSIS_SESSIONS", "jp")
+    cfg = config(tmp_path)
+    slot(cfg)
+    facts = dr.build_facts(cfg, DAY, prices=prices_for("NVDA", "FN"))
+    assert facts["us"]["core_analysed"] is None and facts["cn"]["core_analysed"] is None
