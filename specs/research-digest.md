@@ -55,7 +55,8 @@ line) was hard to read: the user asked why a name with no position was
   read (any newer same-slot attempt — manual included —, a lost brief-arm
   event, an undetermined order, or after execution a live order under a
   shown HOLD/ERROR, whose side is unknown) for
-  a bearish or errored name (`最新分析结论与下单待核实`). A name bought by
+  held name, whatever the shown code (`最新分析结论与下单待核实`). A decide
+  stage with no usable conclusion reads `分析没有结论`. A name bought by
   this slot's order is not flagged. A bearish brief leads any of these
   lines with `简报偏空，`. Unknown holdings or the cn
   session give none.

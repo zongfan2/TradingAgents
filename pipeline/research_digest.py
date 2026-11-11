@@ -662,10 +662,9 @@ def _window_passed(execution_time: str | None, slot_date: date, now: datetime) -
 
 
 def _attempt_of(run_id: str) -> int:
-    try:
-        return int(run_id.rsplit("-", 1)[1])
-    except (IndexError, ValueError):
-        return 0
+    from pipeline.execution_adapter import _attempt_number  # the adapter's own rule, never a copy
+
+    return _attempt_number(run_id)
 
 
 def held_alerts(session: str, held: set[str] | None, tickers: list, *, sell_orders: set[str] = frozenset(),
@@ -697,15 +696,17 @@ def held_alerts(session: str, held: set[str] | None, tickers: list, *, sell_orde
         bearish = (t is not None and t.has_brief and (impact := _last_impact(t.body)) is not None
                    and impact[0] == IMPACT_NAMES.get("bearish"))
         lead = "简报偏空，" if bearish else ""
-        if code is None:
+        if t is None or t.decide is None:
             if unread or upper in recorded_u:
                 out.append(f"⚠️ 持仓提醒：{symbol} {lead}决策数据未读到，是否已分析待核实")
             elif current:
                 out.append(f"⚠️ 持仓提醒：{symbol} {lead}今日没有分析——是否卖出由你决定")
-        elif upper in undetermined_u and (code == "ERROR" or bearish):
-            out.append(f"⚠️ 持仓提醒：{symbol} {'简报偏空，' if bearish else ''}最新分析结论与下单待核实")
+        elif code not in ("BUY", "SELL", "HOLD", "ERROR"):  # a decide stage with no usable conclusion
+            out.append(f"⚠️ 持仓提醒：{symbol} {lead}分析没有结论——是否卖出由你决定")
+        elif upper in undetermined_u:  # its latest decision may be another (an error, a SELL)
+            out.append(f"⚠️ 持仓提醒：{symbol} {lead}最新分析结论与下单待核实")
         elif code == "ERROR":
-            out.append(f"⚠️ 持仓提醒：{symbol} 分析出错，今日没有结论——是否卖出由你决定")
+            out.append(f"⚠️ 持仓提醒：{symbol} {lead}分析出错，今日没有结论——是否卖出由你决定")
         elif bearish and upper not in sell_orders:
             reason = "分析给出卖出但不会下单" if code == "SELL" else "但分析没有给出卖出"
             out.append(f"⚠️ 持仓提醒：{symbol} 简报偏空，{reason}——是否卖出由你决定")

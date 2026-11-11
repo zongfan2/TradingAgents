@@ -1152,7 +1152,7 @@ def test_held_names_needing_a_look_are_flagged_at_the_top(tmp_path, live):
     held_slot(cfg)
     assert alert_lines(cfg) == [
         "⚠️ 持仓提醒：MSFT 简报偏空，但分析没有给出卖出——是否卖出由你决定",
-        "⚠️ 持仓提醒：NVDA 分析出错，今日没有结论——是否卖出由你决定",
+        "⚠️ 持仓提醒：NVDA 简报偏空，分析出错，今日没有结论——是否卖出由你决定",
         "⚠️ 持仓提醒：TSLA 今日没有分析——是否卖出由你决定",
     ]  # AMD bullish, AAPL mixed, MU's SELL will be placed: nothing to flag
 
@@ -1261,3 +1261,39 @@ def test_a_bearish_held_name_without_a_decision_keeps_the_bearish_lead(tmp_path,
                tickers=[entry("MU", evaluate="fail", trigger="eval-fail")])
     book(cfg, held=["MU"])
     assert alert_lines(cfg) == ["⚠️ 持仓提醒：MU 简报偏空，今日没有分析——是否卖出由你决定"]
+
+
+@pytest.mark.unit
+def test_a_newer_error_under_a_shown_bullish_hold_is_flagged(tmp_path, live):
+    cfg = config(tmp_path)
+    write_slot(cfg, briefs={"AMD": ticker_brief("AMD", 7.0, "bullish — y.")},
+               tickers=[entry("AMD", evaluate="warn", trigger="core", decide=decided(cfg, "AMD", "HOLD", "Hold"))])
+    write_decision(cfg, ticker="AMD", n=2, plan=BUY_PLAN, date_iso=DAY.isoformat(), decision="ERROR")
+    book(cfg, held=["AMD"])
+    assert alert_lines(cfg) == ["⚠️ 持仓提醒：AMD 最新分析结论与下单待核实"]
+
+
+@pytest.mark.unit
+def test_a_decide_stage_without_a_conclusion_is_flagged(tmp_path, live):
+    cfg = config(tmp_path)
+    write_slot(cfg, briefs={"AMD": ticker_brief("AMD", 7.0, "bullish — y.")},
+               tickers=[entry("AMD", evaluate="warn", trigger="core", decide={"details": {}})])
+    book(cfg, held=["AMD"])
+    assert alert_lines(cfg) == ["⚠️ 持仓提醒：AMD 分析没有结论——是否卖出由你决定"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("variant", ["paused", "eval-fail", "feeds"])
+def test_a_bearish_sell_the_adapter_will_not_place_is_flagged(tmp_path, live, monkeypatch, variant):
+    cfg = config(tmp_path)
+    if variant == "paused":
+        monkeypatch.setattr(rd, "_execution_mode", lambda c: "执行已暂停")
+        decide = decided(cfg, "MU", "SELL", "Sell", plan=SELL_PLAN)
+    elif variant == "eval-fail":
+        decide = decided(cfg, "MU", "SELL", "Sell", plan=SELL_PLAN, ticker_v="fail")
+    else:
+        decide = stage("SELL", arm="feeds", pm_rating="Sell")
+    write_slot(cfg, briefs={"MU": ticker_brief("MU", 7.0, "bearish — z.")},
+               tickers=[entry("MU", evaluate="warn", trigger="core", decide=decide)])
+    book(cfg, held=["MU"])
+    assert alert_lines(cfg) == ["⚠️ 持仓提醒：MU 简报偏空，分析给出卖出但不会下单——是否卖出由你决定"]
