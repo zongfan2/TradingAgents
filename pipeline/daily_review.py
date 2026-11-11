@@ -128,12 +128,17 @@ def _day_tickers(config: PipelineConfig, day: date) -> dict[str, set[str]]:
 PRICE_BUDGET_S = 240.0
 
 
-#: Local zone and a time safely after the close, per market: a quote read
-#: after it is the session's close, never an intraday price.
-_AFTER_CLOSE = {"cn": ("Asia/Shanghai", time(15, 30)), "hk": ("Asia/Hong_Kong", time(16, 40)),
-                "us": ("America/New_York", time(16, 30))}
+#: Per market: local zone, the regular close, and a time safely after it.
+#: A quote counts as the day's close only when its own last-trade time is on
+#: the day at or after the close (less a few minutes), read after the margin.
+_SESSION_CLOSE = {"cn": ("Asia/Shanghai", time(15, 0), time(15, 30)),
+                  "hk": ("Asia/Hong_Kong", time(16, 0), time(16, 40)),
+                  "us": ("America/New_York", time(16, 0), time(16, 30))}
+#: How long before the close a last trade may be (a closing auction prints
+#: just before the bell; a thin name's last trade can be earlier).
+CLOSE_TRADE_SLACK = timedelta(minutes=10)
 #: The quote's previous close must equal the series' last close before the
-#: day within this fraction: else the quote is about another session.
+#: day within this fraction: else the series misses a session.
 QUOTE_PREV_TOLERANCE = 0.002
 
 
@@ -144,48 +149,62 @@ def _market(ticker: str) -> str:
     return "hk" if upper.endswith(".HK") or upper == "^HSI" else "us"
 
 
-def _yahoo_quote(ticker: str) -> tuple[float, float]:
+def _yahoo_quote(ticker: str) -> tuple[float, datetime, float]:
+    """(regular-market price, its trade time, previous close) from Yahoo's
+    chart metadata."""
     import yfinance as yf
 
-    info = yf.Ticker(ticker).fast_info
-    return float(info["lastPrice"]), float(info["previousClose"])
+    handle = yf.Ticker(ticker)
+    handle.history(period="5d", interval="1d", auto_adjust=False)
+    meta = handle.history_metadata or {}
+    return (float(meta["regularMarketPrice"]),
+            datetime.fromtimestamp(int(meta["regularMarketTime"]), timezone.utc),
+            float(meta["previousClose"]))
 
 
 def fill_day_close(ticker: str, series: list, day: date, now: datetime, quote=None) -> tuple[list, bool]:
     """Yahoo often lists the latest session late (a NaN close, or no row at
     all — 510300.SS and ^HSI on 2026-11-10). After that market's close, the
-    live quote's last price is the day's close: it fills the day when the
-    quote's previous close is the series' last close before the day (so the
-    quote is about the day, not a holiday or the next session) and no later
-    bar exists. Returns the series and whether it was filled."""
+    quote's regular-market price is the day's close when its own trade time
+    is on ``day``, at or after the close less CLOSE_TRADE_SLACK (so a
+    holiday, a suspension or an intraday price never passes), and its
+    previous close equals the series' last close before the day (the series
+    misses no session). Never with a later bar; a listed close is never
+    replaced. Returns the series and whether it was filled."""
     if any(d == day and c is not None for d, c in series) or any(d > day for d, _c in series):
         return series, False
-    zone, after = _AFTER_CLOSE[_market(ticker)]
-    if now.astimezone(ZoneInfo(zone)) < datetime.combine(day, after, tzinfo=ZoneInfo(zone)):
+    zone_name, close_at, read_after = _SESSION_CLOSE[_market(ticker)]
+    zone = ZoneInfo(zone_name)
+    if now.astimezone(zone) < datetime.combine(day, read_after, tzinfo=zone):
         return series, False
     prior = [c for d, c in series if d < day and c is not None]
     if not prior:
         return series, False
     try:
-        last, previous = (quote or _yahoo_quote)(ticker)
+        last, traded_at, previous = (quote or _yahoo_quote)(ticker)
+        traded = traded_at.astimezone(zone)
     except Exception as exc:
         logger.warning("daily review: quote for %s unavailable (%s)", ticker, type(exc).__name__)
         return series, False
-    if not all(math.isfinite(v) and v > 0 for v in (last, previous)) or \
-            abs(previous / prior[-1] - 1) > QUOTE_PREV_TOLERANCE:
+    if (traded.date() != day
+            or traded < datetime.combine(day, close_at, tzinfo=zone) - CLOSE_TRADE_SLACK
+            or not all(math.isfinite(v) and v > 0 for v in (last, previous))
+            or abs(previous / prior[-1] - 1) > QUOTE_PREV_TOLERANCE):
         return series, False
     return sorted([(d, c) for d, c in series if d != day] + [(day, last)]), True
 
 
 def closes(tickers: set[str], fetch=None, budget_s: float = PRICE_BUDGET_S, *, first=(),
            stats: dict | None = None, day: date | None = None, quote=None,
-           now: datetime | None = None) -> dict[str, list[tuple[date, float]]]:
+           now: datetime | None = None, fill: set[str] | None = None) -> dict[str, list[tuple[date, float]]]:
     """ticker -> clean daily closes (the price tape's source); a ticker whose
     read fails is left out (never an empty series). ``first`` (in order) is
     read before the rest, so a spent budget skips the oldest names, never the
     benchmarks or the day's; ``stats`` receives the skipped, failed and
     quote-filled counts. With ``day``, a close Yahoo has not listed yet is
-    filled from the live quote after that market's close (fill_day_close)."""
+    filled from the quote after that market's close (fill_day_close) — for
+    the ``fill`` names only when given (the benchmarks and the day's names:
+    one quote round trip each, from the shared budget)."""
     import time as _time
 
     from pipeline import price_tape
@@ -207,7 +226,7 @@ def closes(tickers: set[str], fetch=None, budget_s: float = PRICE_BUDGET_S, *, f
             continue
         # An unusable close stays in place as None: a change never spans it.
         series = [(d, c if c == c and c > 0 else None) for d, c in bars]
-        if day is not None:
+        if day is not None and (fill is None or ticker in fill):
             series, was_filled = fill_day_close(ticker, series, day, now, quote)
             filled += was_filled
         if any(c is not None for _d, c in series):
@@ -528,12 +547,14 @@ def _error_kinds(config: PipelineConfig, day: date) -> dict[str, int]:
 
 def history_prices(config: PipelineConfig, day: date, fetch=None, stats: dict | None = None) -> dict:
     """Closes for the benchmarks, the day's names, then the scoreboard
-    window's, newest day first (a spent budget skips the oldest)."""
+    window's, newest day first (a spent budget skips the oldest). Only the
+    benchmarks and the day's names get a late close filled from the quote."""
+    fill = set(BENCHMARKS.values()).union(*_day_tickers(config, day).values())
     first: list[str] = list(BENCHMARKS.values())
     for back in range(60):
         for _session, names in sorted(_day_tickers(config, day - timedelta(days=back)).items(), reverse=True):
             first += sorted(names)
-    return closes(set(first), fetch, first=first, stats=stats, day=day)
+    return closes(set(first), fetch, first=first, stats=stats, day=day, fill=fill)
 
 
 def build_facts(config: PipelineConfig, day: date, *, prices: dict | None = None, broker=None,

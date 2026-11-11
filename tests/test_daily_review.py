@@ -1,7 +1,7 @@
 """Daily post-close review and archive — specs/daily-review.md."""
 
 import json
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -704,16 +704,21 @@ def test_the_prompt_judges_on_multi_session_horizons(tmp_path, archive, monkeypa
 
 
 AFTER_ALL_CLOSES = datetime(2026, 11, 4, 22, tzinfo=timezone.utc)  # 17:00 New York, 06:00 next day in Asia
+#: The day's closing trade time per market, in UTC.
+CLOSE_TRADE = {"510300.SS": datetime(2026, 11, 4, 7, 0, tzinfo=timezone.utc),   # 15:00 Shanghai
+               "^HSI": datetime(2026, 11, 4, 8, 8, tzinfo=timezone.utc),        # 16:08 Hong Kong
+               "SPY": datetime(2026, 11, 4, 21, 0, tzinfo=timezone.utc)}        # 16:00 New York
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize(("ticker", "series"), [
     ("510300.SS", [(date(2026, 11, 3), 4.13), (DAY, float("nan"))]),  # listed with a NaN close
     ("^HSI", [(date(2026, 11, 3), 24448.95)]),                         # not listed at all
+    ("SPY", [(date(2026, 11, 3), 752.69), (DAY, float("nan"))]),
 ])
 def test_a_late_listed_close_is_filled_from_the_quote_after_the_close(ticker, series):
     prev = series[0][1]
-    quote = lambda t: (prev * 1.01, prev)  # noqa: E731
+    quote = lambda t: (prev * 1.01, CLOSE_TRADE[t], prev)  # noqa: E731
     stats = {}
     out = dr.closes({ticker}, fetch=lambda t: series, day=DAY, quote=quote, now=AFTER_ALL_CLOSES, stats=stats)
     assert dr.day_change(out[ticker], DAY) == pytest.approx(1.0) and stats["quote_filled"] == 1
@@ -721,19 +726,49 @@ def test_a_late_listed_close_is_filled_from_the_quote_after_the_close(ticker, se
 
 @pytest.mark.unit
 def test_the_quote_never_fills_a_session_it_is_not_about():
-    series = [(date(2026, 11, 3), 100.0), (DAY, float("nan"))]
-    series = [(d, None if c != c else c) for d, c in series]
-    before_close = datetime(2026, 11, 4, 20, tzinfo=timezone.utc)  # 15:00 New York: intraday
-    assert dr.fill_day_close("SPY", series, DAY, before_close, lambda t: (101.0, 100.0)) == (series, False)
-    # the quote's previous close is another session's (a holiday, or the next session started)
-    assert dr.fill_day_close("SPY", series, DAY, AFTER_ALL_CLOSES, lambda t: (101.0, 97.0)) == (series, False)
-    later = [*series, (date(2026, 11, 5), 102.0)]  # a later bar: a past-day run
-    assert dr.fill_day_close("SPY", later, DAY, AFTER_ALL_CLOSES, lambda t: (101.0, 100.0)) == (later, False)
-    assert dr.fill_day_close("SPY", series, DAY, AFTER_ALL_CLOSES, lambda t: (float("nan"), 100.0)) == (series, False)
+    d1, d2 = date(2026, 11, 3), date(2026, 11, 2)
+    series = [(d2, 4.130), (d1, 4.133)]  # no row for DAY
+    fill = lambda q: dr.fill_day_close("510300.SS", series, DAY, AFTER_ALL_CLOSES, lambda t: q)  # noqa: E731
+    on_day = CLOSE_TRADE["510300.SS"]
+    assert fill((4.15, on_day, 4.133)) == (sorted([*series, (DAY, 4.15)]), True)
+    # a holiday after a flat session: the last trade is the day before, whatever the prices
+    assert fill((4.133, on_day - timedelta(days=1), 4.130)) == (series, False)
+    # a suspended name: its last trade is days old, last == previous
+    assert fill((4.133, on_day - timedelta(days=6), 4.133)) == (series, False)
+    # an intraday last trade (before the close less the slack)
+    assert fill((4.15, on_day - timedelta(hours=2), 4.133)) == (series, False)
+    # the series misses a session: the previous close is not its last close
+    assert fill((4.15, on_day, 4.20)) == (series, False)
+    assert fill((float("nan"), on_day, 4.133)) == (series, False)
+    before_read = datetime(2026, 11, 4, 7, 10, tzinfo=timezone.utc)  # 15:10 Shanghai: before the margin
+    assert dr.fill_day_close("510300.SS", series, DAY, before_read, lambda t: (4.15, on_day, 4.133)) == (series, False)
     broken = lambda t: (_ for _ in ()).throw(ConnectionError("down"))  # noqa: E731
-    assert dr.fill_day_close("SPY", series, DAY, AFTER_ALL_CLOSES, broken) == (series, False)
-    kept = [(date(2026, 11, 3), 100.0), (DAY, 99.0)]  # a listed close is never replaced
-    assert dr.fill_day_close("SPY", kept, DAY, AFTER_ALL_CLOSES, lambda t: (101.0, 100.0)) == (kept, False)
+    assert dr.fill_day_close("510300.SS", series, DAY, AFTER_ALL_CLOSES, broken) == (series, False)
+    later = [*series, (date(2026, 11, 5), 4.2)]  # a later bar: a past-day run
+    assert dr.fill_day_close("510300.SS", later, DAY, AFTER_ALL_CLOSES, lambda t: (4.15, on_day, 4.133))[1] is False
+    kept = [*series, (DAY, 4.14)]  # a listed close is never replaced
+    assert dr.fill_day_close("510300.SS", kept, DAY, AFTER_ALL_CLOSES, lambda t: (4.15, on_day, 4.133)) == (kept, False)
+
+
+@pytest.mark.unit
+def test_only_the_benchmarks_and_the_days_names_ask_for_a_quote(tmp_path):
+    cfg = config(tmp_path)
+    slot(cfg)  # DAY: NVDA, FN
+    funnel = cfg.state_dir / "funnel" / "us"
+    (funnel / f"{DAY.replace(day=1).isoformat()}.json").write_text(json.dumps({"tickers": [{"ticker": "OLD"}]}))
+    asked = []
+
+    def quote(t):
+        asked.append(t)
+        raise RuntimeError("offline")
+
+    import functools
+    from unittest import mock
+
+    with mock.patch.object(dr, "_yahoo_quote", quote), \
+            mock.patch.object(dr, "closes", functools.partial(dr.closes, now=AFTER_ALL_CLOSES)):
+        dr.history_prices(cfg, DAY, fetch=lambda t: [(date(2026, 11, 3), 1.0)])
+    assert sorted(asked) == sorted({*dr.BENCHMARKS.values(), "NVDA", "FN"})
 
 
 @pytest.mark.unit

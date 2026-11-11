@@ -56,12 +56,15 @@ facts (no brief prose — that is web-derived text and stays out of the
 prompt):
 
 - a day's close Yahoo has not listed yet (a NaN close, or no row — 510300.SS
-  and ^HSI on 2026-11-10) is filled from the live quote's last price, only
-  after that market's close (Shanghai 15:30, Hong Kong 16:40, New York 16:30
-  local), only when the quote's previous close equals the series' last
-  close before the day within 0.2 % (so the quote is about that day, not a
-  holiday or the next session), and only when no later bar exists; a
-  listed close is never replaced;
+  and ^HSI on 2026-11-10) is filled from Yahoo's chart quote
+  (`regularMarketPrice`, its `regularMarketTime`, `previousClose`) for the
+  benchmarks and the day's names only, read after that market's close
+  (Shanghai 15:30, Hong Kong 16:40, New York 16:30 local), only when the
+  quote's own trade time is on the day at or after the regular close less
+  10 minutes (a holiday, a suspension or an intraday price never passes),
+  its previous close equals the series' last close before the day within
+  0.2 % (no missed session), and no later bar exists; a listed close is
+  never replaced;
 - `core_analysed` per market: a market whose core is not analysed by
   configuration (llm-cost R6; cn today) lists its core names
   `core-session-off`, and the prompt tells the model this is by design, not
