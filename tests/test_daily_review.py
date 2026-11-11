@@ -816,3 +816,16 @@ def test_a_junk_core_sessions_config_leaves_core_analysed_unknown(tmp_path, monk
     slot(cfg)
     facts = dr.build_facts(cfg, DAY, prices=prices_for("NVDA", "FN"))
     assert facts["us"]["core_analysed"] is None and facts["cn"]["core_analysed"] is None
+
+
+@pytest.mark.unit
+def test_an_archive_that_fetches_for_itself_names_its_quote_fills(tmp_path, archive, monkeypatch):
+    import functools
+
+    cfg = config(tmp_path)
+    slot(cfg)
+    series = {"SPY": [(date(2026, 11, 3), 752.69), (DAY, float("nan"))]}
+    monkeypatch.setattr(dr, "closes", functools.partial(dr.closes, now=AFTER_ALL_CLOSES,
+                                                        quote=lambda t: (760.0, CLOSE_TRADE["SPY"], 752.69)))
+    dr.archive_day(cfg, DAY, fetch=lambda t: series.get(t, [(date(2026, 11, 3), 1.0), (DAY, 1.0)]))
+    assert json.loads((archive / "prices" / DAY.isoformat() / "quote_filled.json").read_text()) == ["SPY"]

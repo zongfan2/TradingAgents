@@ -369,7 +369,11 @@ def _archive_into(config, day, root, iso, counts, *, broker, fetch, prices) -> N
            counts, "llm_usage")
     tickers = set().union(*_day_tickers(config, day).values()) | set(BENCHMARKS.values())
     if prices is None:
-        prices = closes(tickers, fetch, first=BENCHMARKS.values(), day=day)
+        fetched: dict = {}
+        prices = closes(tickers, fetch, first=BENCHMARKS.values(), day=day, stats=fetched)
+        if fetched.get("quote_filled_tickers"):  # this run's own fills (a retry, the archive CLI): named on disk
+            _write(root / "prices" / iso / "quote_filled.json",
+                   json.dumps(fetched["quote_filled_tickers"]), counts, "prices")
     session_of = {t: session for session, names in _day_tickers(config, day).items() for t in names}
     rows = [[iso, ticker, f"{close:.4f}",
              "" if (c := name_change(prices, ticker, session_of.get(ticker, "us"), day)) is None else f"{c:.2f}"]

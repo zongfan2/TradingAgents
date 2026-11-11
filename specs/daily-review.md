@@ -87,7 +87,8 @@ prompt):
 - `price_reads`: how many price reads were skipped (budget spent),
   filled from the quote (`quote_filled`, with the names in
   `quote_filled_tickers`, so an archived close that came from the quote is
-  identifiable in `review.json`; above) or failed — a truncated read is a fact in the prompt and a warning line in
+  identifiable in `review.json`, and an archive that fetches for itself — a
+  retry, the `archive` CLI — writes `prices/<day>/quote_filled.json`; above) or failed — a truncated read is a fact in the prompt and a warning line in
   the message, never a quiet null;
 - a rolling scoreboard over the last 20 us sessions with a snapshot: the
   excess return over **1, 3 and 5 sessions** from the close before the
