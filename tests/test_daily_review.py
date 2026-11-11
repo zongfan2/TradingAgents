@@ -835,3 +835,85 @@ def test_an_archive_that_fetches_for_itself_names_its_quote_fills(tmp_path, arch
     series["SPY"] = [(date(2026, 11, 3), 752.69), (DAY, 761.0)]  # Yahoo lists the close now
     dr.archive_day(cfg, DAY, fetch=lambda t: series.get(t, [(date(2026, 11, 3), 1.0), (DAY, 1.0)]))
     assert json.loads(marker.read_text()) == []
+
+
+@pytest.mark.unit
+def test_a_duplicate_date_with_an_unusable_close_never_breaks_the_fill():
+    d1, d2 = date(2026, 11, 2), date(2026, 11, 3)
+    series = [(d1, None), (d1, 4.10), (d2, 4.13)]  # Yahoo listed 11-02 twice, once without a close
+    out, filled = dr.fill_day_close("510300.SS", series, DAY, AFTER_ALL_CLOSES,
+                                    lambda t: (4.15, CLOSE_TRADE["510300.SS"], 4.13))
+    assert filled and out[-1] == (DAY, 4.15) and [d for d, _c in out] == [d1, d1, d2, DAY]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("ticker", "trade_utc", "market"), [
+    ("0700.HK", datetime(2026, 11, 4, 8, 8, tzinfo=timezone.utc), "hk"),     # 16:08 Hong Kong
+    ("300750.SZ", datetime(2026, 11, 4, 7, 0, tzinfo=timezone.utc), "cn"),   # 15:00 Shenzhen
+    ("600183.SS", datetime(2026, 11, 4, 7, 0, tzinfo=timezone.utc), "cn"),
+])
+def test_hong_kong_and_shenzhen_names_use_their_own_close(ticker, trade_utc, market):
+    assert dr._market(ticker) == market
+    series = [(date(2026, 11, 3), 100.0)]
+    out, filled = dr.fill_day_close(ticker, series, DAY, AFTER_ALL_CLOSES, lambda t: (101.0, trade_utc, 100.0))
+    assert filled and out[-1] == (DAY, 101.0)
+    # judged on New York hours, the same trade would be hours before the close: never filled
+    assert dr.fill_day_close("SPY", series, DAY, AFTER_ALL_CLOSES, lambda t: (101.0, trade_utc, 100.0))[1] is False
+
+
+@pytest.mark.unit
+def test_the_reviews_own_quote_fills_are_named_in_the_archive(tmp_path, archive, monkeypatch):
+    cfg = config(tmp_path)
+    slot(cfg)
+
+    def read(tickers, fetch=None, budget_s=0, *, first=(), stats=None, **k):
+        if stats is not None:
+            stats.update(skipped=0, failed=0, quote_filled=1, quote_filled_tickers=["SPY"])
+        return prices_for("NVDA", "FN")
+
+    monkeypatch.setattr(dr, "closes", read)
+    dr.review_day(cfg, DAY, send=None, runner=lambda prompt: review())
+    assert json.loads((archive / "prices" / DAY.isoformat() / "quote_filled.json").read_text()) == ["SPY"]
+
+
+@pytest.mark.unit
+def test_a_retry_that_reads_a_listed_close_clears_the_saved_quote_fill(tmp_path, archive, monkeypatch):
+    cfg = config(tmp_path)
+    slot(cfg)
+    marker = archive / "prices" / DAY.isoformat() / "quote_filled.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(json.dumps(["SPY"]))
+    # the saved review says SPY came from the quote; the retry's own read finds it listed
+    monkeypatch.setattr(dr, "closes", lambda tickers, fetch=None, **k: prices_for("NVDA", "FN"))
+    dr.archive_day(cfg, DAY, prices=None, quote_filled=["SPY"])
+    assert json.loads(marker.read_text()) == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("junk", ['[1, "SPY"]', "[null]", '{"SPY": 1}', "not json"])
+def test_a_damaged_marker_never_breaks_the_archive(tmp_path, archive, junk):
+    cfg = config(tmp_path)
+    slot(cfg)
+    marker = archive / "prices" / DAY.isoformat() / "quote_filled.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(junk)
+    counts = dr.archive_day(cfg, DAY, prices=prices_for("NVDA", "FN"), quote_filled=["SPY"])
+    assert not counts.get("error") and json.loads(marker.read_text()) == ["SPY"]
+
+
+@pytest.mark.unit
+def test_quote_fills_are_named_even_when_the_facts_build_fails(tmp_path, archive, monkeypatch):
+    cfg = config(tmp_path)
+    slot(cfg)
+
+    def read(tickers, fetch=None, budget_s=0, *, first=(), stats=None, **k):
+        stats.update(skipped=0, failed=0, quote_filled=1, quote_filled_tickers=["SPY"])
+        return prices_for("NVDA", "FN")
+
+    def broken(*a, **k):
+        raise RuntimeError("facts")
+
+    monkeypatch.setattr(dr, "closes", read)
+    monkeypatch.setattr(dr, "build_facts", broken)
+    dr.review_day(cfg, DAY, send=None, runner=lambda prompt: review())
+    assert json.loads((archive / "prices" / DAY.isoformat() / "quote_filled.json").read_text()) == ["SPY"]

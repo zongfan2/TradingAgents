@@ -1297,3 +1297,40 @@ def test_a_bearish_sell_the_adapter_will_not_place_is_flagged(tmp_path, live, mo
                tickers=[entry("MU", evaluate="warn", trigger="core", decide=decide)])
     book(cfg, held=["MU"])
     assert alert_lines(cfg) == ["⚠️ 持仓提醒：MU 简报偏空，分析给出卖出但不会下单——是否卖出由你决定"]
+
+
+@pytest.mark.unit
+def test_a_cn_digest_or_an_unreadable_book_carries_no_held_alert(tmp_path, live):
+    cfg = config(tmp_path)
+    write_slot(cfg, session="cn", briefs={"0700.HK": ticker_brief("0700.HK", 7.0, "bearish — z.")},
+               tickers=[entry("0700.HK", evaluate="warn", trigger="catalyst")])
+    book(cfg, held=["0700.HK"])
+    assert not any(line.startswith("⚠️ 持仓提醒") for line in rd.build_digest(cfg, "cn", DAY, now=SLOT_END).splitlines())
+    cfg2 = config(tmp_path / "unreadable")
+    held_slot(cfg2)
+    (cfg2.state_dir / "trade_notify" / "entries.json").write_text("{broken", encoding="utf-8")
+    assert alert_lines(cfg2) == []
+
+
+@pytest.mark.unit
+def test_a_bearish_sell_past_the_execution_time_reads_to_be_verified(tmp_path, live):
+    cfg = config(tmp_path)
+    write_slot(cfg, briefs={"MU": ticker_brief("MU", 7.0, "bearish — z.")},
+               tickers=[entry("MU", evaluate="warn", trigger="core",
+                              decide=decided(cfg, "MU", "SELL", "Sell", plan=SELL_PLAN))])
+    book(cfg, held=["MU"])
+    from datetime import datetime, timezone
+
+    late = datetime(2026, 11, 4, 15, 30, tzinfo=timezone.utc)  # 10:30 New York: past 09:45, step 7 not on record
+    lines = rd.build_digest(cfg, "us", DAY, now=late).splitlines()
+    assert "⚠️ 持仓提醒：MU 简报偏空，最新分析结论与下单待核实" in lines
+
+
+@pytest.mark.unit
+def test_a_shown_decision_without_a_run_id_is_not_superseded_by_any_row(tmp_path, live):
+    cfg = config(tmp_path)
+    write_decision(cfg, ticker="MU", arm="feeds", plan=SELL_PLAN, date_iso=DAY.isoformat(), decision="SELL")
+    write_slot(cfg, briefs={"MU": ticker_brief("MU", 7.0, "bearish — z.")},
+               tickers=[entry("MU", evaluate="warn", trigger="core", decide=stage("SELL", arm="feeds", pm_rating="Sell"))])
+    book(cfg, held=["MU"])
+    assert alert_lines(cfg) == ["⚠️ 持仓提醒：MU 简报偏空，分析给出卖出但不会下单——是否卖出由你决定"]

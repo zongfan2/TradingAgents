@@ -192,7 +192,9 @@ def fill_day_close(ticker: str, series: list, day: date, now: datetime, quote=No
             or not all(math.isfinite(v) and v > 0 for v in (last, previous))
             or abs(previous / prior[-1] - 1) > QUOTE_PREV_TOLERANCE):
         return series, False
-    return sorted([(d, c) for d, c in series if d != day] + [(day, last)]), True
+    # Sorted by date only: a duplicate date with an unusable close (None)
+    # must never be compared by its close.
+    return sorted([(d, c) for d, c in series if d != day] + [(day, last)], key=lambda bar: bar[0]), True
 
 
 def closes(tickers: set[str], fetch=None, budget_s: float = PRICE_BUDGET_S, *, first=(),
@@ -318,22 +320,26 @@ def _usage_log() -> Path:
 
 
 def archive_day(config: PipelineConfig, day: date, *, broker=None, fetch=None,
-                prices: dict[str, list[tuple[date, float]]] | None = None) -> dict[str, int]:
+                prices: dict[str, list[tuple[date, float]]] | None = None,
+                quote_filled: list[str] | None = None) -> dict[str, int]:
     """Archive ``day`` under ``<root>/<category>/<day>/``; returns counts per
     category (``<category>:missing`` for an input skipped or unreadable — an
-    archived file is never replaced by an empty one). Never raises on input."""
+    archived file is never replaced by an empty one). Never raises on input.
+    ``quote_filled`` names the closes in ``prices`` that came from the quote
+    (the review's own read), so the marker records them too."""
 
     root, iso = archive_root(config), day.isoformat()
     counts: dict[str, int] = defaultdict(int)
     try:
-        _archive_into(config, day, root, iso, counts, broker=broker, fetch=fetch, prices=prices)
+        _archive_into(config, day, root, iso, counts, broker=broker, fetch=fetch, prices=prices,
+                      quote_filled=quote_filled)
     except OSError as exc:  # the root itself is unwritable (a missing drive, a full disk)
         logger.warning("daily review: archive root unwritable (%s)", type(exc).__name__)
         counts["error"] += 1
     return dict(counts)
 
 
-def _archive_into(config, day, root, iso, counts, *, broker, fetch, prices) -> None:
+def _archive_into(config, day, root, iso, counts, *, broker, fetch, prices, quote_filled=None) -> None:
     from pipeline.funnel import snapshot_path
 
     for session in ("cn", "us"):
@@ -369,22 +375,26 @@ def _archive_into(config, day, root, iso, counts, *, broker, fetch, prices) -> N
            _jsonl_text(None if analysis is None else [r for r in analysis if r.get("date") == iso]),
            counts, "llm_usage")
     tickers = set().union(*_day_tickers(config, day).values()) | set(BENCHMARKS.values())
+    fetched: dict = {}
+    handed = prices is not None  # the review's own read: its quote fills are these prices'
     if prices is None:
-        fetched: dict = {}
         prices = closes(tickers, fetch, first=BENCHMARKS.values(), day=day, stats=fetched)
-        # The names whose archived close came from the quote (a retry, the
-        # archive CLI fetch for themselves): an older marker keeps a name
-        # until this run refreshes its row from a listed close (closes.csv
-        # never drops a row, so neither does the marker).
-        marker = root / "prices" / iso / "quote_filled.json"
-        filled = set(fetched.get("quote_filled_tickers", []))
-        listed = {t for t, series in prices.items() if t not in filled
-                  and any(d == day and c is not None for d, c in series)}
-        try:
-            older = set(json.loads(marker.read_text(encoding="utf-8")))
-        except (OSError, ValueError, TypeError):
-            older = set()
-        _write(marker, json.dumps(sorted((older - listed) | filled)), counts, "prices")
+    # The names whose archived close came from the quote — this run's own
+    # fills, or the review's (``quote_filled``) when it hands its prices
+    # over: an older marker keeps a name until this run refreshes its row
+    # from a listed close (closes.csv never drops a row, so neither does the
+    # marker). Every archive run writes it, so no path leaves a row unnamed.
+    marker = root / "prices" / iso / "quote_filled.json"
+    filled = {t for t in (*fetched.get("quote_filled_tickers", []), *((quote_filled or []) if handed else []))
+              if t in tickers}
+    listed = {t for t, series in prices.items() if t in tickers and t not in filled
+              and any(d == day and c is not None for d, c in series)}
+    try:
+        loaded = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        loaded = []
+    older = {name for name in loaded if isinstance(name, str)} if isinstance(loaded, list) else set()
+    _write(marker, json.dumps(sorted((older - listed) | filled)), counts, "prices")
     session_of = {t: session for session, names in _day_tickers(config, day).items() for t in names}
     rows = [[iso, ticker, f"{close:.4f}",
              "" if (c := name_change(prices, ticker, session_of.get(ticker, "us"), day)) is None else f"{c:.2f}"]
@@ -816,11 +826,11 @@ def review_day(config: PipelineConfig, day: date, *, broker=None, send=None, run
     from pipeline import trade_notify
 
     prices: dict = {}
+    price_stats: dict = {}  # the price read's own counts: they outlive a failed facts build
     saved = _load_queued(config, day)
     if saved is not None:
         facts, review, text = saved["facts"], saved["review"], saved["text"]
     else:
-        price_stats: dict = {}
         try:
             prices = history_prices(config, day, stats=price_stats)
             facts = build_facts(config, day, prices=prices, broker=broker, price_stats=price_stats)
@@ -852,7 +862,8 @@ def review_day(config: PipelineConfig, day: date, *, broker=None, send=None, run
         trade_notify.enqueue(config.state_dir, f"review:{day.isoformat()}", text, send)
     archived = False
     try:  # after the model call, so its usage row is in the day's archive
-        counts = archive_day(config, day, broker=broker, prices=prices or None)
+        counts = archive_day(config, day, broker=broker, prices=prices or None,
+                             quote_filled=price_stats.get("quote_filled_tickers"))
         root = archive_root(config) / "reviews" / day.isoformat()
         root.mkdir(parents=True, exist_ok=True)
         atomic_write(root / "review.md", text + "\n")
