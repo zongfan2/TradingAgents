@@ -372,10 +372,19 @@ def _archive_into(config, day, root, iso, counts, *, broker, fetch, prices) -> N
     if prices is None:
         fetched: dict = {}
         prices = closes(tickers, fetch, first=BENCHMARKS.values(), day=day, stats=fetched)
-        # This run's own fills (a retry, the archive CLI), named on disk; an
-        # empty list replaces an older marker once Yahoo lists the closes.
-        _write(root / "prices" / iso / "quote_filled.json",
-               json.dumps(fetched.get("quote_filled_tickers", [])), counts, "prices")
+        # The names whose archived close came from the quote (a retry, the
+        # archive CLI fetch for themselves): an older marker keeps a name
+        # until this run refreshes its row from a listed close (closes.csv
+        # never drops a row, so neither does the marker).
+        marker = root / "prices" / iso / "quote_filled.json"
+        filled = set(fetched.get("quote_filled_tickers", []))
+        listed = {t for t, series in prices.items() if t not in filled
+                  and any(d == day and c is not None for d, c in series)}
+        try:
+            older = set(json.loads(marker.read_text(encoding="utf-8")))
+        except (OSError, ValueError, TypeError):
+            older = set()
+        _write(marker, json.dumps(sorted((older - listed) | filled)), counts, "prices")
     session_of = {t: session for session, names in _day_tickers(config, day).items() for t in names}
     rows = [[iso, ticker, f"{close:.4f}",
              "" if (c := name_change(prices, ticker, session_of.get(ticker, "us"), day)) is None else f"{c:.2f}"]

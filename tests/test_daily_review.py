@@ -829,3 +829,9 @@ def test_an_archive_that_fetches_for_itself_names_its_quote_fills(tmp_path, arch
                                                         quote=lambda t: (760.0, CLOSE_TRADE["SPY"], 752.69)))
     dr.archive_day(cfg, DAY, fetch=lambda t: series.get(t, [(date(2026, 11, 3), 1.0), (DAY, 1.0)]))
     assert json.loads((archive / "prices" / DAY.isoformat() / "quote_filled.json").read_text()) == ["SPY"]
+    marker = archive / "prices" / DAY.isoformat() / "quote_filled.json"
+    dr.archive_day(cfg, DAY, fetch=lambda t: (_ for _ in ()).throw(OSError("down")))  # a failed refetch
+    assert json.loads(marker.read_text()) == ["SPY"]  # the quote-derived row is still there, so is its name
+    series["SPY"] = [(date(2026, 11, 3), 752.69), (DAY, 761.0)]  # Yahoo lists the close now
+    dr.archive_day(cfg, DAY, fetch=lambda t: series.get(t, [(date(2026, 11, 3), 1.0), (DAY, 1.0)]))
+    assert json.loads(marker.read_text()) == []
