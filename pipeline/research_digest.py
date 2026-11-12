@@ -754,7 +754,7 @@ def excess_since_entry(symbol: str, avg: float, entry_day: date, bench: dict[dat
 
 
 def lagging_holds(config: PipelineConfig, candidates: dict[str, tuple[float, float]],
-                  now: datetime) -> dict[str, float]:
+                  now: datetime, unchecked: list[str] | None = None) -> dict[str, float]:
     """The lag check, bounded as a whole by LAG_BUDGET_S (fills, SPY and the
     names' reads; a read still in flight is abandoned, never waited on)."""
     import threading
@@ -766,7 +766,7 @@ def lagging_holds(config: PipelineConfig, candidates: dict[str, tuple[float, flo
 
     def work() -> None:
         try:
-            result.update(_lagging_holds(config, candidates, now))
+            result.update(_lagging_holds(config, candidates, now, unchecked))
         except Exception as exc:  # never the digest's failure
             logger.warning("research digest: lag check failed (%s)", type(exc).__name__)
         finally:
@@ -780,13 +780,14 @@ def lagging_holds(config: PipelineConfig, candidates: dict[str, tuple[float, flo
 
 
 def _lagging_holds(config: PipelineConfig, candidates: dict[str, tuple[float, float]],
-                   now: datetime) -> dict[str, float]:
+                   now: datetime, out_unchecked: list[str] | None = None) -> dict[str, float]:
     """symbol -> excess since entry for the held Hold-rated ``candidates``
     (symbol -> (average cost, quantity)) that trail SPY by more than
     LAG_ALERT_PCT; every read or missing input is logged and costs only that
     name its line."""
     if not candidates:
         return {}
+    out_unchecked = [] if out_unchecked is None else out_unchecked
     symbols = dict(candidates)
     try:  # one fills read for the whole account; the cap bounds the price reads that follow
         fills = _fills(now - timedelta(days=LAG_FILL_LOOKBACK_DAYS))
@@ -807,10 +808,15 @@ def _lagging_holds(config: PipelineConfig, candidates: dict[str, tuple[float, fl
     if not starts:
         return {}
     if len(starts) > LAG_MAX_NAMES:
-        kept = dict(sorted(starts.items())[:LAG_MAX_NAMES])
+        # Rotated by the day, so no name is skipped every slot; the digest names the rest.
+        order = sorted(starts)
+        shift = now.toordinal() % len(order)
+        kept_names = (order[shift:] + order[:shift])[:LAG_MAX_NAMES]
+        unchecked = sorted(set(starts) - set(kept_names))
         logger.warning("research digest: lag check capped at %d names — %s not checked", LAG_MAX_NAMES,
-                       ", ".join(sorted(set(starts) - set(kept))))
-        starts = kept
+                       ", ".join(unchecked))
+        out_unchecked.extend(unchecked)
+        starts = {n: starts[n] for n in kept_names}
     first = min(starts.values()) - timedelta(days=10)
     try:
         bench = {d: c for d, c in _closed_bars(_daily_closes("SPY", first), now) if c == c and c > 0}
@@ -1078,9 +1084,12 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
                     and upper not in alerted and upper not in sell_orders
                     and (t.decide or {}).get("code") in ("BUY", "SELL", "HOLD")):
                 candidates[upper] = (float(row["avg"]), float(row["qty"]))
-    lagging = lagging_holds(config, candidates, now or datetime.now(timezone.utc))
+    unchecked: list[str] = []
+    lagging = lagging_holds(config, candidates, now or datetime.now(timezone.utc), unchecked)
     if lagging:
         alerts = held_alerts(session, held, tickers, lagging=lagging, **alert_args)
+    if unchecked:
+        alerts.append(f"ℹ️ 本时段跑输 SPY 只检查了 {LAG_MAX_NAMES} 只持仓，未检查：{'、'.join(unchecked)}")
     lines = [" ｜ ".join(head), *alerts, macro]
     if macro_summary:
         lines.append(f"  要点：{macro_summary}")

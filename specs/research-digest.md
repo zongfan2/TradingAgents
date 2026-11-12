@@ -73,8 +73,10 @@ line) was hard to read: the user asked why a name with no position was
   age; before 16:30 New York today's running bar is dropped, never a close).
   A fills read at the reader's page cap (`LAG_FILLS_READ_CAP`, 5,000) may
   lack the newest fills, so it gives no line. Only for the current slot, at
-  most `LAG_MAX_NAMES` (5) names with a replayed entry, SPY read once, the
-  whole check within 30 s; any failed read costs only those lines (logged). Unknown holdings or the cn
+  most `LAG_MAX_NAMES` (5) names with a replayed entry — rotated by the day
+  when there are more, and the digest names the unchecked ones (`ℹ️ 本时段跑输
+  SPY 只检查了 5 只持仓，未检查：…`) — SPY read once, the whole check within
+  30 s; any failed read costs only those lines (logged). Unknown holdings or the cn
   session give none.
 - **Macro**: the revision-bound eval verdict and each of sections 1–6's
   Impact direction (one phrase when all six agree), found by the contract's

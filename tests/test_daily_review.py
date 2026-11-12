@@ -962,8 +962,9 @@ def test_a_likely_holiday_is_a_note_and_long_lists_are_counted():
 @pytest.mark.unit
 def test_a_day_skipped_between_two_listed_sessions_reads_as_no_session():
     stats = {}
+    after_next = datetime(2026, 11, 5, 10, 0, tzinfo=timezone.utc)  # 18:00 Hong Kong: 11-05 finished
     dr.closes({"^HSI"}, fetch=lambda t: [(date(2026, 11, 3), 24000.0), (date(2026, 11, 5), 24100.0)],
-              day=DAY, now=AFTER_ALL_CLOSES, stats=stats, quote=lambda t: (_ for _ in ()).throw(AssertionError()))
+              day=DAY, now=after_next, stats=stats, quote=lambda t: (_ for _ in ()).throw(AssertionError()))
     assert stats["unfilled"] == {"^HSI": "no-session"}
     facts = {"date": DAY.isoformat(), "us": {}, "cn": {}, "price_reads": {"skipped": 0, "failed": 0, **stats}}
     assert "ℹ️ 可能休市（报价停在前一交易日）：^HSI（no-session）" in dr.render(DAY, facts, None)
@@ -1003,3 +1004,15 @@ def test_a_suspended_name_in_a_market_that_traded_is_a_fault():
     both = {**unfilled, "^HSI": "no-session"}  # the market itself did not trade: both are the holiday note
     text = dr.render(DAY, {**facts, "price_reads": {"skipped": 0, "failed": 0, "unfilled": both}}, None)
     assert "ℹ️ 可能休市（报价停在前一交易日）：0700.HK（quote-trade-date:2026-11-03）、^HSI（no-session）" in text
+
+
+@pytest.mark.unit
+def test_a_running_next_session_does_not_make_the_day_a_holiday():
+    series = [(date(2026, 11, 3), 24000.0), (date(2026, 11, 5), 24100.0)]
+    running = datetime(2026, 11, 5, 3, 0, tzinfo=timezone.utc)  # 11:00 Hong Kong on 11-05: that session still open
+    reasons = {}
+    dr.fill_day_close("^HSI", series, DAY, running, lambda t: (_ for _ in ()).throw(AssertionError()), reasons)
+    assert reasons == {"^HSI": "later-bar"}
+    reasons = {}
+    dr.fill_day_close("^HSI", series, DAY, datetime(2026, 11, 5, 10, 0, tzinfo=timezone.utc), None, reasons)
+    assert reasons == {"^HSI": "no-session"}  # 18:00 Hong Kong: 11-05 finished, 11-04 still unlisted

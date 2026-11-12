@@ -1411,9 +1411,14 @@ def test_lag_reads_are_bounded_and_spy_is_read_once(tmp_path, live, monkeypatch)
     cfg = config(tmp_path)
     names = ("AAPL", "AMD", "AMZN", "MSFT", "MU", "NVDA", "TSLA")
     reads = lag_slot(cfg, monkeypatch, names=names)
-    alerts = alert_lines(cfg)
+    lines = rd.build_digest(cfg, "us", DAY, now=SLOT_END).splitlines()
     assert reads.count("SPY") == 1 and len(reads) == 1 + rd.LAG_MAX_NAMES
-    assert len([a for a in alerts if "跑输 SPY" in a]) == rd.LAG_MAX_NAMES
+    assert len([a for a in lines if "入场以来跑输 SPY" in a]) == rd.LAG_MAX_NAMES
+    unchecked = sorted(set(names) - set(reads))
+    assert f"ℹ️ 本时段跑输 SPY 只检查了 5 只持仓，未检查：{'、'.join(unchecked)}" in lines
+    reads.clear()
+    rd.build_digest(cfg, "us", DAY, now=SLOT_END.replace(hour=13))  # same day: same rotation
+    assert sorted(set(names) - set(reads)) == unchecked
 
 
 @pytest.mark.unit

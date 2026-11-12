@@ -90,16 +90,19 @@ prompt):
   named in `quote_filled_tickers`) — so an archived close from the quote is
   identifiable in `review.json` and in `prices/<day>/quote_filled.json`
   (R1); `failed_tickers` (name → why the read failed) and `unfilled` (name
-  → why a missing day close was not filled: no-session (a later session is
-  listed and the day has no row at all — most likely a holiday; a listed day
-  with an unusable close is a fault, later-bar; the ℹ️ 可能休市 note goes only
-  to cn/hk names whose market's benchmark (510300.SS, ^HSI) shows the same
-  gap — a US name, or a single name of a market that traded (a
-  suspension), stays under ⚠️ 当天收盘或涨跌缺失; previous-close-missing
-  names a listed day whose change is still unknown; rendered as an ℹ️ note,
-  like a quote last traded on an earlier day), later-bar, before-close,
-  no-prior-close, quote-error, quote-trade-date, quote-before-close,
-  quote-unusable, missed-session) name them, in the facts and the message.
+  → why a missing day close, or the day's change, is not known) name them,
+  in the facts and the message. The reasons: `no-session` — a later session
+  is listed and finished and the day has no row at all (most likely a
+  holiday; a later session still running, or a listed day with an unusable
+  close, is `later-bar` instead); `previous-close-missing` — the day is
+  listed but the session before it has an unusable close; `later-bar`,
+  `before-close`, `no-prior-close`, `quote-error`, `quote-trade-date`,
+  `quote-before-close`, `quote-unusable`, `missed-session`. Rendering: only
+  `no-session`, or a `quote-trade-date` earlier than the day, of a cn/hk
+  name whose market's benchmark (510300.SS, ^HSI) shows the same gap goes
+  under the ℹ️ 可能休市 note; every other reason — a US name, a single name
+  of a market that traded (a suspension), `previous-close-missing` — is
+  under ⚠️ 当天收盘或涨跌缺失.
   A truncated read is a fact in the prompt and a warning line in the
   message, never a quiet null;
 - a rolling scoreboard over the last 20 us sessions with a snapshot: the
