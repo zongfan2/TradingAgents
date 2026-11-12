@@ -947,3 +947,13 @@ def test_the_message_names_failed_reads_and_unfilled_closes():
                              "unfilled": {"^HSI": "missed-session"}}}
     text = dr.render(DAY, facts, None)
     assert "失败：NUVL（LookupError）" in text and "当天收盘未补上：^HSI（missed-session）" in text
+
+
+@pytest.mark.unit
+def test_a_likely_holiday_is_a_note_and_long_lists_are_counted():
+    unfilled = {"^HSI": "quote-trade-date:2026-11-03", "510300.SS": "missed-session",
+                **{f"T{i}": "quote-unusable" for i in range(6)}}
+    facts = {"date": DAY.isoformat(), "us": {}, "cn": {}, "price_reads": {"skipped": 0, "failed": 0, "unfilled": unfilled}}
+    text = dr.render(DAY, facts, None)
+    assert "ℹ️ 可能休市（报价停在前一交易日）：^HSI（quote-trade-date:2026-11-03）" in text
+    assert "⚠️ 当天收盘未补上：510300.SS（missed-session）" in text and "等 7 只" in text

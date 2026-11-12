@@ -477,9 +477,15 @@ either log can show any of these lines:
 - `research digest: Chinese summaries unavailable` — the one small model
   call failed or timed out (45 s); the digest goes out without the 要点 /
   per-name summary lines.
-- `research digest: closes for <T> unavailable` — a held name's price read
-  failed; that name gets no 跑输 SPY alert this slot (the rest of the digest
-  is unchanged).
+- `research digest: fills unavailable` / `research digest: entry date
+  unknown for <T>` / `research digest: closes for <T> unavailable` — the
+  跑输 SPY check (a Hold-rated held name) could not read the account's fills,
+  replay a held name's entry (its position predates the year of fills read,
+  or a fill is missing), or read a price series; that name (or every name,
+  for fills or SPY) gets no 跑输 SPY line this slot, the rest of the digest
+  is unchanged.
+- `research digest: lag check budget spent — <T> not checked` — the
+  跑输 SPY check's 30 s budget ran out; that name gets no line this slot.
 - `research digest retry failed` — watchdog only.
 - `research digest for <session> <date> dropped: not queued within 3 days`
   — watchdog only; given up.

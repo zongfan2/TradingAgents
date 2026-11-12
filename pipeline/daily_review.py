@@ -698,7 +698,8 @@ REVIEW_PROMPT = """你是一个交易研究流水线的复盘员。下面是 {da
 当天涨跌（move_pct）和相对基准的超额（excess_pct；为 null 表示没有读到行情，不是零——
 price_reads 记录行情读取被跳过（skipped，时间预算用完）和失败（failed）的股票数，大于 0 时相关统计不完整，要在总结里说明；
 quote_filled 是 Yahoo 日线尚未更新、用收盘后实时报价补上当天收盘的股票数，属正常情况；
-failed_tickers / unfilled 列出读取失败和未能补价的股票及原因，提到行情缺失时引用它们）；
+failed_tickers / unfilled 列出读取失败和未能补价的股票及原因，提到行情缺失时引用它们；
+unfilled 原因是 quote-trade-date 且日期早于当天的，多半是该市场当天休市，不是数据故障）；
 core_analysed 为 false 的市场按配置只做催化剂触发的研究，核心股不采集、不分析
 （trigger 为 core-session-off），这是有意设计，不要当作问题或遗漏报告；
 brief_used 不为空表示分析用的是那一天的旧简报（当天简报缺失时按合约沿用前一天的）；
@@ -814,12 +815,23 @@ def render(day: date, facts: dict, review: dict | None) -> str:
     if us.get("benchmark_move_pct") is not None:
         lines.append(f"大盘：SPY {us['benchmark_move_pct']:+.2f}%")
     reads = facts.get("price_reads") or {}
-    names = lambda d: "、".join(f"{t}（{why}）" for t, why in list(d.items())[:5])  # noqa: E731
+    def names(found: dict) -> str:
+        shown = "、".join(f"{t}（{why}）" for t, why in list(found.items())[:5])
+        return shown + (f" 等 {len(found)} 只" if len(found) > 5 else "")
+
     if reads.get("skipped") or reads.get("failed"):
         lines.append(f"⚠️ 行情读取不完整：跳过 {reads.get('skipped', 0)} 只、失败 {reads.get('failed', 0)} 只，相关涨跌与统计缺失"
                      + (f"；失败：{names(reads['failed_tickers'])}" if reads.get("failed_tickers") else ""))
-    if reads.get("unfilled"):
-        lines.append(f"⚠️ 当天收盘未补上：{names(reads['unfilled'])}")
+    unfilled = reads.get("unfilled") or {}
+    # The quote's last trade on an earlier day: that market most likely did
+    # not trade (a holiday) — a note, not a data fault.
+    closed = {t: why for t, why in unfilled.items() if str(why).startswith("quote-trade-date:")
+              and str(why).split(":", 1)[1] < str(facts.get("date"))}
+    faults = {t: why for t, why in unfilled.items() if t not in closed}
+    if faults:
+        lines.append(f"⚠️ 当天收盘未补上：{names(faults)}")
+    if closed:
+        lines.append(f"ℹ️ 可能休市（报价停在前一交易日）：{names(closed)}")
     if review is None:
         lines.append("复盘模型不可用，以下为当天事实：")
         for session, label in (("us", "美股"), ("cn", "A股/港股")):

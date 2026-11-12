@@ -22,7 +22,7 @@ import json
 import logging
 import re
 import subprocess
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -667,36 +667,125 @@ def _window_passed(execution_time: str | None, slot_date: date, now: datetime) -
 LAG_ALERT_PCT = 3.0
 
 
-def _daily_closes(ticker: str) -> list:
+#: At most this many held names are price-checked per digest (two reads
+#: each, plus SPY once), inside the digest's time bound.
+LAG_MAX_NAMES = 5
+#: Fills are read this far back to find a position's entry.
+LAG_FILL_LOOKBACK_DAYS = 365
+#: The lag check's share of the digest's 90 s bound: names left when it is
+#: spent get no line this slot (logged).
+LAG_BUDGET_S = 30.0
+
+
+def _daily_closes(ticker: str, start: date) -> list:
+    """Daily closes from ``start`` on (any age, unlike the tape's 2-month read)."""
+    import yfinance as yf
+
     from pipeline import price_tape
 
-    return price_tape.fetch_daily_closes(ticker)
+    frame = yf.Ticker(ticker).history(start=start.isoformat(), interval="1d", auto_adjust=False)
+    return price_tape.closes_from_history(ticker, frame)
 
 
-def excess_since_entry(entry: dict, benchmark: str = "SPY") -> float | None:
-    """% return of a held position from its average fill to the latest close,
-    less the benchmark's from the close before the entry day to its close on
-    that same latest date; None when anything is missing or unusable."""
+def _fills(since: datetime) -> list[dict]:
+    """The paper account's FILL activities since ``since``, oldest first."""
+    from pipeline import trade_notify
+
+    return trade_notify.AlpacaReadOnly(*trade_notify.alpaca_keys()).fills_since(since)
+
+
+def position_starts(held: dict[str, float], fills: list[dict]) -> dict[str, date]:
+    """symbol -> the New York date its current position opened: replaying the
+    fills oldest first, the last fill that took the quantity from zero to
+    positive. Only when the replay ends at the held quantity (``held``:
+    symbol -> qty) — a position older than the fills read, or a fill the read
+    missed, leaves the symbol out rather than guess."""
     from pipeline.trade_notify import _instant
 
-    entered = _instant(entry.get("as_of"))
-    avg = entry.get("avg")
-    if entered is None or not isinstance(avg, (int, float)) or avg <= 0:
+    qty: dict[str, float] = {}
+    starts: dict[str, date] = {}
+    known: set[str] = set()
+    ordered = sorted((f for f in fills if isinstance(f, dict) and _instant(f.get("transaction_time"))),
+                     key=lambda f: _instant(f["transaction_time"]))
+    for fill in ordered:
+        symbol = str(fill.get("symbol") or "").upper()
+        if symbol not in held:
+            continue
+        try:
+            size = float(fill.get("qty") or 0)
+        except (TypeError, ValueError):
+            continue
+        before = qty.get(symbol, 0.0)
+        after = before + (size if str(fill.get("side")).lower() == "buy" else -size)
+        if before <= 1e-9 < after:
+            starts[symbol] = _instant(fill["transaction_time"]).astimezone(ZoneInfo("America/New_York")).date()
+        known.add(symbol)
+        qty[symbol] = after
+    return {s: d for s, d in starts.items() if s in known and abs(qty[s] - held[s]) < 1e-6}
+
+
+def excess_since_entry(symbol: str, avg: float, entry_day: date, bench: dict[date, float],
+                       name: list[tuple[date, float]]) -> float | None:
+    """% return of a held position from its average cost to its latest close,
+    less the benchmark's from its last close strictly before the entry day to
+    its close on that same latest date (with add-on tranches the average cost
+    blends later fills, so this is approximate). None when anything needed is
+    missing."""
+    name = [(d, c) for d, c in name if c == c and c > 0]
+    if avg <= 0 or not name or name[-1][0] not in bench or name[-1][0] < entry_day:
         return None
-    entry_day = entered.astimezone(ZoneInfo("America/New_York")).date()
-    try:
-        name = [(d, c) for d, c in _daily_closes(entry["symbol"]) if c == c and c > 0]
-        bench = {d: c for d, c in _daily_closes(benchmark) if c == c and c > 0}
-    except Exception as exc:
-        logger.warning("research digest: closes for %s unavailable (%s)", entry["symbol"], type(exc).__name__)
-        return None
-    if not name or name[-1][0] not in bench:
+    before = [d for d in bench if d < entry_day]
+    if not before:
         return None
     last_day, last = name[-1]
-    before = [d for d in bench if d < entry_day]
-    if not before or last_day < entry_day:
-        return None
     return ((last / avg - 1) - (bench[last_day] / bench[max(before)] - 1)) * 100
+
+
+def lagging_holds(config: PipelineConfig, candidates: dict[str, tuple[float, float]],
+                  now: datetime) -> dict[str, float]:
+    """symbol -> excess since entry for the held Hold-rated ``candidates``
+    (symbol -> (average cost, quantity)) that trail SPY by more than
+    LAG_ALERT_PCT; every read or missing input is logged and costs only that
+    name its line."""
+    if not candidates:
+        return {}
+    symbols = dict(sorted(candidates.items())[:LAG_MAX_NAMES])
+    try:
+        starts = position_starts({s: q for s, (_a, q) in symbols.items()},
+                                 _fills(now - timedelta(days=LAG_FILL_LOOKBACK_DAYS)))
+    except Exception as exc:
+        logger.warning("research digest: fills unavailable (%s)", type(exc).__name__)
+        return {}
+    missing = sorted(set(symbols) - set(starts))
+    if missing:
+        logger.warning("research digest: entry date unknown for %s", ", ".join(missing))
+    if not starts:
+        return {}
+    first = min(starts.values()) - timedelta(days=10)
+    try:
+        bench = {d: c for d, c in _daily_closes("SPY", first) if c == c and c > 0}
+    except Exception as exc:
+        logger.warning("research digest: closes for %s unavailable (%s)", "SPY", type(exc).__name__)
+        return {}
+    import time as _time
+
+    out = {}
+    deadline = _time.monotonic() + LAG_BUDGET_S
+    for symbol, entry_day in sorted(starts.items()):
+        if _time.monotonic() > deadline:
+            logger.warning("research digest: lag check budget spent — %s not checked", symbol)
+            continue
+        try:
+            series = _daily_closes(symbol, first)
+        except Exception as exc:
+            logger.warning("research digest: closes for %s unavailable (%s)", symbol, type(exc).__name__)
+            continue
+        excess = excess_since_entry(symbol, symbols[symbol][0], entry_day, bench, series)
+        if excess is None:
+            logger.warning("research digest: closes for %s unavailable (%s)", symbol, "no usable series")
+        elif excess < -LAG_ALERT_PCT:
+            out[symbol] = round(excess, 1)
+    return out
 
 
 def _attempt_of(run_id: str) -> int:
@@ -924,18 +1013,19 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
     # the snapshot does not show it (an older snapshot kept on a failed rebuild).
     recorded = {r.ticker for r in records.values()
                 if r.session == session and str(r.date)[:10] == slot_date.isoformat()}
-    lagging: dict[str, float] = {}
+    candidates: dict[str, float] = {}
     if session == "us" and held and current:
         from pipeline.trade_notify import Entries
 
-        book = Entries(config.state_dir).load()
+        book = {k.upper(): v for k, v in Entries(config.state_dir).load().items()}
+        alerted_codes = ("BUY", "SELL", "HOLD")
         for t in tickers:
             rating = str(((t.decide or {}).get("details") or {}).get("pm_rating") or "")
-            row = book.get(t.ticker) or next((v for k, v in book.items() if k.upper() == t.ticker.upper()), None)
-            if rating == "Hold" and row and not row.get("unknown") and t.ticker.upper() not in bought:
-                excess = excess_since_entry({**row, "symbol": t.ticker})
-                if excess is not None and excess < -LAG_ALERT_PCT:
-                    lagging[t.ticker.upper()] = round(excess, 1)
+            row = book.get(t.ticker.upper())
+            if (rating == "Hold" and row and not row.get("unknown") and t.ticker.upper() not in bought
+                    and (t.decide or {}).get("code") in alerted_codes):
+                candidates[t.ticker.upper()] = (float(row["avg"]), float(row["qty"]))
+    lagging = lagging_holds(config, candidates, now or datetime.now(timezone.utc))
     alerts = held_alerts(session, held, tickers, sell_orders=sell_orders, undetermined=undetermined,
                          bought=bought, unread=unread, recorded=recorded, current=current, lagging=lagging)
     lines = [" ｜ ".join(head), *alerts, macro]
