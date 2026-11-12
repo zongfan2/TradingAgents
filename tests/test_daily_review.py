@@ -975,3 +975,12 @@ def test_a_listed_day_with_an_unusable_close_is_a_fault_not_a_holiday():
     dr.closes({"^HSI"}, fetch=lambda t: [(date(2026, 11, 3), 24000.0), (DAY, float("nan")), (date(2026, 11, 5), 24100.0)],
               day=DAY, now=AFTER_ALL_CLOSES, stats=stats)
     assert stats["unfilled"] == {"^HSI": "later-bar"}
+
+
+@pytest.mark.unit
+def test_a_us_names_gap_stays_a_fault():
+    unfilled = {"SPY": "no-session", "NVDA": "quote-trade-date:2026-11-03", "^HSI": "no-session"}
+    facts = {"date": DAY.isoformat(), "us": {}, "cn": {}, "price_reads": {"skipped": 0, "failed": 0, "unfilled": unfilled}}
+    text = dr.render(DAY, facts, None)
+    assert "⚠️ 当天收盘未补上：SPY（no-session）、NVDA（quote-trade-date:2026-11-03）" in text
+    assert "ℹ️ 可能休市（报价停在前一交易日）：^HSI（no-session）" in text

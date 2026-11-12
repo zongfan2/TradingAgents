@@ -672,6 +672,9 @@ LAG_ALERT_PCT = 3.0
 LAG_MAX_NAMES = 5
 #: Fills are read this far back to find a position's entry.
 LAG_FILL_LOOKBACK_DAYS = 365
+#: AlpacaReadOnly.fills_since stops at 50 pages of 100 (oldest first): a read
+#: that long may lack the newest fills, so no entry is replayed from it.
+LAG_FILLS_READ_CAP = 5000
 #: The lag check's share of the digest's 90 s bound, for the whole check
 #: (fills, SPY, the names): when it is spent no 跑输 SPY line goes out this
 #: slot (logged).
@@ -786,8 +789,15 @@ def _lagging_holds(config: PipelineConfig, candidates: dict[str, tuple[float, fl
         return {}
     symbols = dict(candidates)
     try:  # one fills read for the whole account; the cap bounds the price reads that follow
-        starts = position_starts({s: q for s, (_a, q) in symbols.items()},
-                                 _fills(now - timedelta(days=LAG_FILL_LOOKBACK_DAYS)))
+        fills = _fills(now - timedelta(days=LAG_FILL_LOOKBACK_DAYS))
+    except Exception as exc:
+        logger.warning("research digest: fills unavailable (%s)", type(exc).__name__)
+        return {}
+    if len(fills) >= LAG_FILLS_READ_CAP:  # the reader's page cap: the newest fills may be missing
+        logger.warning("research digest: fills read truncated at %d", len(fills))
+        return {}
+    try:
+        starts = position_starts({s: q for s, (_a, q) in symbols.items()}, fills)
     except Exception as exc:
         logger.warning("research digest: fills unavailable (%s)", type(exc).__name__)
         return {}

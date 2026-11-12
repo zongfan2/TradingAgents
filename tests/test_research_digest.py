@@ -1476,3 +1476,14 @@ def test_names_without_a_replayable_entry_do_not_use_the_cap(tmp_path, live, mon
                      fills=[{"symbol": "ZZZ", "side": "buy", "qty": "16", "transaction_time": "2026-11-02T14:45:18Z"}])
     assert "⚠️ 持仓提醒：ZZZ PM 评级 Hold，入场以来跑输 SPY 5.7%——是否卖出由你决定" in alert_lines(cfg)
     assert reads == ["SPY", "ZZZ"]
+
+
+@pytest.mark.unit
+def test_a_truncated_fills_read_gives_no_lag_line(tmp_path, live, monkeypatch, caplog):
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="pipeline.research_digest")
+    cfg = config(tmp_path)
+    lag_slot(cfg, monkeypatch, fills=[{"symbol": "MSFT", "side": "buy", "qty": "16",
+                                      "transaction_time": "2026-11-02T14:45:18Z"}] * rd.LAG_FILLS_READ_CAP)
+    assert alert_lines(cfg) == [] and "fills read truncated" in caplog.text

@@ -490,6 +490,9 @@ either log can show any of these lines:
   <T…> not checked` — more than five held Hold-rated names could get the
   line; the rest are named. `research digest: lag check failed` — an
   unexpected error in the check; no 跑输 SPY line this slot.
+- `research digest: fills read truncated at <n>` — the account has more
+  fills in a year than the reader's page cap (5,000); no 跑输 SPY line rather
+  than an entry replayed from an incomplete read.
 - `research digest retry failed` — watchdog only.
 - `research digest for <session> <date> dropped: not queued within 3 days`
   — watchdog only; given up.
