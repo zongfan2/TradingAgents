@@ -91,7 +91,8 @@ prompt):
   identifiable in `review.json` and in `prices/<day>/quote_filled.json`
   (R1); `failed_tickers` (name → why the read failed) and `unfilled` (name
   → why a missing day close was not filled: no-session (a later session is
-  listed but not the day — most likely a holiday; rendered as an ℹ️ note,
+  listed and the day has no row at all — most likely a holiday; a listed day
+  with an unusable close is a fault, later-bar; rendered as an ℹ️ note,
   like a quote last traded on an earlier day), later-bar, before-close,
   no-prior-close, quote-error, quote-trade-date, quote-before-close,
   quote-unusable, missed-session) name them, in the facts and the message.

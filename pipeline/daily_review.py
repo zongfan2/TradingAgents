@@ -184,7 +184,8 @@ def fill_day_close(ticker: str, series: list, day: date, now: datetime, quote=No
     if any(d > day for d, _c in series):
         # The market listed a later session but not this day: most likely it
         # did not trade (a holiday) — or a past day re-read; never filled.
-        return unfilled("no-session" if any(d < day for d, _c in series) else "later-bar")
+        listed = any(d == day for d, _c in series)  # a row with an unusable close is a data fault
+        return unfilled("no-session" if any(d < day for d, _c in series) and not listed else "later-bar")
     zone_name, close_at, read_after = _SESSION_CLOSE[_market(ticker)]
     zone = ZoneInfo(zone_name)
     if now.astimezone(zone) < datetime.combine(day, read_after, tzinfo=zone):

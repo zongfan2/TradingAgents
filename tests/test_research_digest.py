@@ -1466,3 +1466,13 @@ def test_a_running_sessions_bar_is_never_a_close():
     assert rd._closed_bars(series, morning) == series[:1]
     evening = datetime(2026, 11, 4, 22, 0, tzinfo=timezone.utc)  # 17:00 New York
     assert rd._closed_bars(series, evening) == series
+
+
+@pytest.mark.unit
+def test_names_without_a_replayable_entry_do_not_use_the_cap(tmp_path, live, monkeypatch):
+    cfg = config(tmp_path)
+    names = ("AAA", "BBB", "CCC", "DDD", "EEE", "ZZZ")
+    reads = lag_slot(cfg, monkeypatch, names=names,
+                     fills=[{"symbol": "ZZZ", "side": "buy", "qty": "16", "transaction_time": "2026-11-02T14:45:18Z"}])
+    assert "⚠️ 持仓提醒：ZZZ PM 评级 Hold，入场以来跑输 SPY 5.7%——是否卖出由你决定" in alert_lines(cfg)
+    assert reads == ["SPY", "ZZZ"]

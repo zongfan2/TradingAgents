@@ -967,3 +967,11 @@ def test_a_day_skipped_between_two_listed_sessions_reads_as_no_session():
     assert stats["unfilled"] == {"^HSI": "no-session"}
     facts = {"date": DAY.isoformat(), "us": {}, "cn": {}, "price_reads": {"skipped": 0, "failed": 0, **stats}}
     assert "ℹ️ 可能休市（报价停在前一交易日）：^HSI（no-session）" in dr.render(DAY, facts, None)
+
+
+@pytest.mark.unit
+def test_a_listed_day_with_an_unusable_close_is_a_fault_not_a_holiday():
+    stats = {}
+    dr.closes({"^HSI"}, fetch=lambda t: [(date(2026, 11, 3), 24000.0), (DAY, float("nan")), (date(2026, 11, 5), 24100.0)],
+              day=DAY, now=AFTER_ALL_CLOSES, stats=stats)
+    assert stats["unfilled"] == {"^HSI": "later-bar"}

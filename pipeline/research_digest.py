@@ -784,11 +784,8 @@ def _lagging_holds(config: PipelineConfig, candidates: dict[str, tuple[float, fl
     name its line."""
     if not candidates:
         return {}
-    symbols = dict(sorted(candidates.items())[:LAG_MAX_NAMES])
-    if len(candidates) > LAG_MAX_NAMES:
-        logger.warning("research digest: lag check capped at %d names — %s not checked", LAG_MAX_NAMES,
-                       ", ".join(sorted(set(candidates) - set(symbols))))
-    try:
+    symbols = dict(candidates)
+    try:  # one fills read for the whole account; the cap bounds the price reads that follow
         starts = position_starts({s: q for s, (_a, q) in symbols.items()},
                                  _fills(now - timedelta(days=LAG_FILL_LOOKBACK_DAYS)))
     except Exception as exc:
@@ -799,6 +796,11 @@ def _lagging_holds(config: PipelineConfig, candidates: dict[str, tuple[float, fl
         logger.warning("research digest: entry date unknown for %s", ", ".join(missing))
     if not starts:
         return {}
+    if len(starts) > LAG_MAX_NAMES:
+        kept = dict(sorted(starts.items())[:LAG_MAX_NAMES])
+        logger.warning("research digest: lag check capped at %d names — %s not checked", LAG_MAX_NAMES,
+                       ", ".join(sorted(set(starts) - set(kept))))
+        starts = kept
     first = min(starts.values()) - timedelta(days=10)
     try:
         bench = {d: c for d, c in _closed_bars(_daily_closes("SPY", first), now) if c == c and c > 0}
