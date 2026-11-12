@@ -1334,3 +1334,39 @@ def test_a_shown_decision_without_a_run_id_is_not_superseded_by_any_row(tmp_path
                tickers=[entry("MU", evaluate="warn", trigger="core", decide=stage("SELL", arm="feeds", pm_rating="Sell"))])
     book(cfg, held=["MU"])
     assert alert_lines(cfg) == ["⚠️ 持仓提醒：MU 简报偏空，分析给出卖出但不会下单——是否卖出由你决定"]
+
+
+def lag_slot(cfg, monkeypatch, msft_last, rating="Hold"):
+    write_slot(cfg, briefs={"MSFT": ticker_brief("MSFT", 5.0, "mixed — m.")},
+               tickers=[entry("MSFT", evaluate="warn", trigger="core", decide=decided(cfg, "MSFT", "HOLD", rating))])
+    path = cfg.state_dir / "trade_notify" / "entries.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"MSFT": {"avg": 530.26, "qty": 16, "as_of": "2026-11-02T14:45:18+00:00"}}))
+    bars = {"MSFT": [(date(2026, 10, 30), 528.0), (date(2026, 11, 3), msft_last)],
+            "SPY": [(date(2026, 10, 30), 733.0), (date(2026, 11, 3), 759.8)]}  # SPY +3.66 % since the entry
+    monkeypatch.setattr(rd, "_daily_closes", lambda t: bars[t])
+
+
+@pytest.mark.unit
+def test_a_hold_rated_position_trailing_spy_is_flagged(tmp_path, live, monkeypatch):
+    cfg = config(tmp_path)
+    lag_slot(cfg, monkeypatch, 519.66)  # −2.0 % vs SPY +3.66 %: −5.66 %
+    assert alert_lines(cfg) == ["⚠️ 持仓提醒：MSFT PM 评级 Hold，入场以来跑输 SPY 5.7%——是否卖出由你决定"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("last", "rating"), [(540.0, "Hold"), (519.66, "Overweight")])
+def test_a_position_within_the_band_or_not_hold_rated_is_not_flagged(tmp_path, live, monkeypatch, last, rating):
+    cfg = config(tmp_path)
+    lag_slot(cfg, monkeypatch, last, rating)  # 540: +1.8 % vs +3.66 %, inside 3 %
+    assert alert_lines(cfg) == []
+
+
+@pytest.mark.unit
+def test_no_price_data_means_no_lag_alert(tmp_path, live):
+    cfg = config(tmp_path)  # the autouse fixture makes every price read fail
+    write_slot(cfg, briefs={"MSFT": ticker_brief("MSFT", 5.0, "mixed — m.")},
+               tickers=[entry("MSFT", evaluate="warn", trigger="core", decide=decided(cfg, "MSFT", "HOLD", "Hold"))])
+    book(cfg, held=["MSFT"])
+    assert alert_lines(cfg) == []
+    assert rd.excess_since_entry({"symbol": "MSFT", "avg": 0, "as_of": "2026-11-02T14:45:18+00:00"}) is None

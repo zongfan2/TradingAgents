@@ -477,6 +477,9 @@ either log can show any of these lines:
 - `research digest: Chinese summaries unavailable` — the one small model
   call failed or timed out (45 s); the digest goes out without the 要点 /
   per-name summary lines.
+- `research digest: closes for <T> unavailable` — a held name's price read
+  failed; that name gets no 跑输 SPY alert this slot (the rest of the digest
+  is unchanged).
 - `research digest retry failed` — watchdog only.
 - `research digest for <session> <date> dropped: not queued within 3 days`
   — watchdog only; given up.

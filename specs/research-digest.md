@@ -59,7 +59,14 @@ line) was hard to read: the user asked why a name with no position was
   whatever the shown code. A decide
   stage with no usable conclusion reads `分析没有结论`. A name bought by
   this slot's order is not flagged. A bearish brief leads any of these
-  lines with `简报偏空，`. Unknown holdings or the cn
+  lines with `简报偏空，`.
+  A held name rated Hold by the PM (no other alert, no sell order) that
+  trails SPY by more than `LAG_ALERT_PCT` (3 %) since its entry — its
+  return from the book's average fill to the latest close, less SPY's from
+  the close before the entry day to that same date — reads `PM 评级 Hold，
+  入场以来跑输 SPY X%` (user decision 2026-11-11; Hold-rated names averaged
+  −5.05 % excess over 5 sessions, n=17). Only for the current slot; a
+  failed price read gives no such line. Unknown holdings or the cn
   session give none.
 - **Macro**: the revision-bound eval verdict and each of sections 1–6's
   Impact direction (one phrase when all six agree), found by the contract's

@@ -661,6 +661,44 @@ def _window_passed(execution_time: str | None, slot_date: date, now: datetime) -
                            tzinfo=ZoneInfo(SESSION_TZ["us"]))
 
 
+#: A held name rated Hold that trails SPY by more than this since its entry
+#: gets a 持仓提醒 (user decision 2026-11-11: Hold-rated names averaged
+#: −5.05 % excess over 5 sessions, n=17).
+LAG_ALERT_PCT = 3.0
+
+
+def _daily_closes(ticker: str) -> list:
+    from pipeline import price_tape
+
+    return price_tape.fetch_daily_closes(ticker)
+
+
+def excess_since_entry(entry: dict, benchmark: str = "SPY") -> float | None:
+    """% return of a held position from its average fill to the latest close,
+    less the benchmark's from the close before the entry day to its close on
+    that same latest date; None when anything is missing or unusable."""
+    from pipeline.trade_notify import _instant
+
+    entered = _instant(entry.get("as_of"))
+    avg = entry.get("avg")
+    if entered is None or not isinstance(avg, (int, float)) or avg <= 0:
+        return None
+    entry_day = entered.astimezone(ZoneInfo("America/New_York")).date()
+    try:
+        name = [(d, c) for d, c in _daily_closes(entry["symbol"]) if c == c and c > 0]
+        bench = {d: c for d, c in _daily_closes(benchmark) if c == c and c > 0}
+    except Exception as exc:
+        logger.warning("research digest: closes for %s unavailable (%s)", entry["symbol"], type(exc).__name__)
+        return None
+    if not name or name[-1][0] not in bench:
+        return None
+    last_day, last = name[-1]
+    before = [d for d in bench if d < entry_day]
+    if not before or last_day < entry_day:
+        return None
+    return ((last / avg - 1) - (bench[last_day] / bench[max(before)] - 1)) * 100
+
+
 def _attempt_of(run_id: str) -> int:
     from pipeline.execution_adapter import _attempt_number  # the adapter's own rule, never a copy
 
@@ -669,7 +707,8 @@ def _attempt_of(run_id: str) -> int:
 
 def held_alerts(session: str, held: set[str] | None, tickers: list, *, sell_orders: set[str] = frozenset(),
                 undetermined: set[str] = frozenset(), bought: set[str] = frozenset(), unread: bool = False,
-                recorded: set[str] = frozenset(), current: bool = True) -> list[str]:
+                recorded: set[str] = frozenset(), current: bool = True,
+                lagging: dict[str, float] | None = None) -> list[str]:
     """Lines for the held names that need the user's eye (user decision
     2026-11-10; never an order): a bearish brief with no sell order to
     follow (no SELL, or a SELL the adapter will not place — bearish briefs
@@ -710,6 +749,9 @@ def held_alerts(session: str, held: set[str] | None, tickers: list, *, sell_orde
         elif bearish and upper not in sell_orders:
             reason = "分析给出卖出但不会下单" if code == "SELL" else "但分析没有给出卖出"
             out.append(f"⚠️ 持仓提醒：{symbol} 简报偏空，{reason}——是否卖出由你决定")
+        elif (lagging or {}).get(upper) is not None and upper not in sell_orders:
+            out.append(f"⚠️ 持仓提醒：{symbol} PM 评级 Hold，入场以来跑输 SPY {abs(lagging[upper]):.1f}%"
+                       "——是否卖出由你决定")
     return out
 
 
@@ -882,8 +924,20 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
     # the snapshot does not show it (an older snapshot kept on a failed rebuild).
     recorded = {r.ticker for r in records.values()
                 if r.session == session and str(r.date)[:10] == slot_date.isoformat()}
+    lagging: dict[str, float] = {}
+    if session == "us" and held and current:
+        from pipeline.trade_notify import Entries
+
+        book = Entries(config.state_dir).load()
+        for t in tickers:
+            rating = str(((t.decide or {}).get("details") or {}).get("pm_rating") or "")
+            row = book.get(t.ticker) or next((v for k, v in book.items() if k.upper() == t.ticker.upper()), None)
+            if rating == "Hold" and row and not row.get("unknown") and t.ticker.upper() not in bought:
+                excess = excess_since_entry({**row, "symbol": t.ticker})
+                if excess is not None and excess < -LAG_ALERT_PCT:
+                    lagging[t.ticker.upper()] = round(excess, 1)
     alerts = held_alerts(session, held, tickers, sell_orders=sell_orders, undetermined=undetermined,
-                         bought=bought, unread=unread, recorded=recorded, current=current)
+                         bought=bought, unread=unread, recorded=recorded, current=current, lagging=lagging)
     lines = [" ｜ ".join(head), *alerts, macro]
     if macro_summary:
         lines.append(f"  要点：{macro_summary}")

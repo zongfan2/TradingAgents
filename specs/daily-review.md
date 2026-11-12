@@ -89,8 +89,12 @@ prompt):
   failed, and how many closes were filled from the quote (`quote_filled`,
   named in `quote_filled_tickers`) — so an archived close from the quote is
   identifiable in `review.json` and in `prices/<day>/quote_filled.json`
-  (R1). A truncated read is a fact in the
-  prompt and a warning line in the message, never a quiet null;
+  (R1); `failed_tickers` (name → why the read failed) and `unfilled` (name
+  → why a missing day close was not filled: later-bar, before-close,
+  no-prior-close, quote-error, quote-trade-date, quote-before-close,
+  quote-unusable, missed-session) name them, in the facts and the message.
+  A truncated read is a fact in the prompt and a warning line in the
+  message, never a quiet null;
 - a rolling scoreboard over the last 20 us sessions with a snapshot: the
   excess return over **1, 3 and 5 sessions** from the close before the
   pre-market decision (so it includes the overnight gap before the 09:45

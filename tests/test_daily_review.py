@@ -441,7 +441,8 @@ def test_benchmarks_and_the_days_names_are_read_before_older_ones(tmp_path):
     stats = {}
     dr.history_prices(cfg, DAY, fetch=fetch, stats=stats)
     assert read[:3] == list(dr.BENCHMARKS.values()) and set(read[3:5]) == {"NVDA", "FN"}
-    assert stats == {"skipped": 0, "failed": 0, "quote_filled": 0, "quote_filled_tickers": []}
+    assert stats == {"skipped": 0, "failed": 0, "quote_filled": 0, "quote_filled_tickers": [], "failed_tickers": {},
+                     "unfilled": {}}
     stats = {}
     out = dr.closes(set(read), fetch=lambda t: [], first=read, stats=stats)
     assert out == {} and stats["failed"] == len(read)
@@ -459,7 +460,7 @@ def test_a_truncated_price_read_is_a_fact_and_in_the_message(tmp_path, archive, 
     monkeypatch.setattr(dr, "closes", partial)
     prompts = []
     text = dr.review_day(cfg, DAY, send=None, runner=lambda prompt: prompts.append(prompt) or review())
-    assert '"price_reads": {"skipped": 7, "failed": 1, "quote_filled": 0, "quote_filled_tickers": []}' in prompts[0]
+    assert '"price_reads": {"skipped": 7, "failed": 1, "quote_filled": 0, "quote_filled_tickers": [], "failed_tickers": {}, "unfilled": {}}' in prompts[0]
     assert "行情读取不完整：跳过 7 只、失败 1 只" in text
 
 
@@ -917,3 +918,32 @@ def test_quote_fills_are_named_even_when_the_facts_build_fails(tmp_path, archive
     monkeypatch.setattr(dr, "build_facts", broken)
     dr.review_day(cfg, DAY, send=None, runner=lambda prompt: review())
     assert json.loads((archive / "prices" / DAY.isoformat() / "quote_filled.json").read_text()) == ["SPY"]
+
+
+@pytest.mark.unit
+def test_failed_reads_and_unfilled_closes_are_named_with_their_reason():
+    def fetch(ticker):
+        if ticker == "NUVL":
+            raise LookupError("delisted")
+        if ticker == "^HSI":
+            return [(date(2026, 11, 2), 24000.0)]  # the session before the day is missing too
+        return [(date(2026, 11, 3), 1.0), (DAY, 1.0)]
+
+    stats = {}
+    dr.closes({"NUVL", "^HSI", "SPY"}, fetch=fetch, day=DAY, now=AFTER_ALL_CLOSES, stats=stats,
+              quote=lambda t: (24100.0, CLOSE_TRADE["^HSI"], 24050.0))
+    assert stats["failed_tickers"] == {"NUVL": "LookupError"}
+    assert stats["unfilled"] == {"^HSI": "missed-session"}
+    reasons = {}
+    dr.fill_day_close("^HSI", [(date(2026, 11, 3), 24050.0)], DAY, AFTER_ALL_CLOSES,
+                      lambda t: (24100.0, CLOSE_TRADE["^HSI"] - timedelta(days=1), 24050.0), reasons)
+    assert reasons == {"^HSI": "quote-trade-date:2026-11-03"}
+
+
+@pytest.mark.unit
+def test_the_message_names_failed_reads_and_unfilled_closes():
+    facts = {"date": DAY.isoformat(), "us": {}, "cn": {},
+             "price_reads": {"skipped": 0, "failed": 1, "failed_tickers": {"NUVL": "LookupError"},
+                             "unfilled": {"^HSI": "missed-session"}}}
+    text = dr.render(DAY, facts, None)
+    assert "失败：NUVL（LookupError）" in text and "当天收盘未补上：^HSI（missed-session）" in text
