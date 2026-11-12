@@ -64,6 +64,15 @@ def _offline_digest_summaries(monkeypatch):
 
     monkeypatch.setattr(research_digest, "_run_summary", offline)
 
+    def no_closes(ticker, start=None):
+        raise RuntimeError("digest price reads are offline in tests")
+
+    def no_fills(since):
+        raise RuntimeError("digest fill reads are offline in tests")
+
+    monkeypatch.setattr(research_digest, "_daily_closes", no_closes)
+    monkeypatch.setattr(research_digest, "_fills", no_fills)
+
 
 @pytest.fixture(autouse=True)
 def _dummy_api_keys(monkeypatch):

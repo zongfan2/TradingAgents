@@ -441,7 +441,8 @@ def test_benchmarks_and_the_days_names_are_read_before_older_ones(tmp_path):
     stats = {}
     dr.history_prices(cfg, DAY, fetch=fetch, stats=stats)
     assert read[:3] == list(dr.BENCHMARKS.values()) and set(read[3:5]) == {"NVDA", "FN"}
-    assert stats == {"skipped": 0, "failed": 0, "quote_filled": 0, "quote_filled_tickers": []}
+    assert stats == {"skipped": 0, "failed": 0, "quote_filled": 0, "quote_filled_tickers": [], "failed_tickers": {},
+                     "unfilled": {}}
     stats = {}
     out = dr.closes(set(read), fetch=lambda t: [], first=read, stats=stats)
     assert out == {} and stats["failed"] == len(read)
@@ -459,7 +460,7 @@ def test_a_truncated_price_read_is_a_fact_and_in_the_message(tmp_path, archive, 
     monkeypatch.setattr(dr, "closes", partial)
     prompts = []
     text = dr.review_day(cfg, DAY, send=None, runner=lambda prompt: prompts.append(prompt) or review())
-    assert '"price_reads": {"skipped": 7, "failed": 1, "quote_filled": 0, "quote_filled_tickers": []}' in prompts[0]
+    assert '"price_reads": {"skipped": 7, "failed": 1, "quote_filled": 0, "quote_filled_tickers": [], "failed_tickers": {}, "unfilled": {}}' in prompts[0]
     assert "行情读取不完整：跳过 7 只、失败 1 只" in text
 
 
@@ -917,3 +918,101 @@ def test_quote_fills_are_named_even_when_the_facts_build_fails(tmp_path, archive
     monkeypatch.setattr(dr, "build_facts", broken)
     dr.review_day(cfg, DAY, send=None, runner=lambda prompt: review())
     assert json.loads((archive / "prices" / DAY.isoformat() / "quote_filled.json").read_text()) == ["SPY"]
+
+
+@pytest.mark.unit
+def test_failed_reads_and_unfilled_closes_are_named_with_their_reason():
+    def fetch(ticker):
+        if ticker == "NUVL":
+            raise LookupError("delisted")
+        if ticker == "^HSI":
+            return [(date(2026, 11, 2), 24000.0)]  # the session before the day is missing too
+        return [(date(2026, 11, 3), 1.0), (DAY, 1.0)]
+
+    stats = {}
+    dr.closes({"NUVL", "^HSI", "SPY"}, fetch=fetch, day=DAY, now=AFTER_ALL_CLOSES, stats=stats,
+              quote=lambda t: (24100.0, CLOSE_TRADE["^HSI"], 24050.0))
+    assert stats["failed_tickers"] == {"NUVL": "LookupError"}
+    assert stats["unfilled"] == {"^HSI": "missed-session"}
+    reasons = {}
+    dr.fill_day_close("^HSI", [(date(2026, 11, 3), 24050.0)], DAY, AFTER_ALL_CLOSES,
+                      lambda t: (24100.0, CLOSE_TRADE["^HSI"] - timedelta(days=1), 24050.0), reasons)
+    assert reasons == {"^HSI": "quote-trade-date:2026-11-03"}
+
+
+@pytest.mark.unit
+def test_the_message_names_failed_reads_and_unfilled_closes():
+    facts = {"date": DAY.isoformat(), "us": {}, "cn": {},
+             "price_reads": {"skipped": 0, "failed": 1, "failed_tickers": {"NUVL": "LookupError"},
+                             "unfilled": {"^HSI": "missed-session"}}}
+    text = dr.render(DAY, facts, None)
+    assert "失败：NUVL（LookupError）" in text and "当天收盘或涨跌缺失：^HSI（missed-session）" in text
+
+
+@pytest.mark.unit
+def test_a_likely_holiday_is_a_note_and_long_lists_are_counted():
+    unfilled = {"^HSI": "quote-trade-date:2026-11-03", "510300.SS": "missed-session",
+                **{f"T{i}": "quote-unusable" for i in range(6)}}
+    facts = {"date": DAY.isoformat(), "us": {}, "cn": {}, "price_reads": {"skipped": 0, "failed": 0, "unfilled": unfilled}}
+    text = dr.render(DAY, facts, None)
+    assert "ℹ️ 可能休市（报价停在前一交易日）：^HSI（quote-trade-date:2026-11-03）" in text
+    assert "⚠️ 当天收盘或涨跌缺失：510300.SS（missed-session）" in text and "等 7 只" in text
+
+
+@pytest.mark.unit
+def test_a_day_skipped_between_two_listed_sessions_reads_as_no_session():
+    stats = {}
+    after_next = datetime(2026, 11, 5, 10, 0, tzinfo=timezone.utc)  # 18:00 Hong Kong: 11-05 finished
+    dr.closes({"^HSI"}, fetch=lambda t: [(date(2026, 11, 3), 24000.0), (date(2026, 11, 5), 24100.0)],
+              day=DAY, now=after_next, stats=stats, quote=lambda t: (_ for _ in ()).throw(AssertionError()))
+    assert stats["unfilled"] == {"^HSI": "no-session"}
+    facts = {"date": DAY.isoformat(), "us": {}, "cn": {}, "price_reads": {"skipped": 0, "failed": 0, **stats}}
+    assert "ℹ️ 可能休市（报价停在前一交易日）：^HSI（no-session）" in dr.render(DAY, facts, None)
+
+
+@pytest.mark.unit
+def test_a_listed_day_with_an_unusable_close_is_a_fault_not_a_holiday():
+    stats = {}
+    dr.closes({"^HSI"}, fetch=lambda t: [(date(2026, 11, 3), 24000.0), (DAY, float("nan")), (date(2026, 11, 5), 24100.0)],
+              day=DAY, now=AFTER_ALL_CLOSES, stats=stats)
+    assert stats["unfilled"] == {"^HSI": "later-bar"}
+
+
+@pytest.mark.unit
+def test_a_us_names_gap_stays_a_fault():
+    unfilled = {"SPY": "no-session", "NVDA": "quote-trade-date:2026-11-03", "^HSI": "no-session"}
+    facts = {"date": DAY.isoformat(), "us": {}, "cn": {}, "price_reads": {"skipped": 0, "failed": 0, "unfilled": unfilled}}
+    text = dr.render(DAY, facts, None)
+    assert "⚠️ 当天收盘或涨跌缺失：SPY（no-session）、NVDA（quote-trade-date:2026-11-03）" in text
+    assert "ℹ️ 可能休市（报价停在前一交易日）：^HSI（no-session）" in text
+
+
+@pytest.mark.unit
+def test_a_missing_previous_close_is_named():
+    stats = {}
+    dr.closes({"^HSI"}, fetch=lambda t: [(date(2026, 11, 2), 24000.0), (date(2026, 11, 3), float("nan")), (DAY, 24100.0)],
+              day=DAY, now=AFTER_ALL_CLOSES, stats=stats)
+    assert stats["unfilled"] == {"^HSI": "previous-close-missing"}
+
+
+@pytest.mark.unit
+def test_a_suspended_name_in_a_market_that_traded_is_a_fault():
+    unfilled = {"0700.HK": "quote-trade-date:2026-11-03"}  # ^HSI traded normally
+    facts = {"date": DAY.isoformat(), "us": {}, "cn": {}, "price_reads": {"skipped": 0, "failed": 0, "unfilled": unfilled}}
+    text = dr.render(DAY, facts, None)
+    assert "⚠️ 当天收盘或涨跌缺失：0700.HK（quote-trade-date:2026-11-03）" in text and "可能休市" not in text
+    both = {**unfilled, "^HSI": "no-session"}  # the market itself did not trade: both are the holiday note
+    text = dr.render(DAY, {**facts, "price_reads": {"skipped": 0, "failed": 0, "unfilled": both}}, None)
+    assert "ℹ️ 可能休市（报价停在前一交易日）：0700.HK（quote-trade-date:2026-11-03）、^HSI（no-session）" in text
+
+
+@pytest.mark.unit
+def test_a_running_next_session_does_not_make_the_day_a_holiday():
+    series = [(date(2026, 11, 3), 24000.0), (date(2026, 11, 5), 24100.0)]
+    running = datetime(2026, 11, 5, 3, 0, tzinfo=timezone.utc)  # 11:00 Hong Kong on 11-05: that session still open
+    reasons = {}
+    dr.fill_day_close("^HSI", series, DAY, running, lambda t: (_ for _ in ()).throw(AssertionError()), reasons)
+    assert reasons == {"^HSI": "later-bar"}
+    reasons = {}
+    dr.fill_day_close("^HSI", series, DAY, datetime(2026, 11, 5, 10, 0, tzinfo=timezone.utc), None, reasons)
+    assert reasons == {"^HSI": "no-session"}  # 18:00 Hong Kong: 11-05 finished, 11-04 still unlisted

@@ -59,7 +59,24 @@ line) was hard to read: the user asked why a name with no position was
   whatever the shown code. A decide
   stage with no usable conclusion reads `分析没有结论`. A name bought by
   this slot's order is not flagged. A bearish brief leads any of these
-  lines with `简报偏空，`. Unknown holdings or the cn
+  lines with `简报偏空，`.
+  A held name rated Hold by the PM (no other alert, no sell order) that
+  trails SPY by more than `LAG_ALERT_PCT` (3 %) since its entry reads `PM
+  评级 Hold，入场以来跑输 SPY X%` (user decision 2026-11-11; Hold-rated
+  names averaged −5.05 % excess over 5 sessions, n=17). The entry day is
+  the account's own: replaying a year of the paper account's FILL
+  activities, the last fill that took the quantity from zero to positive —
+  only when the replay ends at the book's quantity (else no line, logged);
+  the excess is the return from the book's average cost to the latest close
+  (approximate after an add-on) less SPY's from its last close before the
+  entry day to that same date, both read from just before the entry (any
+  age; before 16:30 New York today's running bar is dropped, never a close).
+  A fills read at the reader's page cap (`LAG_FILLS_READ_CAP`, 5,000) may
+  lack the newest fills, so it gives no line. Only for the current slot, at
+  most `LAG_MAX_NAMES` (5) names with a replayed entry — rotated by the day
+  when there are more, and the digest names the unchecked ones (`ℹ️ 本时段跑输
+  SPY 只检查了 5 只持仓，未检查：…`) — SPY read once, the whole check within
+  30 s; any failed read costs only those lines (logged). Unknown holdings or the cn
   session give none.
 - **Macro**: the revision-bound eval verdict and each of sections 1–6's
   Impact direction (one phrase when all six agree), found by the contract's
@@ -200,7 +217,9 @@ under the key `research:<session>:<date>`: exactly once per slot day (a
 re-run, `--from-step`, or the us execution reopen never sends it again), and
 never ahead of a queued trade message. Off when notifications are disabled
 or the trades webhook is unset. Imported lazily, guarded, and bounded
-(90 s: the summary call plus the trades store lock, which has no timeout): a digest failure is logged and never changes the slot's outcome. The
+(90 s: the summary call (45 s), the held names' 跑输 SPY check (one fill
+read, SPY once, at most 5 names, its own 30 s budget), plus the trades
+store lock, which has no timeout): a digest failure is logged and never changes the slot's outcome. The
 slot end first marks the digest pending
 (`trade_notify/research_pending/<session>_<date>`, a plain file, no lock);
 queuing it clears the mark, and the hourly watchdog retries any mark still
@@ -213,11 +232,15 @@ decisions precede the 09:45 order messages.
 
 ## Prior art (specs/README.md rule 6)
 
-No new survey was done, and none is claimed. The digest adds no external
-integration and no new delivery mechanism: it renders files the pipeline
-already writes, reuses the execution adapter's own candidate and gate rules
-(never a second copy), and makes one call through the existing hermetic CLI
-path (`claude_command`, the provider ladder and usage logging the evaluator
+No new survey was done, and none is claimed. The digest adds no new
+external integration and no new delivery mechanism: it renders files the
+pipeline already writes, reuses the execution adapter's own candidate and
+gate rules (never a second copy), reads the paper account's fills only
+through trade notifications' read-only client (`AlpacaReadOnly`, the one
+broker reader specs/README.md rule 2 allows besides the adapter — the
+digest is delivered by that component's outbox) and daily closes through
+yfinance like the price tape, and makes one call through the existing
+hermetic CLI path (`claude_command`, the provider ladder and usage logging the evaluator
 already uses). Delivery is the trades outbox, whose prior art (alpaca-py,
 freqtrade's per-event notifications, the transactional outbox) is recorded
 in specs/trade-notifications.md. The pending mark retried by the hourly
@@ -239,7 +262,11 @@ periodic job finishes it, with an age bound so it cannot retry forever.
    its failure costs only the summary lines; a re-run makes no call.
 6. No trades webhook or notifications off → nothing sent anywhere; a failure
    never changes the slot's outcome.
-7. Tests are offline (the summary call is stubbed by an autouse fixture).
+7. Tests are offline (the summary call, the fill reads and the price reads
+   are stubbed by autouse fixtures).
 8. A held name with a bearish brief and no sell order to follow, an analysis
    error, or no decision gets one `⚠️ 持仓提醒` line under the header (us
    only); unread decisions read 待核实, never 没有分析.
+9. A Hold-rated held name trailing SPY by more than 3 % since its entry (the
+   account's own fills) gets one `PM 评级 Hold，入场以来跑输 SPY` line; a
+   failed or missing read costs only that line, logged.

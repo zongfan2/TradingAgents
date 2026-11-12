@@ -163,7 +163,8 @@ def _yahoo_quote(ticker: str) -> tuple[float, datetime, float]:
             float(meta["previousClose"]))
 
 
-def fill_day_close(ticker: str, series: list, day: date, now: datetime, quote=None) -> tuple[list, bool]:
+def fill_day_close(ticker: str, series: list, day: date, now: datetime, quote=None,
+                   reasons: dict | None = None) -> tuple[list, bool]:
     """Yahoo often lists the latest session late (a NaN close, or no row at
     all — 510300.SS and ^HSI on 2026-11-10). After that market's close, the
     quote's regular-market price is the day's close when its own trade time
@@ -171,27 +172,46 @@ def fill_day_close(ticker: str, series: list, day: date, now: datetime, quote=No
     holiday, a suspension or an intraday price never passes), and its
     previous close equals the series' last close before the day (the series
     misses no session). Never with a later bar; a listed close is never
-    replaced. Returns the series and whether it was filled."""
-    if any(d == day and c is not None for d, c in series) or any(d > day for d, _c in series):
+    replaced. Returns the series and whether it was filled; ``reasons``
+    receives why a missing day close was not filled (the ticker's key)."""
+    def unfilled(why: str) -> tuple[list, bool]:
+        if reasons is not None:
+            reasons[ticker] = why
         return series, False
+
+    if any(d == day and c is not None for d, c in series):
+        return series, False  # listed: nothing to fill
     zone_name, close_at, read_after = _SESSION_CLOSE[_market(ticker)]
     zone = ZoneInfo(zone_name)
+    if any(d > day for d, _c in series):
+        # The market listed a finished later session but not this day: most
+        # likely it did not trade (a holiday); never filled. A later session
+        # still running (the next Asian session opened before this review)
+        # says nothing yet about the day — a fault until it is listed.
+        listed = any(d == day for d, _c in series)  # a row with an unusable close is a data fault
+        later = min(d for d, _c in series if d > day)
+        finished = now.astimezone(zone) >= datetime.combine(later, read_after, tzinfo=zone)
+        holiday = any(d < day for d, _c in series) and not listed and finished
+        return unfilled("no-session" if holiday else "later-bar")
     if now.astimezone(zone) < datetime.combine(day, read_after, tzinfo=zone):
-        return series, False
+        return unfilled("before-close")
     prior = [c for d, c in series if d < day and c is not None]
     if not prior:
-        return series, False
+        return unfilled("no-prior-close")
     try:
         last, traded_at, previous = (quote or _yahoo_quote)(ticker)
         traded = traded_at.astimezone(zone)
     except Exception as exc:
         logger.warning("daily review: quote for %s unavailable (%s)", ticker, type(exc).__name__)
-        return series, False
-    if (traded.date() != day
-            or traded < datetime.combine(day, close_at, tzinfo=zone) - CLOSE_TRADE_SLACK
-            or not all(math.isfinite(v) and v > 0 for v in (last, previous))
-            or abs(previous / prior[-1] - 1) > QUOTE_PREV_TOLERANCE):
-        return series, False
+        return unfilled(f"quote-error:{type(exc).__name__}")
+    if traded.date() != day:
+        return unfilled(f"quote-trade-date:{traded.date().isoformat()}")
+    if traded < datetime.combine(day, close_at, tzinfo=zone) - CLOSE_TRADE_SLACK:
+        return unfilled(f"quote-before-close:{traded.strftime('%H:%M')}")
+    if not all(math.isfinite(v) and v > 0 for v in (last, previous)):
+        return unfilled("quote-unusable")
+    if abs(previous / prior[-1] - 1) > QUOTE_PREV_TOLERANCE:
+        return unfilled("missed-session")  # the series lacks the session before the day
     # Sorted by date only: a duplicate date with an unusable close (None)
     # must never be compared by its close.
     return sorted([(d, c) for d, c in series if d != day] + [(day, last)], key=lambda bar: bar[0]), True
@@ -214,6 +234,8 @@ def closes(tickers: set[str], fetch=None, budget_s: float = PRICE_BUDGET_S, *, f
 
     order = [t for t in dict.fromkeys(first) if t in tickers] + sorted(set(tickers) - set(first))
     out, failed, skipped, filled = {}, 0, 0, []
+    failed_names: dict[str, str] = {}  # ticker -> why its read failed
+    unfilled: dict[str, str] = {}  # ticker -> why its missing day close was not filled
     now = now or datetime.now(timezone.utc)
     deadline = _time.monotonic() + budget_s
     for i, ticker in enumerate(order):
@@ -226,19 +248,26 @@ def closes(tickers: set[str], fetch=None, budget_s: float = PRICE_BUDGET_S, *, f
         except Exception as exc:
             logger.warning("daily review: closes for %s unavailable (%s)", ticker, type(exc).__name__)
             failed += 1
+            failed_names[ticker] = type(exc).__name__
             continue
         # An unusable close stays in place as None: a change never spans it.
         series = [(d, c if c == c and c > 0 else None) for d, c in bars]
         if day is not None and (fill is None or ticker in fill):
-            series, was_filled = fill_day_close(ticker, series, day, now, quote)
+            series, was_filled = fill_day_close(ticker, series, day, now, quote, unfilled)
             if was_filled:
                 filled.append(ticker)
         if any(c is not None for _d, c in series):
             out[ticker] = series
+            before = [c for d, c in series if day is not None and d < day]
+            if (day is not None and (fill is None or ticker in fill) and ticker not in unfilled and before
+                    and before[-1] is None and any(d == day and c is not None for d, c in series)):
+                unfilled[ticker] = "previous-close-missing"  # the day is listed, its change still unknown
         else:
             failed += 1
+            failed_names[ticker] = "no-usable-close"
     if stats is not None:
-        stats.update(skipped=skipped, failed=failed, quote_filled=len(filled), quote_filled_tickers=sorted(filled))
+        stats.update(skipped=skipped, failed=failed, quote_filled=len(filled), quote_filled_tickers=sorted(filled),
+                     failed_tickers=dict(sorted(failed_names.items())), unfilled=dict(sorted(unfilled.items())))
     return out
 
 
@@ -595,7 +624,10 @@ def build_facts(config: PipelineConfig, day: date, *, prices: dict | None = None
     if price_stats:  # a truncated or failed price read is a fact, not a quiet null
         facts["price_reads"] = {"skipped": price_stats.get("skipped", 0), "failed": price_stats.get("failed", 0),
                                 "quote_filled": price_stats.get("quote_filled", 0),
-                                "quote_filled_tickers": price_stats.get("quote_filled_tickers", [])}
+                                "quote_filled_tickers": price_stats.get("quote_filled_tickers", []),
+                                # which reads failed and why a missing close was not filled (diagnosis)
+                                "failed_tickers": price_stats.get("failed_tickers", {}),
+                                "unfilled": price_stats.get("unfilled", {})}
     try:
         from pipeline.config import core_analysis_sessions
 
@@ -677,7 +709,11 @@ REVIEW_PROMPT = """你是一个交易研究流水线的复盘员。下面是 {da
 评估结论、触发代码、分析结论（decision: BUY/SELL/HOLD/ERROR）与 PM 评级、执行结果、
 当天涨跌（move_pct）和相对基准的超额（excess_pct；为 null 表示没有读到行情，不是零——
 price_reads 记录行情读取被跳过（skipped，时间预算用完）和失败（failed）的股票数，大于 0 时相关统计不完整，要在总结里说明；
-quote_filled 是 Yahoo 日线尚未更新、用收盘后实时报价补上当天收盘的股票数，属正常情况）；
+quote_filled 是 Yahoo 日线尚未更新、用收盘后实时报价补上当天收盘的股票数，属正常情况；
+failed_tickers / unfilled 列出读取失败和未能补价的股票及原因，提到行情缺失时引用它们；
+A股/港股的基准（510300.SS、^HSI）的 unfilled 原因是 no-session，或 quote-trade-date 且日期早于当天的，
+多半是该市场当天休市，同市场个股的同类原因随之视为休市；基准正常时个股的这类原因多半是停牌或缺数据；
+美股（复盘只在美股交易日运行）出现这类原因则是数据故障；previous-close-missing 表示当天收盘有但前一日收盘缺失，涨跌算不出）；
 core_analysed 为 false 的市场按配置只做催化剂触发的研究，核心股不采集、不分析
 （trigger 为 core-session-off），这是有意设计，不要当作问题或遗漏报告；
 brief_used 不为空表示分析用的是那一天的旧简报（当天简报缺失时按合约沿用前一天的）；
@@ -793,8 +829,30 @@ def render(day: date, facts: dict, review: dict | None) -> str:
     if us.get("benchmark_move_pct") is not None:
         lines.append(f"大盘：SPY {us['benchmark_move_pct']:+.2f}%")
     reads = facts.get("price_reads") or {}
+    def names(found: dict) -> str:
+        shown = "、".join(f"{t}（{why}）" for t, why in list(found.items())[:5])
+        return shown + (f" 等 {len(found)} 只" if len(found) > 5 else "")
+
     if reads.get("skipped") or reads.get("failed"):
-        lines.append(f"⚠️ 行情读取不完整：跳过 {reads.get('skipped', 0)} 只、失败 {reads.get('failed', 0)} 只，相关涨跌与统计缺失")
+        lines.append(f"⚠️ 行情读取不完整：跳过 {reads.get('skipped', 0)} 只、失败 {reads.get('failed', 0)} 只，相关涨跌与统计缺失"
+                     + (f"；失败：{names(reads['failed_tickers'])}" if reads.get("failed_tickers") else ""))
+    unfilled = reads.get("unfilled") or {}
+    # The quote's last trade on an earlier day: that market most likely did
+    # not trade (a holiday) — a note, not a data fault.
+    # Only an Asian market can be closed on a reviewed day (the review runs on
+    # US trading days), and only when its benchmark shows the same gap: a US
+    # name, or one name of a market that traded (a suspension), stays a fault.
+    def no_day(why: object) -> bool:
+        return why == "no-session" or (str(why).startswith("quote-trade-date:")
+                                       and str(why).split(":", 1)[1] < str(facts.get("date")))
+
+    shut = {_market(b) for b in (BENCHMARKS["cn"], BENCHMARKS["hk"]) if no_day(unfilled.get(b))}
+    closed = {t: why for t, why in unfilled.items() if _market(t) in shut and no_day(why)}
+    faults = {t: why for t, why in unfilled.items() if t not in closed}
+    if faults:
+        lines.append(f"⚠️ 当天收盘或涨跌缺失：{names(faults)}")
+    if closed:
+        lines.append(f"ℹ️ 可能休市（报价停在前一交易日）：{names(closed)}")
     if review is None:
         lines.append("复盘模型不可用，以下为当天事实：")
         for session, label in (("us", "美股"), ("cn", "A股/港股")):

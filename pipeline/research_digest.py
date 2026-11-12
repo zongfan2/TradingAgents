@@ -22,7 +22,7 @@ import json
 import logging
 import re
 import subprocess
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -661,6 +661,186 @@ def _window_passed(execution_time: str | None, slot_date: date, now: datetime) -
                            tzinfo=ZoneInfo(SESSION_TZ["us"]))
 
 
+#: A held name rated Hold that trails SPY by more than this since its entry
+#: gets a 持仓提醒 (user decision 2026-11-11: Hold-rated names averaged
+#: −5.05 % excess over 5 sessions, n=17).
+LAG_ALERT_PCT = 3.0
+
+
+#: At most this many held names are price-checked per digest (two reads
+#: each, plus SPY once), inside the digest's time bound.
+LAG_MAX_NAMES = 5
+#: Fills are read this far back to find a position's entry.
+LAG_FILL_LOOKBACK_DAYS = 365
+#: AlpacaReadOnly.fills_since stops at 50 pages of 100 (oldest first): a read
+#: that long may lack the newest fills, so no entry is replayed from it.
+LAG_FILLS_READ_CAP = 5000
+#: The lag check's share of the digest's 90 s bound, for the whole check
+#: (fills, SPY, the names): when it is spent no 跑输 SPY line goes out this
+#: slot (logged).
+LAG_BUDGET_S = 30.0
+
+
+def _daily_closes(ticker: str, start: date) -> list:
+    """Daily closes from ``start`` on (any age, unlike the tape's 2-month read)."""
+    import yfinance as yf
+
+    from pipeline import price_tape
+
+    frame = yf.Ticker(ticker).history(start=start.isoformat(), interval="1d", auto_adjust=False)
+    return price_tape.closes_from_history(ticker, frame)
+
+
+def _fills(since: datetime) -> list[dict]:
+    """The paper account's FILL activities since ``since``, oldest first."""
+    from pipeline import trade_notify
+
+    return trade_notify.AlpacaReadOnly(*trade_notify.alpaca_keys()).fills_since(since)
+
+
+def position_starts(held: dict[str, float], fills: list[dict]) -> dict[str, date]:
+    """symbol -> the New York date its current position opened: replaying the
+    fills oldest first, the last fill that took the quantity from zero to
+    positive. Only when the replay ends at the held quantity (``held``:
+    symbol -> qty) — a position older than the fills read, or a fill the read
+    missed, leaves the symbol out rather than guess."""
+    from pipeline.trade_notify import _instant
+
+    qty: dict[str, float] = {}
+    starts: dict[str, date] = {}
+    known: set[str] = set()
+    ordered = sorted((f for f in fills if isinstance(f, dict) and _instant(f.get("transaction_time"))),
+                     key=lambda f: _instant(f["transaction_time"]))
+    for fill in ordered:
+        symbol = str(fill.get("symbol") or "").upper()
+        if symbol not in held:
+            continue
+        try:
+            size = float(fill.get("qty") or 0)
+        except (TypeError, ValueError):
+            continue
+        before = qty.get(symbol, 0.0)
+        after = before + (size if str(fill.get("side")).lower() == "buy" else -size)
+        if before <= 1e-9 < after:
+            starts[symbol] = _instant(fill["transaction_time"]).astimezone(ZoneInfo("America/New_York")).date()
+        known.add(symbol)
+        qty[symbol] = after
+    return {s: d for s, d in starts.items() if s in known and abs(qty[s] - held[s]) < 1e-6}
+
+
+def _closed_bars(series: list, now: datetime) -> list:
+    """Bars of finished New York sessions only: before 16:30 New York, today's
+    bar is the running session's last trade, not a close."""
+    local = now.astimezone(ZoneInfo("America/New_York"))
+    cutoff = local.date() if local.time() < datetime.strptime("16:30", "%H:%M").time() else None
+    return [(d, c) for d, c in series if cutoff is None or d < cutoff]
+
+
+def excess_since_entry(symbol: str, avg: float, entry_day: date, bench: dict[date, float],
+                       name: list[tuple[date, float]]) -> float | None:
+    """% return of a held position from its average cost to its latest close,
+    less the benchmark's from its last close strictly before the entry day to
+    its close on that same latest date (with add-on tranches the average cost
+    blends later fills, so this is approximate). None when anything needed is
+    missing."""
+    name = [(d, c) for d, c in name if c == c and c > 0]
+    if avg <= 0 or not name or name[-1][0] not in bench or name[-1][0] < entry_day:
+        return None
+    before = [d for d in bench if d < entry_day]
+    if not before:
+        return None
+    last_day, last = name[-1]
+    return ((last / avg - 1) - (bench[last_day] / bench[max(before)] - 1)) * 100
+
+
+def lagging_holds(config: PipelineConfig, candidates: dict[str, tuple[float, float]],
+                  now: datetime, unchecked: list[str] | None = None) -> dict[str, float]:
+    """The lag check, bounded as a whole by LAG_BUDGET_S (fills, SPY and the
+    names' reads; a read still in flight is abandoned, never waited on)."""
+    import threading
+
+    if not candidates:
+        return {}
+    result: dict[str, float] = {}
+    done = threading.Event()
+
+    def work() -> None:
+        try:
+            result.update(_lagging_holds(config, candidates, now, unchecked))
+        except Exception as exc:  # never the digest's failure
+            logger.warning("research digest: lag check failed (%s)", type(exc).__name__)
+        finally:
+            done.set()
+
+    threading.Thread(target=work, name="digest-lag-check", daemon=True).start()
+    if not done.wait(LAG_BUDGET_S):
+        logger.warning("research digest: lag check budget spent — %s not checked", ", ".join(sorted(candidates)))
+        return {}
+    return dict(result)
+
+
+def _lagging_holds(config: PipelineConfig, candidates: dict[str, tuple[float, float]],
+                   now: datetime, out_unchecked: list[str] | None = None) -> dict[str, float]:
+    """symbol -> excess since entry for the held Hold-rated ``candidates``
+    (symbol -> (average cost, quantity)) that trail SPY by more than
+    LAG_ALERT_PCT; every read or missing input is logged and costs only that
+    name its line."""
+    if not candidates:
+        return {}
+    out_unchecked = [] if out_unchecked is None else out_unchecked
+    symbols = dict(candidates)
+    try:  # one fills read for the whole account; the cap bounds the price reads that follow
+        fills = _fills(now - timedelta(days=LAG_FILL_LOOKBACK_DAYS))
+    except Exception as exc:
+        logger.warning("research digest: fills unavailable (%s)", type(exc).__name__)
+        return {}
+    if len(fills) >= LAG_FILLS_READ_CAP:  # the reader's page cap: the newest fills may be missing
+        logger.warning("research digest: fills read truncated at %d", len(fills))
+        return {}
+    try:
+        starts = position_starts({s: q for s, (_a, q) in symbols.items()}, fills)
+    except Exception as exc:
+        logger.warning("research digest: fills unavailable (%s)", type(exc).__name__)
+        return {}
+    missing = sorted(set(symbols) - set(starts))
+    if missing:
+        logger.warning("research digest: entry date unknown for %s", ", ".join(missing))
+    if not starts:
+        return {}
+    if len(starts) > LAG_MAX_NAMES:
+        # Rotated by the day, so no name is skipped every slot; the digest names the rest.
+        order = sorted(starts)
+        shift = now.toordinal() % len(order)
+        kept_names = (order[shift:] + order[:shift])[:LAG_MAX_NAMES]
+        unchecked = sorted(set(starts) - set(kept_names))
+        logger.warning("research digest: lag check capped at %d names — %s not checked", LAG_MAX_NAMES,
+                       ", ".join(unchecked))
+        out_unchecked.extend(unchecked)
+        starts = {n: starts[n] for n in kept_names}
+    first = min(starts.values()) - timedelta(days=10)
+    try:
+        bench = {d: c for d, c in _closed_bars(_daily_closes("SPY", first), now) if c == c and c > 0}
+    except Exception as exc:
+        logger.warning("research digest: closes for %s unavailable (%s)", "SPY", type(exc).__name__)
+        return {}
+    if not any(d < min(starts.values()) for d in bench):
+        logger.warning("research digest: closes for %s unavailable (%s)", "SPY", "no usable series")
+        return {}
+    out = {}
+    for symbol, entry_day in sorted(starts.items()):
+        try:
+            series = _closed_bars(_daily_closes(symbol, first), now)
+        except Exception as exc:
+            logger.warning("research digest: closes for %s unavailable (%s)", symbol, type(exc).__name__)
+            continue
+        excess = excess_since_entry(symbol, symbols[symbol][0], entry_day, bench, series)
+        if excess is None:
+            logger.warning("research digest: closes for %s unavailable (%s)", symbol, "no usable series")
+        elif excess < -LAG_ALERT_PCT:
+            out[symbol] = round(excess, 1)
+    return out
+
+
 def _attempt_of(run_id: str) -> int:
     from pipeline.execution_adapter import _attempt_number  # the adapter's own rule, never a copy
 
@@ -669,7 +849,8 @@ def _attempt_of(run_id: str) -> int:
 
 def held_alerts(session: str, held: set[str] | None, tickers: list, *, sell_orders: set[str] = frozenset(),
                 undetermined: set[str] = frozenset(), bought: set[str] = frozenset(), unread: bool = False,
-                recorded: set[str] = frozenset(), current: bool = True) -> list[str]:
+                recorded: set[str] = frozenset(), current: bool = True,
+                lagging: dict[str, float] | None = None) -> list[str]:
     """Lines for the held names that need the user's eye (user decision
     2026-11-10; never an order): a bearish brief with no sell order to
     follow (no SELL, or a SELL the adapter will not place — bearish briefs
@@ -710,6 +891,9 @@ def held_alerts(session: str, held: set[str] | None, tickers: list, *, sell_orde
         elif bearish and upper not in sell_orders:
             reason = "分析给出卖出但不会下单" if code == "SELL" else "但分析没有给出卖出"
             out.append(f"⚠️ 持仓提醒：{symbol} 简报偏空，{reason}——是否卖出由你决定")
+        elif (lagging or {}).get(upper) is not None and upper not in sell_orders:
+            out.append(f"⚠️ 持仓提醒：{symbol} PM 评级 Hold，入场以来跑输 SPY {abs(lagging[upper]):.1f}%"
+                       "——是否卖出由你决定")
     return out
 
 
@@ -882,8 +1066,30 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
     # the snapshot does not show it (an older snapshot kept on a failed rebuild).
     recorded = {r.ticker for r in records.values()
                 if r.session == session and str(r.date)[:10] == slot_date.isoformat()}
-    alerts = held_alerts(session, held, tickers, sell_orders=sell_orders, undetermined=undetermined,
-                         bought=bought, unread=unread, recorded=recorded, current=current)
+    alert_args = {"sell_orders": sell_orders, "undetermined": undetermined, "bought": bought, "unread": unread,
+                  "recorded": recorded, "current": current}
+    alerts = held_alerts(session, held, tickers, **alert_args)
+    candidates: dict[str, tuple[float, float]] = {}
+    if session == "us" and held and current:
+        from pipeline.trade_notify import Entries
+
+        book = {k.upper(): v for k, v in Entries(config.state_dir).load().items()}
+        alerted = {line.split("：", 1)[1].split(" ", 1)[0].upper() for line in alerts}
+        for t in tickers:
+            upper = t.ticker.upper()
+            rating = str(((t.decide or {}).get("details") or {}).get("pm_rating") or "")
+            row = book.get(upper)
+            # only a name that can get the line: held, Hold-rated, no other alert, no sell order
+            if (rating == "Hold" and row and not row.get("unknown") and upper not in bought
+                    and upper not in alerted and upper not in sell_orders
+                    and (t.decide or {}).get("code") in ("BUY", "SELL", "HOLD")):
+                candidates[upper] = (float(row["avg"]), float(row["qty"]))
+    unchecked: list[str] = []
+    lagging = lagging_holds(config, candidates, now or datetime.now(timezone.utc), unchecked)
+    if lagging:
+        alerts = held_alerts(session, held, tickers, lagging=lagging, **alert_args)
+    if unchecked:
+        alerts.append(f"ℹ️ 本时段跑输 SPY 只检查了 {LAG_MAX_NAMES} 只持仓，未检查：{'、'.join(unchecked)}")
     lines = [" ｜ ".join(head), *alerts, macro]
     if macro_summary:
         lines.append(f"  要点：{macro_summary}")

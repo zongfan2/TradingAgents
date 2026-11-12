@@ -1334,3 +1334,173 @@ def test_a_shown_decision_without_a_run_id_is_not_superseded_by_any_row(tmp_path
                tickers=[entry("MU", evaluate="warn", trigger="core", decide=stage("SELL", arm="feeds", pm_rating="Sell"))])
     book(cfg, held=["MU"])
     assert alert_lines(cfg) == ["⚠️ 持仓提醒：MU 简报偏空，分析给出卖出但不会下单——是否卖出由你决定"]
+
+
+def lag_slot(cfg, monkeypatch, msft_last=519.66, rating="Hold", *, names=("MSFT",), fills=None, book_row=None):
+    write_slot(cfg, briefs={n: ticker_brief(n, 5.0, "mixed — m.") for n in names},
+               tickers=[entry(n, evaluate="warn", trigger="core", decide=decided(cfg, n, "HOLD", rating)) for n in names])
+    path = cfg.state_dir / "trade_notify" / "entries.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({n: book_row or {"avg": 530.26, "qty": 16, "as_of": "2026-11-03T20:00:00+00:00"}
+                                for n in names}))
+    reads = []
+    bars = {"SPY": [(date(2026, 10, 30), 733.0), (date(2026, 11, 2), 735.0), (date(2026, 11, 3), 759.8)]}
+    for n in names:
+        bars[n] = [(date(2026, 10, 30), 528.0), (date(2026, 11, 2), 530.0), (date(2026, 11, 3), msft_last)]
+
+    def closes(ticker, start):
+        reads.append(ticker)
+        return bars[ticker]
+
+    monkeypatch.setattr(rd, "_daily_closes", closes)
+    monkeypatch.setattr(rd, "_fills", lambda since: fills if fills is not None else [
+        {"symbol": n, "side": "buy", "qty": "16", "transaction_time": "2026-11-02T14:45:18Z"} for n in names])
+    return reads
+
+
+@pytest.mark.unit
+def test_a_hold_rated_position_trailing_spy_since_entry_is_flagged(tmp_path, live, monkeypatch):
+    cfg = config(tmp_path)
+    lag_slot(cfg, monkeypatch)  # entered 11-02: −2.0 % vs SPY +3.66 % from the 10-30 close: −5.66 %
+    assert alert_lines(cfg) == ["⚠️ 持仓提醒：MSFT PM 评级 Hold，入场以来跑输 SPY 5.7%——是否卖出由你决定"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("last", "rating"), [(540.0, "Hold"), (519.66, "Overweight")])
+def test_a_position_within_the_band_or_not_hold_rated_is_not_flagged(tmp_path, live, monkeypatch, last, rating):
+    cfg = config(tmp_path)
+    lag_slot(cfg, monkeypatch, last, rating)
+    assert alert_lines(cfg) == []
+
+
+@pytest.mark.unit
+def test_the_entry_is_the_last_open_from_zero_not_the_books_stamp(tmp_path, live, monkeypatch):
+    cfg = config(tmp_path)
+    fills = [{"symbol": "MSFT", "side": "buy", "qty": "10", "transaction_time": "2026-10-01T14:00:00Z"},
+             {"symbol": "MSFT", "side": "sell", "qty": "10", "transaction_time": "2026-10-10T14:00:00Z"},
+             {"symbol": "MSFT", "side": "buy", "qty": "8", "transaction_time": "2026-11-02T14:45:00Z"},
+             {"symbol": "MSFT", "side": "buy", "qty": "8", "transaction_time": "2026-11-03T14:45:00Z"}]  # an add-on
+    assert rd.position_starts({"MSFT": 16.0}, fills) == {"MSFT": date(2026, 11, 2)}
+    assert rd.position_starts({"MSFT": 20.0}, fills) == {}  # the replay misses fills: no guess
+    assert rd.position_starts({"MSFT": 16.0}, fills[2:3] + [  # a sell first: opened before the read
+        {"symbol": "MSFT", "side": "sell", "qty": "1", "transaction_time": "2026-11-01T14:00:00Z"}]) == {}
+    lag_slot(cfg, monkeypatch, fills=fills, book_row={"avg": 530.26, "qty": 16, "as_of": "2026-11-03T20:00:00Z"})
+    assert alert_lines(cfg) == ["⚠️ 持仓提醒：MSFT PM 评级 Hold，入场以来跑输 SPY 5.7%——是否卖出由你决定"]
+
+
+@pytest.mark.unit
+def test_failed_reads_cost_only_the_lag_line_and_are_logged(tmp_path, live, monkeypatch, caplog):
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="pipeline.research_digest")
+    cfg = config(tmp_path)
+    lag_slot(cfg, monkeypatch)
+    monkeypatch.setattr(rd, "_fills", lambda since: (_ for _ in ()).throw(ConnectionError("down")))
+    assert alert_lines(cfg) == [] and "fills unavailable" in caplog.text
+    cfg2 = config(tmp_path / "empty")
+    lag_slot(cfg2, monkeypatch)
+    monkeypatch.setattr(rd, "_daily_closes", lambda t, start: [] if t == "MSFT" else [(date(2026, 10, 30), 733.0)])
+    assert alert_lines(cfg2) == [] and "no usable series" in caplog.text
+    cfg3 = config(tmp_path / "unknown")
+    lag_slot(cfg3, monkeypatch, fills=[])
+    assert alert_lines(cfg3) == [] and "entry date unknown for MSFT" in caplog.text
+
+
+@pytest.mark.unit
+def test_lag_reads_are_bounded_and_spy_is_read_once(tmp_path, live, monkeypatch):
+    cfg = config(tmp_path)
+    names = ("AAPL", "AMD", "AMZN", "MSFT", "MU", "NVDA", "TSLA")
+    reads = lag_slot(cfg, monkeypatch, names=names)
+    lines = rd.build_digest(cfg, "us", DAY, now=SLOT_END).splitlines()
+    assert reads.count("SPY") == 1 and len(reads) == 1 + rd.LAG_MAX_NAMES
+    assert len([a for a in lines if "入场以来跑输 SPY" in a]) == rd.LAG_MAX_NAMES
+    unchecked = sorted(set(names) - set(reads))
+    assert f"ℹ️ 本时段跑输 SPY 只检查了 5 只持仓，未检查：{'、'.join(unchecked)}" in lines
+    reads.clear()
+    rd.build_digest(cfg, "us", DAY, now=SLOT_END.replace(hour=13))  # same day: same rotation
+    assert sorted(set(names) - set(reads)) == unchecked
+
+
+@pytest.mark.unit
+def test_an_unknown_cost_row_or_an_old_slot_makes_no_lag_read(tmp_path, live, monkeypatch):
+    cfg = config(tmp_path)
+    reads = lag_slot(cfg, monkeypatch, book_row={"unknown": True, "as_of": "2026-11-03T20:00:00Z"})
+    assert alert_lines(cfg) == [] and reads == []
+    cfg2 = config(tmp_path / "old")
+    reads2 = lag_slot(cfg2, monkeypatch)
+    rd.build_digest(cfg2, "us", DAY, now=SLOT_END.replace(day=7))
+    assert reads2 == []
+
+
+@pytest.mark.unit
+def test_the_lag_check_is_bounded_as_a_whole(tmp_path, live, monkeypatch, caplog):
+    import logging
+    import threading
+
+    caplog.set_level(logging.WARNING, logger="pipeline.research_digest")
+    cfg = config(tmp_path)
+    lag_slot(cfg, monkeypatch)
+    release = threading.Event()
+    monkeypatch.setattr(rd, "_fills", lambda since: release.wait(5) and [])  # a stuck fills read
+    monkeypatch.setattr(rd, "LAG_BUDGET_S", 0.05)
+    assert alert_lines(cfg) == [] and "lag check budget spent — MSFT not checked" in caplog.text
+    release.set()
+
+
+@pytest.mark.unit
+def test_already_alerted_names_do_not_use_the_cap(tmp_path, live, monkeypatch, caplog):
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="pipeline.research_digest")
+    cfg = config(tmp_path)
+    names = ("AAA", "BBB", "CCC", "DDD", "EEE", "ZZZ")
+    reads = lag_slot(cfg, monkeypatch, names=names)
+    for n in names[:5]:  # bearish briefs: already alerted
+        (cfg.ticker_brief_dir / n / f"{DAY}.md").write_text(ticker_brief(n, 5.0, "bearish — b."), encoding="utf-8")
+    alerts = alert_lines(cfg)
+    assert "⚠️ 持仓提醒：ZZZ PM 评级 Hold，入场以来跑输 SPY 5.7%——是否卖出由你决定" in alerts
+    assert reads == ["SPY", "ZZZ"] and "capped" not in caplog.text
+
+
+@pytest.mark.unit
+def test_a_running_sessions_bar_is_never_a_close():
+    from datetime import datetime, timezone
+
+    series = [(date(2026, 11, 3), 100.0), (DAY, 90.0)]
+    morning = datetime(2026, 11, 4, 16, 0, tzinfo=timezone.utc)  # 11:00 New York
+    assert rd._closed_bars(series, morning) == series[:1]
+    evening = datetime(2026, 11, 4, 22, 0, tzinfo=timezone.utc)  # 17:00 New York
+    assert rd._closed_bars(series, evening) == series
+
+
+@pytest.mark.unit
+def test_names_without_a_replayable_entry_do_not_use_the_cap(tmp_path, live, monkeypatch):
+    cfg = config(tmp_path)
+    names = ("AAA", "BBB", "CCC", "DDD", "EEE", "ZZZ")
+    reads = lag_slot(cfg, monkeypatch, names=names,
+                     fills=[{"symbol": "ZZZ", "side": "buy", "qty": "16", "transaction_time": "2026-11-02T14:45:18Z"}])
+    assert "⚠️ 持仓提醒：ZZZ PM 评级 Hold，入场以来跑输 SPY 5.7%——是否卖出由你决定" in alert_lines(cfg)
+    assert reads == ["SPY", "ZZZ"]
+
+
+@pytest.mark.unit
+def test_a_truncated_fills_read_gives_no_lag_line(tmp_path, live, monkeypatch, caplog):
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="pipeline.research_digest")
+    cfg = config(tmp_path)
+    lag_slot(cfg, monkeypatch, fills=[{"symbol": "MSFT", "side": "buy", "qty": "16",
+                                      "transaction_time": "2026-11-02T14:45:18Z"}] * rd.LAG_FILLS_READ_CAP)
+    assert alert_lines(cfg) == [] and "fills read truncated" in caplog.text
+
+
+@pytest.mark.unit
+def test_an_empty_spy_read_is_logged_as_spy(tmp_path, live, monkeypatch, caplog):
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="pipeline.research_digest")
+    cfg = config(tmp_path)
+    lag_slot(cfg, monkeypatch)
+    monkeypatch.setattr(rd, "_daily_closes", lambda t, start: [] if t == "SPY" else [(date(2026, 11, 3), 519.66)])
+    assert alert_lines(cfg) == []
+    assert "closes for SPY unavailable (no usable series)" in caplog.text and "closes for MSFT" not in caplog.text
