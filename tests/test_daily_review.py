@@ -946,7 +946,7 @@ def test_the_message_names_failed_reads_and_unfilled_closes():
              "price_reads": {"skipped": 0, "failed": 1, "failed_tickers": {"NUVL": "LookupError"},
                              "unfilled": {"^HSI": "missed-session"}}}
     text = dr.render(DAY, facts, None)
-    assert "失败：NUVL（LookupError）" in text and "当天收盘未补上：^HSI（missed-session）" in text
+    assert "失败：NUVL（LookupError）" in text and "当天收盘或涨跌缺失：^HSI（missed-session）" in text
 
 
 @pytest.mark.unit
@@ -956,7 +956,7 @@ def test_a_likely_holiday_is_a_note_and_long_lists_are_counted():
     facts = {"date": DAY.isoformat(), "us": {}, "cn": {}, "price_reads": {"skipped": 0, "failed": 0, "unfilled": unfilled}}
     text = dr.render(DAY, facts, None)
     assert "ℹ️ 可能休市（报价停在前一交易日）：^HSI（quote-trade-date:2026-11-03）" in text
-    assert "⚠️ 当天收盘未补上：510300.SS（missed-session）" in text and "等 7 只" in text
+    assert "⚠️ 当天收盘或涨跌缺失：510300.SS（missed-session）" in text and "等 7 只" in text
 
 
 @pytest.mark.unit
@@ -982,5 +982,24 @@ def test_a_us_names_gap_stays_a_fault():
     unfilled = {"SPY": "no-session", "NVDA": "quote-trade-date:2026-11-03", "^HSI": "no-session"}
     facts = {"date": DAY.isoformat(), "us": {}, "cn": {}, "price_reads": {"skipped": 0, "failed": 0, "unfilled": unfilled}}
     text = dr.render(DAY, facts, None)
-    assert "⚠️ 当天收盘未补上：SPY（no-session）、NVDA（quote-trade-date:2026-11-03）" in text
+    assert "⚠️ 当天收盘或涨跌缺失：SPY（no-session）、NVDA（quote-trade-date:2026-11-03）" in text
     assert "ℹ️ 可能休市（报价停在前一交易日）：^HSI（no-session）" in text
+
+
+@pytest.mark.unit
+def test_a_missing_previous_close_is_named():
+    stats = {}
+    dr.closes({"^HSI"}, fetch=lambda t: [(date(2026, 11, 2), 24000.0), (date(2026, 11, 3), float("nan")), (DAY, 24100.0)],
+              day=DAY, now=AFTER_ALL_CLOSES, stats=stats)
+    assert stats["unfilled"] == {"^HSI": "previous-close-missing"}
+
+
+@pytest.mark.unit
+def test_a_suspended_name_in_a_market_that_traded_is_a_fault():
+    unfilled = {"0700.HK": "quote-trade-date:2026-11-03"}  # ^HSI traded normally
+    facts = {"date": DAY.isoformat(), "us": {}, "cn": {}, "price_reads": {"skipped": 0, "failed": 0, "unfilled": unfilled}}
+    text = dr.render(DAY, facts, None)
+    assert "⚠️ 当天收盘或涨跌缺失：0700.HK（quote-trade-date:2026-11-03）" in text and "可能休市" not in text
+    both = {**unfilled, "^HSI": "no-session"}  # the market itself did not trade: both are the holiday note
+    text = dr.render(DAY, {**facts, "price_reads": {"skipped": 0, "failed": 0, "unfilled": both}}, None)
+    assert "ℹ️ 可能休市（报价停在前一交易日）：0700.HK（quote-trade-date:2026-11-03）、^HSI（no-session）" in text

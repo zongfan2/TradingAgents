@@ -253,6 +253,10 @@ def closes(tickers: set[str], fetch=None, budget_s: float = PRICE_BUDGET_S, *, f
                 filled.append(ticker)
         if any(c is not None for _d, c in series):
             out[ticker] = series
+            before = [c for d, c in series if day is not None and d < day]
+            if (day is not None and (fill is None or ticker in fill) and ticker not in unfilled and before
+                    and before[-1] is None and any(d == day and c is not None for d, c in series)):
+                unfilled[ticker] = "previous-close-missing"  # the day is listed, its change still unknown
         else:
             failed += 1
             failed_names[ticker] = "no-usable-close"
@@ -702,8 +706,9 @@ REVIEW_PROMPT = """你是一个交易研究流水线的复盘员。下面是 {da
 price_reads 记录行情读取被跳过（skipped，时间预算用完）和失败（failed）的股票数，大于 0 时相关统计不完整，要在总结里说明；
 quote_filled 是 Yahoo 日线尚未更新、用收盘后实时报价补上当天收盘的股票数，属正常情况；
 failed_tickers / unfilled 列出读取失败和未能补价的股票及原因，提到行情缺失时引用它们；
-A股/港股的 unfilled 原因是 no-session，或 quote-trade-date 且日期早于当天的，多半是该市场当天休市，不是数据故障；
-美股（复盘只在美股交易日运行）出现这类原因则是数据故障）；
+A股/港股的基准（510300.SS、^HSI）的 unfilled 原因是 no-session，或 quote-trade-date 且日期早于当天的，
+多半是该市场当天休市，同市场个股的同类原因随之视为休市；基准正常时个股的这类原因多半是停牌或缺数据；
+美股（复盘只在美股交易日运行）出现这类原因则是数据故障；previous-close-missing 表示当天收盘有但前一日收盘缺失，涨跌算不出）；
 core_analysed 为 false 的市场按配置只做催化剂触发的研究，核心股不采集、不分析
 （trigger 为 core-session-off），这是有意设计，不要当作问题或遗漏报告；
 brief_used 不为空表示分析用的是那一天的旧简报（当天简报缺失时按合约沿用前一天的）；
@@ -830,12 +835,17 @@ def render(day: date, facts: dict, review: dict | None) -> str:
     # The quote's last trade on an earlier day: that market most likely did
     # not trade (a holiday) — a note, not a data fault.
     # Only an Asian market can be closed on a reviewed day (the review runs on
-    # US trading days): a US name's gap stays a fault.
-    closed = {t: why for t, why in unfilled.items() if _market(t) != "us" and (why == "no-session" or (
-        str(why).startswith("quote-trade-date:") and str(why).split(":", 1)[1] < str(facts.get("date"))))}
+    # US trading days), and only when its benchmark shows the same gap: a US
+    # name, or one name of a market that traded (a suspension), stays a fault.
+    def no_day(why: object) -> bool:
+        return why == "no-session" or (str(why).startswith("quote-trade-date:")
+                                       and str(why).split(":", 1)[1] < str(facts.get("date")))
+
+    shut = {_market(b) for b in (BENCHMARKS["cn"], BENCHMARKS["hk"]) if no_day(unfilled.get(b))}
+    closed = {t: why for t, why in unfilled.items() if _market(t) in shut and no_day(why)}
     faults = {t: why for t, why in unfilled.items() if t not in closed}
     if faults:
-        lines.append(f"⚠️ 当天收盘未补上：{names(faults)}")
+        lines.append(f"⚠️ 当天收盘或涨跌缺失：{names(faults)}")
     if closed:
         lines.append(f"ℹ️ 可能休市（报价停在前一交易日）：{names(closed)}")
     if review is None:

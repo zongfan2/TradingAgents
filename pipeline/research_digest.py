@@ -817,6 +817,9 @@ def _lagging_holds(config: PipelineConfig, candidates: dict[str, tuple[float, fl
     except Exception as exc:
         logger.warning("research digest: closes for %s unavailable (%s)", "SPY", type(exc).__name__)
         return {}
+    if not any(d < min(starts.values()) for d in bench):
+        logger.warning("research digest: closes for %s unavailable (%s)", "SPY", "no usable series")
+        return {}
     out = {}
     for symbol, entry_day in sorted(starts.items()):
         try:

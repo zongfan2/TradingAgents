@@ -92,7 +92,11 @@ prompt):
   (R1); `failed_tickers` (name → why the read failed) and `unfilled` (name
   → why a missing day close was not filled: no-session (a later session is
   listed and the day has no row at all — most likely a holiday; a listed day
-  with an unusable close is a fault, later-bar; rendered as an ℹ️ note,
+  with an unusable close is a fault, later-bar; the ℹ️ 可能休市 note goes only
+  to cn/hk names whose market's benchmark (510300.SS, ^HSI) shows the same
+  gap — a US name, or a single name of a market that traded (a
+  suspension), stays under ⚠️ 当天收盘或涨跌缺失; previous-close-missing
+  names a listed day whose change is still unknown; rendered as an ℹ️ note,
   like a quote last traded on an earlier day), later-bar, before-close,
   no-prior-close, quote-error, quote-trade-date, quote-before-close,
   quote-unusable, missed-session) name them, in the facts and the message.

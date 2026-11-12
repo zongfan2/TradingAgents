@@ -67,7 +67,10 @@ specifies Flash for every model-assisted backup role without activating it.
    collectors never read pipeline state; the pipeline never writes to brief or
    pool directories; the evaluator writes only `*.eval.json`; only the
    execution adapter acts on the broker (orders); trade notifications
-   ([trade-notifications.md](trade-notifications.md)) may only read it.
+   ([trade-notifications.md](trade-notifications.md)) may only read it, and
+   its read-only paper client (`AlpacaReadOnly`) is the only other broker
+   access — used read-only by the research digest (fills, for the held
+   names' 跑输 SPY line) and the daily review (account, positions, fills).
 3. Each spec lists acceptance criteria; a component is done when they all pass.
 4. Secrets (Alpaca keys, LLM keys) live in `.env` only — never in specs, code,
    pool files, the ledger, logs, or status files.

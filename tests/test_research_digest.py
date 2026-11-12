@@ -1487,3 +1487,15 @@ def test_a_truncated_fills_read_gives_no_lag_line(tmp_path, live, monkeypatch, c
     lag_slot(cfg, monkeypatch, fills=[{"symbol": "MSFT", "side": "buy", "qty": "16",
                                       "transaction_time": "2026-11-02T14:45:18Z"}] * rd.LAG_FILLS_READ_CAP)
     assert alert_lines(cfg) == [] and "fills read truncated" in caplog.text
+
+
+@pytest.mark.unit
+def test_an_empty_spy_read_is_logged_as_spy(tmp_path, live, monkeypatch, caplog):
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="pipeline.research_digest")
+    cfg = config(tmp_path)
+    lag_slot(cfg, monkeypatch)
+    monkeypatch.setattr(rd, "_daily_closes", lambda t, start: [] if t == "SPY" else [(date(2026, 11, 3), 519.66)])
+    assert alert_lines(cfg) == []
+    assert "closes for SPY unavailable (no usable series)" in caplog.text and "closes for MSFT" not in caplog.text
