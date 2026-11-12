@@ -1425,3 +1425,44 @@ def test_an_unknown_cost_row_or_an_old_slot_makes_no_lag_read(tmp_path, live, mo
     reads2 = lag_slot(cfg2, monkeypatch)
     rd.build_digest(cfg2, "us", DAY, now=SLOT_END.replace(day=7))
     assert reads2 == []
+
+
+@pytest.mark.unit
+def test_the_lag_check_is_bounded_as_a_whole(tmp_path, live, monkeypatch, caplog):
+    import logging
+    import threading
+
+    caplog.set_level(logging.WARNING, logger="pipeline.research_digest")
+    cfg = config(tmp_path)
+    lag_slot(cfg, monkeypatch)
+    release = threading.Event()
+    monkeypatch.setattr(rd, "_fills", lambda since: release.wait(5) and [])  # a stuck fills read
+    monkeypatch.setattr(rd, "LAG_BUDGET_S", 0.05)
+    assert alert_lines(cfg) == [] and "lag check budget spent — MSFT not checked" in caplog.text
+    release.set()
+
+
+@pytest.mark.unit
+def test_already_alerted_names_do_not_use_the_cap(tmp_path, live, monkeypatch, caplog):
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="pipeline.research_digest")
+    cfg = config(tmp_path)
+    names = ("AAA", "BBB", "CCC", "DDD", "EEE", "ZZZ")
+    reads = lag_slot(cfg, monkeypatch, names=names)
+    for n in names[:5]:  # bearish briefs: already alerted
+        (cfg.ticker_brief_dir / n / f"{DAY}.md").write_text(ticker_brief(n, 5.0, "bearish — b."), encoding="utf-8")
+    alerts = alert_lines(cfg)
+    assert "⚠️ 持仓提醒：ZZZ PM 评级 Hold，入场以来跑输 SPY 5.7%——是否卖出由你决定" in alerts
+    assert reads == ["SPY", "ZZZ"] and "capped" not in caplog.text
+
+
+@pytest.mark.unit
+def test_a_running_sessions_bar_is_never_a_close():
+    from datetime import datetime, timezone
+
+    series = [(date(2026, 11, 3), 100.0), (DAY, 90.0)]
+    morning = datetime(2026, 11, 4, 16, 0, tzinfo=timezone.utc)  # 11:00 New York
+    assert rd._closed_bars(series, morning) == series[:1]
+    evening = datetime(2026, 11, 4, 22, 0, tzinfo=timezone.utc)  # 17:00 New York
+    assert rd._closed_bars(series, evening) == series

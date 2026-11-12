@@ -484,8 +484,12 @@ either log can show any of these lines:
   or a fill is missing), or read a price series; that name (or every name,
   for fills or SPY) gets no 跑输 SPY line this slot, the rest of the digest
   is unchanged.
-- `research digest: lag check budget spent — <T> not checked` — the
-  跑输 SPY check's 30 s budget ran out; that name gets no line this slot.
+- `research digest: lag check budget spent — <T…> not checked` — the
+  跑输 SPY check's 30 s budget (fills, SPY and the names together) ran out;
+  no 跑输 SPY line this slot. `research digest: lag check capped at 5 names —
+  <T…> not checked` — more than five held Hold-rated names could get the
+  line; the rest are named. `research digest: lag check failed` — an
+  unexpected error in the check; no 跑输 SPY line this slot.
 - `research digest retry failed` — watchdog only.
 - `research digest for <session> <date> dropped: not queued within 3 days`
   — watchdog only; given up.

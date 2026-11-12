@@ -227,11 +227,15 @@ decisions precede the 09:45 order messages.
 
 ## Prior art (specs/README.md rule 6)
 
-No new survey was done, and none is claimed. The digest adds no external
-integration and no new delivery mechanism: it renders files the pipeline
-already writes, reuses the execution adapter's own candidate and gate rules
-(never a second copy), and makes one call through the existing hermetic CLI
-path (`claude_command`, the provider ladder and usage logging the evaluator
+No new survey was done, and none is claimed. The digest adds no new
+external integration and no new delivery mechanism: it renders files the
+pipeline already writes, reuses the execution adapter's own candidate and
+gate rules (never a second copy), reads the paper account's fills only
+through trade notifications' read-only client (`AlpacaReadOnly`, the one
+broker reader specs/README.md rule 2 allows besides the adapter — the
+digest is delivered by that component's outbox) and daily closes through
+yfinance like the price tape, and makes one call through the existing
+hermetic CLI path (`claude_command`, the provider ladder and usage logging the evaluator
 already uses). Delivery is the trades outbox, whose prior art (alpaca-py,
 freqtrade's per-event notifications, the transactional outbox) is recorded
 in specs/trade-notifications.md. The pending mark retried by the hourly

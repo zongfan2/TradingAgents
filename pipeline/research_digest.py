@@ -672,8 +672,9 @@ LAG_ALERT_PCT = 3.0
 LAG_MAX_NAMES = 5
 #: Fills are read this far back to find a position's entry.
 LAG_FILL_LOOKBACK_DAYS = 365
-#: The lag check's share of the digest's 90 s bound: names left when it is
-#: spent get no line this slot (logged).
+#: The lag check's share of the digest's 90 s bound, for the whole check
+#: (fills, SPY, the names): when it is spent no 跑输 SPY line goes out this
+#: slot (logged).
 LAG_BUDGET_S = 30.0
 
 
@@ -724,6 +725,14 @@ def position_starts(held: dict[str, float], fills: list[dict]) -> dict[str, date
     return {s: d for s, d in starts.items() if s in known and abs(qty[s] - held[s]) < 1e-6}
 
 
+def _closed_bars(series: list, now: datetime) -> list:
+    """Bars of finished New York sessions only: before 16:30 New York, today's
+    bar is the running session's last trade, not a close."""
+    local = now.astimezone(ZoneInfo("America/New_York"))
+    cutoff = local.date() if local.time() < datetime.strptime("16:30", "%H:%M").time() else None
+    return [(d, c) for d, c in series if cutoff is None or d < cutoff]
+
+
 def excess_since_entry(symbol: str, avg: float, entry_day: date, bench: dict[date, float],
                        name: list[tuple[date, float]]) -> float | None:
     """% return of a held position from its average cost to its latest close,
@@ -743,6 +752,32 @@ def excess_since_entry(symbol: str, avg: float, entry_day: date, bench: dict[dat
 
 def lagging_holds(config: PipelineConfig, candidates: dict[str, tuple[float, float]],
                   now: datetime) -> dict[str, float]:
+    """The lag check, bounded as a whole by LAG_BUDGET_S (fills, SPY and the
+    names' reads; a read still in flight is abandoned, never waited on)."""
+    import threading
+
+    if not candidates:
+        return {}
+    result: dict[str, float] = {}
+    done = threading.Event()
+
+    def work() -> None:
+        try:
+            result.update(_lagging_holds(config, candidates, now))
+        except Exception as exc:  # never the digest's failure
+            logger.warning("research digest: lag check failed (%s)", type(exc).__name__)
+        finally:
+            done.set()
+
+    threading.Thread(target=work, name="digest-lag-check", daemon=True).start()
+    if not done.wait(LAG_BUDGET_S):
+        logger.warning("research digest: lag check budget spent — %s not checked", ", ".join(sorted(candidates)))
+        return {}
+    return dict(result)
+
+
+def _lagging_holds(config: PipelineConfig, candidates: dict[str, tuple[float, float]],
+                   now: datetime) -> dict[str, float]:
     """symbol -> excess since entry for the held Hold-rated ``candidates``
     (symbol -> (average cost, quantity)) that trail SPY by more than
     LAG_ALERT_PCT; every read or missing input is logged and costs only that
@@ -750,6 +785,9 @@ def lagging_holds(config: PipelineConfig, candidates: dict[str, tuple[float, flo
     if not candidates:
         return {}
     symbols = dict(sorted(candidates.items())[:LAG_MAX_NAMES])
+    if len(candidates) > LAG_MAX_NAMES:
+        logger.warning("research digest: lag check capped at %d names — %s not checked", LAG_MAX_NAMES,
+                       ", ".join(sorted(set(candidates) - set(symbols))))
     try:
         starts = position_starts({s: q for s, (_a, q) in symbols.items()},
                                  _fills(now - timedelta(days=LAG_FILL_LOOKBACK_DAYS)))
@@ -763,20 +801,14 @@ def lagging_holds(config: PipelineConfig, candidates: dict[str, tuple[float, flo
         return {}
     first = min(starts.values()) - timedelta(days=10)
     try:
-        bench = {d: c for d, c in _daily_closes("SPY", first) if c == c and c > 0}
+        bench = {d: c for d, c in _closed_bars(_daily_closes("SPY", first), now) if c == c and c > 0}
     except Exception as exc:
         logger.warning("research digest: closes for %s unavailable (%s)", "SPY", type(exc).__name__)
         return {}
-    import time as _time
-
     out = {}
-    deadline = _time.monotonic() + LAG_BUDGET_S
     for symbol, entry_day in sorted(starts.items()):
-        if _time.monotonic() > deadline:
-            logger.warning("research digest: lag check budget spent — %s not checked", symbol)
-            continue
         try:
-            series = _daily_closes(symbol, first)
+            series = _closed_bars(_daily_closes(symbol, first), now)
         except Exception as exc:
             logger.warning("research digest: closes for %s unavailable (%s)", symbol, type(exc).__name__)
             continue
@@ -1013,21 +1045,27 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
     # the snapshot does not show it (an older snapshot kept on a failed rebuild).
     recorded = {r.ticker for r in records.values()
                 if r.session == session and str(r.date)[:10] == slot_date.isoformat()}
-    candidates: dict[str, float] = {}
+    alert_args = {"sell_orders": sell_orders, "undetermined": undetermined, "bought": bought, "unread": unread,
+                  "recorded": recorded, "current": current}
+    alerts = held_alerts(session, held, tickers, **alert_args)
+    candidates: dict[str, tuple[float, float]] = {}
     if session == "us" and held and current:
         from pipeline.trade_notify import Entries
 
         book = {k.upper(): v for k, v in Entries(config.state_dir).load().items()}
-        alerted_codes = ("BUY", "SELL", "HOLD")
+        alerted = {line.split("：", 1)[1].split(" ", 1)[0].upper() for line in alerts}
         for t in tickers:
+            upper = t.ticker.upper()
             rating = str(((t.decide or {}).get("details") or {}).get("pm_rating") or "")
-            row = book.get(t.ticker.upper())
-            if (rating == "Hold" and row and not row.get("unknown") and t.ticker.upper() not in bought
-                    and (t.decide or {}).get("code") in alerted_codes):
-                candidates[t.ticker.upper()] = (float(row["avg"]), float(row["qty"]))
+            row = book.get(upper)
+            # only a name that can get the line: held, Hold-rated, no other alert, no sell order
+            if (rating == "Hold" and row and not row.get("unknown") and upper not in bought
+                    and upper not in alerted and upper not in sell_orders
+                    and (t.decide or {}).get("code") in ("BUY", "SELL", "HOLD")):
+                candidates[upper] = (float(row["avg"]), float(row["qty"]))
     lagging = lagging_holds(config, candidates, now or datetime.now(timezone.utc))
-    alerts = held_alerts(session, held, tickers, sell_orders=sell_orders, undetermined=undetermined,
-                         bought=bought, unread=unread, recorded=recorded, current=current, lagging=lagging)
+    if lagging:
+        alerts = held_alerts(session, held, tickers, lagging=lagging, **alert_args)
     lines = [" ｜ ".join(head), *alerts, macro]
     if macro_summary:
         lines.append(f"  要点：{macro_summary}")
