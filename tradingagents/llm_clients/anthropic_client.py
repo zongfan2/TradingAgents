@@ -93,6 +93,11 @@ class AnthropicClient(BaseLLMClient):
                 continue
             llm_kwargs[key] = self.kwargs[key]
 
+        if self.kwargs.get("prompt_cache"):
+            # Automatic caching: the API caches the prefix up to the request's
+            # last cacheable block, so each turn of a loop reads the last one.
+            llm_kwargs["model_kwargs"] = {"cache_control": {"type": "ephemeral"}}
+
         return NormalizedChatAnthropic(**llm_kwargs)
 
     def validate_model(self) -> bool:

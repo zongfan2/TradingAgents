@@ -119,6 +119,20 @@ class TradingAgentsGraph:
 
         self.deep_thinking_llm = deep_client.get_llm()
         self.quick_thinking_llm = quick_client.get_llm()
+        # Only the analysts' tool loops resend a growing message list whose
+        # earlier blocks stay byte-identical; researchers, debaters and the
+        # trader send one fresh block per call, so a cache marker there would
+        # pay the write and never read it (specs/llm-cost.md R12).
+        self.analyst_llm = self.quick_thinking_llm
+        if (self.config.get("llm_provider", "").lower() == "anthropic"
+                and self.config.get("anthropic_quick_prompt_cache")):
+            self.analyst_llm = create_llm_client(
+                provider=self.config["llm_provider"],
+                model=self.config["quick_think_llm"],
+                base_url=self.config.get("backend_url"),
+                **quick_kwargs,
+                prompt_cache=True,
+            ).get_llm()
         # The Research Manager may judge on its own (cheaper) model with the
         # deep role's knobs; the Portfolio Manager keeps deep_think_llm.
         research_manager_model = self.config.get("research_manager_llm")
@@ -148,6 +162,7 @@ class TradingAgentsGraph:
             self.tool_nodes,
             self.conditional_logic,
             research_manager_llm=self.research_manager_llm,
+            analyst_llm=self.analyst_llm,
         )
 
         self.propagator = Propagator(

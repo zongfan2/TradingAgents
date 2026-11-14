@@ -57,7 +57,8 @@ class Price:
 
 
 #: Anthropic first-party list prices (claude-api reference, 2026-10); cache
-#: writes at the 5-minute rate (1.25 × input). DeepSeek: third-party listings
+#: writes at the 5-minute rate (1.25 × input) — a 1-hour write adds 0.75 ×
+#: input in call_cost (2 × input in all). DeepSeek: third-party listings
 #: (the official page did not render) — V4-Pro at the standard (not the
 #: discounted) rate, which reconciles with the user's 2026-10 bill. DeepSeek
 #: figures are informational; only Anthropic spend gates routing.
@@ -67,6 +68,7 @@ PRICES: dict[str, Price] = {
     "claude-haiku-5-5": Price(
         0.10, 0.50, 0.01, 0.125,
         long_prompt_tokens=100_000, long_input=0.50, long_output=2.50, long_cache_read=0.05,
+        long_cache_write=0.625,  # 1.25 x the long input rate
     ),
     # OpenAI list prices (developers.openai.com/api/docs/pricing, standard
     # tier, 2026-11-01); no cache-write surcharge, so writes bill as input;
@@ -157,8 +159,11 @@ def call_cost(model: str, tokens: dict[str, int]) -> float | None:
     rate_in = price.long_input if long else price.input
     rate_out = price.long_output if long else price.output
     rate_read = price.long_cache_read if long else price.cache_read
+    # A 1-hour write costs 2x input, 0.75x more than the 5-minute rate billed below.
+    long_extra = tokens.get("cache_write_1h", 0) * 0.75 * rate_in
     return (
-        uncached * rate_in
+        long_extra
+        + uncached * rate_in
         + cache_read * rate_read
         + cache_write * (price.long_cache_write if long and price.long_cache_write is not None
                          else price.cache_write)
@@ -193,7 +198,13 @@ def _tokens_from_message(message: Any) -> tuple[str | None, dict[str, int]] | No
         "input": int(usage.get("input_tokens") or 0),
         "output": int(usage.get("output_tokens") or 0),
         "cache_read": cache_read,
-        "cache_write": int(in_details.get("cache_creation") or 0),
+        # langchain-anthropic reports a cache write by TTL (ephemeral_5m/1h)
+        # and leaves cache_creation 0 when it does.
+        "cache_write": max(int(in_details.get("cache_creation") or 0),
+                           int(in_details.get("ephemeral_5m_input_tokens") or 0)
+                           + int(in_details.get("ephemeral_1h_input_tokens") or 0)),
+        # Of those, the 1-hour writes, billed at 2x input (not the 5-minute 1.25x).
+        "cache_write_1h": int(in_details.get("ephemeral_1h_input_tokens") or 0),
         "reasoning": int(out_details.get("reasoning") or 0),
     }
 
@@ -240,6 +251,8 @@ class UsageCallback(BaseCallbackHandler):
 
     def _add(self, model: str, tokens: dict[str, int]) -> None:
         cost = call_cost(model, tokens)
+        # The 1-hour share only prices the call; the row keeps the ledger's columns.
+        tokens = {k: v for k, v in tokens.items() if k != "cache_write_1h"}
         _price, exact = price_for(model)
         with self._lock:
             row = self.models.setdefault(
