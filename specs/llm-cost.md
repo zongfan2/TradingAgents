@@ -312,6 +312,10 @@ langchain-anthropic reports by TTL (`ephemeral_5m_input_tokens` /
 write rate is 1.25 × its long input rate. Verified live 2026-11-13: a
 repeated 3.2k-token Haiku prefix read 3,173 tokens from cache; a two-round
 tool loop with effort `low` read 2,407 tokens and wrote only the new 2,583.
+A loop's last turn writes a suffix nothing reads, so the net saving is
+measured after a week of `claude`-profile runs (the ledger's Haiku cost
+against the same rows repriced uncached); the flag goes off if it is not
+saving.
 ## Prior art (specs/README.md rule 6)
 
 - **LiteLLM** — https://github.com/BerriAI/litellm @ `8d441ebc151c`, license

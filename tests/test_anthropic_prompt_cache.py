@@ -1,4 +1,4 @@
-"""Quick-role automatic prompt caching on Anthropic (specs/llm-cost.md R12)."""
+"""Automatic prompt caching for the analysts' tool loops on Anthropic (specs/llm-cost.md R12)."""
 
 import pytest
 
@@ -116,3 +116,37 @@ def test_a_long_haiku_cache_write_is_never_billed_below_input():
     plain = call_cost("claude-haiku-5-5", {"input": 120_000, "cache_write": 0, "cache_read": 0, "output": 0})
     write = call_cost("claude-haiku-5-5", {"input": 120_000, "cache_write": 120_000, "cache_read": 0, "output": 0})
     assert write == pytest.approx(0.075) and write > plain
+
+
+@pytest.mark.unit
+def test_the_graph_hands_the_cached_model_to_the_four_analysts_only(monkeypatch):
+    from tradingagents.graph import setup as gs
+
+    got = {}
+
+    def factory(name):
+        def build(llm, *a, **k):
+            got[name] = llm
+            return lambda state: state
+        return build
+
+    for name in ("create_market_analyst", "create_sentiment_analyst", "create_news_analyst",
+                 "create_fundamentals_analyst", "create_bull_researcher", "create_bear_researcher",
+                 "create_trader", "create_aggressive_debator", "create_neutral_debator",
+                 "create_conservative_debator", "create_research_manager", "create_portfolio_manager"):
+        if hasattr(gs, name):
+            monkeypatch.setattr(gs, name, factory(name))
+    from types import SimpleNamespace
+
+    quick, analyst, deep = object(), object(), object()
+    keys = ("market", "social", "news", "fundamentals")
+    logic = SimpleNamespace(**{f"should_continue_{k}": (lambda state: "x") for k in keys},
+                            should_continue_debate=lambda s: "x", should_continue_risk_analysis=lambda s: "x")
+    setup = gs.GraphSetup(quick, deep, tool_nodes={k: (lambda state: state) for k in keys},
+                          conditional_logic=logic, analyst_llm=analyst)
+    setup.setup_graph()
+    analysts = {"create_market_analyst", "create_sentiment_analyst", "create_news_analyst",
+                "create_fundamentals_analyst"}
+    assert {n for n in analysts if n in got} == analysts and all(got[n] is analyst for n in analysts)
+    others = [n for n in got if n not in analysts]
+    assert others and all(got[n] is not analyst for n in others)

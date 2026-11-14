@@ -74,7 +74,7 @@ CLAUDE = Profile(
         "TRADINGAGENTS_RESEARCH_MANAGER_LLM": "claude-sonnet-5-5",
         "TRADINGAGENTS_ANTHROPIC_DEEP_EFFORT": "medium",
         "TRADINGAGENTS_ANTHROPIC_QUICK_EFFORT": "low",
-        # R12 (2026-11-13): the quick role's loops reread their prefix from cache.
+        # R12 (2026-11-13): the analysts' tool loops reread their prefix from cache.
         "TRADINGAGENTS_ANTHROPIC_QUICK_PROMPT_CACHE": "true",
     },
 )
