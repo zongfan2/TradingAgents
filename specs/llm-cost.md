@@ -288,7 +288,6 @@ Junk reads as 0 / empty, and logging never raises. Purpose: measure
 duplicate queries within a brief and across days (the baseline for the
 brief-dossier design) and the R10 cap's compliance.
 
-
 ### R12 — Prompt caching for the analysts' tool loops
 
 User decision 2026-11-13 (the console showed a low prompt-cache hit rate):
@@ -319,6 +318,7 @@ A loop's last turn writes a suffix nothing reads, so the net saving is
 measured after a week of `claude`-profile runs (the ledger's Haiku cost
 against the same rows repriced uncached); the flag goes off if it is not
 saving.
+
 ## Prior art (specs/README.md rule 6)
 
 - **LiteLLM** — https://github.com/BerriAI/litellm @ `8d441ebc151c`, license

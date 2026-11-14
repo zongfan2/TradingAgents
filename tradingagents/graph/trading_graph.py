@@ -210,7 +210,6 @@ class TradingAgentsGraph:
             if effort:
                 kwargs["effort"] = effort
 
-
         elif provider == "deepseek":
             if role == "quick" and self.config.get("deepseek_quick_thinking") == "disabled":
                 kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
