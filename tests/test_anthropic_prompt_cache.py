@@ -119,7 +119,7 @@ def test_a_long_haiku_cache_write_is_never_billed_below_input():
 
 
 @pytest.mark.unit
-def test_the_graph_hands_the_cached_model_to_the_four_analysts_only(monkeypatch):
+def test_the_graph_hands_the_cached_model_to_the_tool_calling_analysts_only(monkeypatch):
     from tradingagents.graph import setup as gs
 
     got = {}
@@ -145,8 +145,8 @@ def test_the_graph_hands_the_cached_model_to_the_four_analysts_only(monkeypatch)
     setup = gs.GraphSetup(quick, deep, tool_nodes={k: (lambda state: state) for k in keys},
                           conditional_logic=logic, analyst_llm=analyst)
     setup.setup_graph()
-    analysts = {"create_market_analyst", "create_sentiment_analyst", "create_news_analyst",
-                "create_fundamentals_analyst"}
+    analysts = {"create_market_analyst", "create_news_analyst", "create_fundamentals_analyst"}
+    assert got["create_sentiment_analyst"] is quick  # no tool loop: no cache marker
     assert {n for n in analysts if n in got} == analysts and all(got[n] is analyst for n in analysts)
     others = [n for n in got if n not in analysts]
     assert others and all(got[n] is not analyst for n in others)

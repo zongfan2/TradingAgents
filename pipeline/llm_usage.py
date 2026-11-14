@@ -57,7 +57,8 @@ class Price:
 
 
 #: Anthropic first-party list prices (claude-api reference, 2026-10); cache
-#: writes at the 5-minute rate (1.25 × input). DeepSeek: third-party listings
+#: writes at the 5-minute rate (1.25 × input) — a 1-hour write adds 0.75 ×
+#: input in call_cost (2 × input in all). DeepSeek: third-party listings
 #: (the official page did not render) — V4-Pro at the standard (not the
 #: discounted) rate, which reconciles with the user's 2026-10 bill. DeepSeek
 #: figures are informational; only Anthropic spend gates routing.

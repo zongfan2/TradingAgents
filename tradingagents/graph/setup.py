@@ -80,7 +80,8 @@ class GraphSetup:
 
         analyst_factories = {
             "market": lambda: create_market_analyst(self.analyst_llm),
-            "social": lambda: create_sentiment_analyst(self.analyst_llm),
+            # One pre-fetched prompt, no tool loop: nothing would read a cache write.
+            "social": lambda: create_sentiment_analyst(self.quick_thinking_llm),
             "news": lambda: create_news_analyst(self.analyst_llm),
             "fundamentals": lambda: create_fundamentals_analyst(self.analyst_llm),
         }
