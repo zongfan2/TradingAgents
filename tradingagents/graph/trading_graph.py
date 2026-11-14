@@ -194,6 +194,10 @@ class TradingAgentsGraph:
             effort = self.config.get(f"anthropic_{role}_effort") or self.config.get("anthropic_effort")
             if effort:
                 kwargs["effort"] = effort
+            # Only the quick role loops (tools, debate rounds) over a growing
+            # prefix; a one-shot judge would pay the cache write for nothing.
+            if role == "quick" and self.config.get("anthropic_quick_prompt_cache"):
+                kwargs["prompt_cache"] = True
 
         elif provider == "deepseek":
             if role == "quick" and self.config.get("deepseek_quick_thinking") == "disabled":

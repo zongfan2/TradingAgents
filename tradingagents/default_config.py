@@ -36,6 +36,9 @@ _ENV_OVERRIDES = {
     # anthropic_effort.
     "TRADINGAGENTS_ANTHROPIC_DEEP_EFFORT":   "anthropic_deep_effort",
     "TRADINGAGENTS_ANTHROPIC_QUICK_EFFORT":  "anthropic_quick_effort",
+    # Automatic prompt caching for the quick role on Anthropic (specs/llm-cost.md
+    # R12): its tool loops and debates resend a growing prefix. Off by default.
+    "TRADINGAGENTS_ANTHROPIC_QUICK_PROMPT_CACHE": "anthropic_quick_prompt_cache",
     "TRADINGAGENTS_OPENAI_DEEP_REASONING_EFFORT":  "openai_deep_reasoning_effort",
     "TRADINGAGENTS_OPENAI_QUICK_REASONING_EFFORT": "openai_quick_reasoning_effort",
     # DeepSeek V4 thinks by default (effort high); "disabled" turns it off
@@ -131,6 +134,7 @@ DEFAULT_CONFIG = _apply_env_overrides({
     "anthropic_effort": None,           # "high", "medium", "low"
     "anthropic_deep_effort": None,      # per-role override of anthropic_effort
     "anthropic_quick_effort": None,
+    "anthropic_quick_prompt_cache": False,  # top-level cache_control on quick-role calls
     "openai_deep_reasoning_effort": None,   # per-role override of openai_reasoning_effort
     "openai_quick_reasoning_effort": None,
     "deepseek_quick_thinking": None,    # None = provider default (on); "disabled"

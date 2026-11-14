@@ -193,7 +193,11 @@ def _tokens_from_message(message: Any) -> tuple[str | None, dict[str, int]] | No
         "input": int(usage.get("input_tokens") or 0),
         "output": int(usage.get("output_tokens") or 0),
         "cache_read": cache_read,
-        "cache_write": int(in_details.get("cache_creation") or 0),
+        # langchain-anthropic reports a cache write by TTL (ephemeral_5m/1h)
+        # and leaves cache_creation 0 when it does.
+        "cache_write": max(int(in_details.get("cache_creation") or 0),
+                           int(in_details.get("ephemeral_5m_input_tokens") or 0)
+                           + int(in_details.get("ephemeral_1h_input_tokens") or 0)),
         "reasoning": int(out_details.get("reasoning") or 0),
     }
 

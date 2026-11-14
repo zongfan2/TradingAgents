@@ -288,6 +288,25 @@ Junk reads as 0 / empty, and logging never raises. Purpose: measure
 duplicate queries within a brief and across days (the baseline for the
 brief-dossier design) and the R10 cap's compliance.
 
+
+### R12 — Prompt caching for the quick role's loops
+
+User decision 2026-11-13 (the console showed a low prompt-cache hit rate):
+the analysis graph sent ~12M input tokens a month with no cache marker, all
+billed in full. On the `claude` profile the quick role (Haiku 5.5:
+analysts' tool loops, researchers' and debaters' rounds) sends the
+top-level `cache_control: {type: "ephemeral"}` (automatic caching; config
+`anthropic_quick_prompt_cache`, env `TRADINGAGENTS_ANTHROPIC_QUICK_PROMPT_CACHE`,
+default off upstream, `true` in the `claude` profile, cleared by the others),
+so each turn of a loop reads the prefix the last one wrote. The deep role
+(Opus PM) and the Research Manager (Sonnet) call once per run, so a cache
+write would be paid for nothing: they send no marker. Caching changes the
+bill, never what the model sees, so the flag is not part of the analysis
+config digest. A write that langchain-anthropic reports by TTL
+(`ephemeral_5m_input_tokens` / `ephemeral_1h_input_tokens`, `cache_creation`
+left 0) is recorded as `cache_write` and billed at the write rate. Verified
+live 2026-11-13: a repeated 3.2k-token Haiku prefix read 3,173 tokens from
+cache on the second call.
 ## Prior art (specs/README.md rule 6)
 
 - **LiteLLM** — https://github.com/BerriAI/litellm @ `8d441ebc151c`, license
@@ -341,3 +360,7 @@ and inputs change; new ledger; scheduling of runs).
    CLI usage line carries the billed search count.
 8. R11: stream and single-envelope stdout both parse; queries and fetch
    URLs are logged in order and bounded, on ok and error calls alike.
+9. R12: the quick role's Anthropic requests carry top-level `cache_control`
+   on the `claude` profile only; the deep role and the Research Manager
+   never; TTL-reported cache writes are billed as writes; the config
+   digest is unchanged.
