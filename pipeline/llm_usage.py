@@ -67,6 +67,7 @@ PRICES: dict[str, Price] = {
     "claude-haiku-5-5": Price(
         0.10, 0.50, 0.01, 0.125,
         long_prompt_tokens=100_000, long_input=0.50, long_output=2.50, long_cache_read=0.05,
+        long_cache_write=0.625,  # 1.25 x the long input rate
     ),
     # OpenAI list prices (developers.openai.com/api/docs/pricing, standard
     # tier, 2026-11-01); no cache-write surcharge, so writes bill as input;

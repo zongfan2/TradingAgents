@@ -289,24 +289,29 @@ duplicate queries within a brief and across days (the baseline for the
 brief-dossier design) and the R10 cap's compliance.
 
 
-### R12 — Prompt caching for the quick role's loops
+### R12 — Prompt caching for the analysts' tool loops
 
 User decision 2026-11-13 (the console showed a low prompt-cache hit rate):
 the analysis graph sent ~12M input tokens a month with no cache marker, all
-billed in full. On the `claude` profile the quick role (Haiku 5.5:
-analysts' tool loops, researchers' and debaters' rounds) sends the
-top-level `cache_control: {type: "ephemeral"}` (automatic caching; config
-`anthropic_quick_prompt_cache`, env `TRADINGAGENTS_ANTHROPIC_QUICK_PROMPT_CACHE`,
-default off upstream, `true` in the `claude` profile, cleared by the others),
-so each turn of a loop reads the prefix the last one wrote. The deep role
-(Opus PM) and the Research Manager (Sonnet) call once per run, so a cache
-write would be paid for nothing: they send no marker. Caching changes the
-bill, never what the model sees, so the flag is not part of the analysis
-config digest. A write that langchain-anthropic reports by TTL
-(`ephemeral_5m_input_tokens` / `ephemeral_1h_input_tokens`, `cache_creation`
-left 0) is recorded as `cache_write` and billed at the write rate. Verified
-live 2026-11-13: a repeated 3.2k-token Haiku prefix read 3,173 tokens from
-cache on the second call.
+billed in full. On the `claude` profile the analysts (Haiku 5.5, the quick
+model) send the top-level `cache_control: {type: "ephemeral"}` (automatic
+caching; config `anthropic_quick_prompt_cache`, env
+`TRADINGAGENTS_ANTHROPIC_QUICK_PROMPT_CACHE`, default off upstream, `true` in
+the `claude` profile, cleared by the others): their tool loops resend a
+growing message list whose earlier blocks stay byte-identical, so each turn
+reads the prefix the last one wrote. The graph builds that cached analyst
+model separately (`analyst_llm`); researchers, risk debaters and the trader
+keep the unmarked quick model — each of their calls is one fresh block
+(role text, history and reports together), which could never be read back —
+and so do the Portfolio Manager (Opus) and the Research Manager (Sonnet),
+one call per run. Caching changes the bill, never what the model sees, so
+the flag is not part of the analysis config digest. A write that
+langchain-anthropic reports by TTL (`ephemeral_5m_input_tokens` /
+`ephemeral_1h_input_tokens`, `cache_creation` left 0) is recorded as
+`cache_write` and billed at the write rate; Haiku's long-prompt (>100K)
+write rate is 1.25 × its long input rate. Verified live 2026-11-13: a
+repeated 3.2k-token Haiku prefix read 3,173 tokens from cache; a two-round
+tool loop with effort `low` read 2,407 tokens and wrote only the new 2,583.
 ## Prior art (specs/README.md rule 6)
 
 - **LiteLLM** — https://github.com/BerriAI/litellm @ `8d441ebc151c`, license
@@ -360,7 +365,8 @@ and inputs change; new ledger; scheduling of runs).
    CLI usage line carries the billed search count.
 8. R11: stream and single-envelope stdout both parse; queries and fetch
    URLs are logged in order and bounded, on ok and error calls alike.
-9. R12: the quick role's Anthropic requests carry top-level `cache_control`
-   on the `claude` profile only; the deep role and the Research Manager
-   never; TTL-reported cache writes are billed as writes; the config
-   digest is unchanged.
+9. R12: only the analysts' Anthropic requests carry top-level
+   `cache_control`, on the `claude` profile only; researchers, debaters,
+   the trader, the Research Manager and the PM never; TTL-reported cache
+   writes are billed as writes (long Haiku writes at the long write rate);
+   the config digest is unchanged.
