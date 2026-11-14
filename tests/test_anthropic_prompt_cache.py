@@ -150,3 +150,37 @@ def test_the_graph_hands_the_cached_model_to_the_four_analysts_only(monkeypatch)
     assert {n for n in analysts if n in got} == analysts and all(got[n] is analyst for n in analysts)
     others = [n for n in got if n not in analysts]
     assert others and all(got[n] is not analyst for n in others)
+
+
+@pytest.mark.unit
+def test_a_one_hour_cache_write_is_billed_at_twice_input():
+    from pipeline.llm_usage import call_cost
+
+    five = call_cost("claude-haiku-5-5", {"input": 10_000, "cache_write": 10_000, "cache_read": 0, "output": 0})
+    hour = call_cost("claude-haiku-5-5", {"input": 10_000, "cache_write": 10_000, "cache_write_1h": 10_000,
+                                          "cache_read": 0, "output": 0})
+    assert five == pytest.approx(10_000 * 0.125 / 1e6) and hour == pytest.approx(10_000 * 0.20 / 1e6)
+
+
+@pytest.mark.unit
+def test_the_usage_row_keeps_its_columns_and_prices_the_one_hour_share():
+    from langchain_core.messages import AIMessage
+
+    from pipeline.llm_usage import UsageCallback
+
+    collector = UsageCallback.__new__(UsageCallback)
+    import threading
+
+    collector._lock, collector.models = threading.Lock(), {}
+    message = AIMessage(content="OK", usage_metadata={
+        "input_tokens": 10_000, "output_tokens": 0, "total_tokens": 10_000,
+        "input_token_details": {"cache_read": 0, "cache_creation": 0, "ephemeral_5m_input_tokens": 0,
+                                "ephemeral_1h_input_tokens": 10_000}},
+        response_metadata={"model_name": "claude-haiku-5-5"})
+    from pipeline.llm_usage import _tokens_from_message
+
+    model, tokens = _tokens_from_message(message)
+    collector._add(model, tokens)
+    row = collector.models["claude-haiku-5-5"]
+    assert "cache_write_1h" not in row and row["cache_write"] == 10_000
+    assert row["cost_usd"] == pytest.approx(10_000 * 0.20 / 1e6)

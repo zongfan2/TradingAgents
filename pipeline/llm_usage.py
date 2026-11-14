@@ -158,8 +158,11 @@ def call_cost(model: str, tokens: dict[str, int]) -> float | None:
     rate_in = price.long_input if long else price.input
     rate_out = price.long_output if long else price.output
     rate_read = price.long_cache_read if long else price.cache_read
+    # A 1-hour write costs 2x input, 0.75x more than the 5-minute rate billed below.
+    long_extra = tokens.get("cache_write_1h", 0) * 0.75 * rate_in
     return (
-        uncached * rate_in
+        long_extra
+        + uncached * rate_in
         + cache_read * rate_read
         + cache_write * (price.long_cache_write if long and price.long_cache_write is not None
                          else price.cache_write)
@@ -199,6 +202,8 @@ def _tokens_from_message(message: Any) -> tuple[str | None, dict[str, int]] | No
         "cache_write": max(int(in_details.get("cache_creation") or 0),
                            int(in_details.get("ephemeral_5m_input_tokens") or 0)
                            + int(in_details.get("ephemeral_1h_input_tokens") or 0)),
+        # Of those, the 1-hour writes, billed at 2x input (not the 5-minute 1.25x).
+        "cache_write_1h": int(in_details.get("ephemeral_1h_input_tokens") or 0),
         "reasoning": int(out_details.get("reasoning") or 0),
     }
 
@@ -245,6 +250,8 @@ class UsageCallback(BaseCallbackHandler):
 
     def _add(self, model: str, tokens: dict[str, int]) -> None:
         cost = call_cost(model, tokens)
+        # The 1-hour share only prices the call; the row keeps the ledger's columns.
+        tokens = {k: v for k, v in tokens.items() if k != "cache_write_1h"}
         _price, exact = price_for(model)
         with self._lock:
             row = self.models.setdefault(
