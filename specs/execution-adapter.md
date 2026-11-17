@@ -86,18 +86,27 @@ included — constructs a broker client.
   no usable price (missing, non-positive or non-finite) fails closed
   (`guard-unavailable`). A price above the
   zone is unchanged: the limit rests until a pullback.
-- **S8b — Reward/risk gate** (BUY entries and add-ons, right after S8a;
-  user decision 2026-11-06, to be re-judged on two more weeks of data):
-  `(targets[0] − entry_zone[1]) / (entry_zone[1] − stop)` below
-  `MIN_REWARD_RISK` (1.0) skips the order, reason `low-reward-risk` — the
-  limit is the zone top, so this is the bracket's own reward against its
-  own risk. Evidence: 121 of 246 BUY plans 2026-08-10..11-06 had a first
-  target under 1 R (median 1.02); replaying the 80 fillable US plans on
-  daily bars (first target exits the whole position), plans under 1.0
-  averaged −0.18 R (n=32) and plans at or above it +0.52 R (n=48). The
-  skip and its plan stay in `orders.jsonl`/`decisions.jsonl`, so the rule
-  can be re-tested on the names it kept out. Positions already open are
-  unaffected.
+- **S8b — Reward/risk gate — retired 2026-11-17** (user decision after the
+  re-test it was merged for). It skipped a BUY whose first target paid
+  under 1 R (`low-reward-risk`). Its evidence was wrong: the replay counted
+  the feeds arm and manual reruns as separate plans. On the 62 closed US
+  brief-arm BUY brackets of 2026-08-24..10-30, plans under 1 R averaged
+  +0.24 R (n=38) and the others +0.33 R (n=24); the gate would have halved
+  the total (+17 R to +7.9 R). Old `low-reward-risk` rows stay as written.
+- **S8c — Brief-impact gate** (BUY entries and add-ons, including the
+  manual path, right after S8a; user decision 2026-11-17): a BUY whose ticker
+  brief — the exact revision the run read, `inputs.ticker_brief` (path under
+  the ticker-brief directory, sha256) — ends on a `mixed` Impact skips the
+  order, reason `mixed-brief`. Evidence, same replay: mixed-brief BUYs
+  averaged −0.53 R (n=21, 24 % won), the others about 0; without them the
+  total rose from +17 R to +28 R; held to five sessions, mixed-brief names
+  trailed SPY by 2.7 % (n=131) against 0.5 % for neutral (n=66). A run that
+  read no ticker brief (none, or one withheld after an eval fail) is not
+  judged; a referenced brief that is missing, unreadable or no longer that
+  revision fails closed, `brief-unverified`. Analysis is unchanged (a mixed
+  name is still analysed — a held one needs its sell signal); a held name
+  without `add_intent` stays `maintain`. Re-judged after more mixed-brief
+  BUYs accrue.
 - **S9 — Portfolio constraints**:
   - A BUY for a held ticker without `add_intent` ⇒ skip (`maintain`) — not an
     error; the plan is a view refresh, not an order.
@@ -193,8 +202,7 @@ included — constructs a broker client.
    right skip reason), S8a (a quote gapped below the entry zone ⇒
    `below-entry-zone` for entries, add-ons and the manual path; inside or
    above the zone ⇒ submitted; an unusable or non-finite quote ⇒
-   `guard-unavailable`; a held name without `add_intent` stays `maintain`), S8b (first target under 1 R ⇒ `low-reward-risk` for entries, add-ons
-   and the manual path; exactly 1 R passes; a held view refresh stays `maintain`), S9 add-on rules (maintain skip without add_intent;
+   `guard-unavailable`; a held name without `add_intent` stays `maintain`), S8c (a BUY on a mixed ticker brief ⇒ `mixed-brief` for entries, add-ons and the manual path; a brief read but unverifiable ⇒ `brief-unverified`; none read ⇒ not judged; a held view refresh stays `maintain`; S8b retired: a 0.66 R plan goes through), S9 add-on rules (maintain skip without add_intent;
    tranche cap, pyramid-up, spacing, and per-ticker notional each
    individually violated ⇒ its specific skip) plus buying-power / total-risk
    skips, sizing math incl. cap reduction and qty-0 skip.

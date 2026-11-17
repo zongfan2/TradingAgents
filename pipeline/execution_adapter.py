@@ -42,9 +42,9 @@ Safety invariants (spec S1-S9, each individually tested):
 - S8a entry-zone guard: a BUY whose lower usable quote side is more than
       1 % below the plan's entry zone skips ``below-entry-zone`` (a gap
       through the zone is another setup); an unusable quote fails closed.
-- S8b reward/risk gate: a BUY whose first target pays less than
-      MIN_REWARD_RISK times its risk, both from the limit (the zone top),
-      skips ``low-reward-risk``.
+- S8c brief-impact gate (replaced S8b's reward/risk gate, 2026-11-17): a BUY
+      whose ticker brief ends on a mixed Impact skips ``mixed-brief``; a
+      referenced brief that cannot be verified skips ``brief-unverified``.
 - S9  portfolio constraints: BUY on a held ticker without ``add_intent`` is a
       ``maintain`` skip; add-on tranches gated by tranche cap / pyramid-up /
       trading-day spacing / per-ticker notional (each violation its own skip
@@ -735,30 +735,34 @@ def entry_zone_reason(plan: TradePlan, quote: Quote | None) -> str | None:
     return None
 
 
-#: S8b (user decision 2026-11-06, reviewed again after two weeks of data):
-#: the first target must pay at least this multiple of the risk. Replaying
-#: the 80 fillable US BUY plans 2026-08-10..11-06 on daily bars, plans under
-#: 1.0 averaged -0.18 R and plans at or above it +0.52 R.
-MIN_REWARD_RISK = 1.0
+def brief_impact_reason(record: DecisionRecord, config: PipelineConfig) -> str | None:
+    """S8c (user decision 2026-11-17, replacing S8b): a BUY whose ticker brief
+    — the exact revision the run read (``inputs.ticker_brief``, path and
+    sha256) — ends on a ``mixed`` Impact skips ``mixed-brief``. Replaying the
+    62 closed US BUY brackets of 2026-08-24..10-30: mixed-brief BUYs averaged
+    −0.53 R (n=21), the others about 0; without them the total rose from +17 R
+    to +28 R. A run that read no ticker brief (none, or withheld after an eval
+    fail) is not judged; a referenced brief that is missing, unreadable or no
+    longer that revision fails closed (``brief-unverified``)."""
+    from pipeline.common import sha256_file
+    from pipeline.research_digest import IMPACT_NAMES, _last_impact
 
-
-def reward_risk(plan: TradePlan) -> float | None:
-    """(targets[0] - limit) / (limit - stop), the limit being the zone top
-    the bracket is placed at; None when the risk is not positive."""
-    limit = plan.entry_zone[1]
-    risk = limit - plan.stop
-    return (plan.targets[0] - limit) / risk if risk > 0 else None
-
-
-def reward_risk_reason(plan: TradePlan) -> str | None:
-    """S8b: ``low-reward-risk`` when the first target pays less than
-    MIN_REWARD_RISK times the risk; else None."""
-    ratio = reward_risk(plan)
-    if ratio is None or ratio < MIN_REWARD_RISK - 1e-9:
-        logger.info("BUY reward/risk %s below %.2f (limit %.2f, stop %.2f, first target %.2f)",
-                    "n/a" if ratio is None else f"{ratio:.2f}", MIN_REWARD_RISK,
-                    plan.entry_zone[1], plan.stop, plan.targets[0])
-        return "low-reward-risk"
+    ref = record.inputs.ticker_brief if record.inputs is not None else None
+    if ref is None:
+        return None
+    path = Path(config.ticker_brief_dir) / ref.path
+    try:
+        if sha256_file(path) != ref.sha256:
+            logger.warning("%s: ticker brief %s changed since the run read it", record.run_id, ref.path)
+            return "brief-unverified"
+        body = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning("%s: ticker brief %s unreadable (%s)", record.run_id, ref.path, type(exc).__name__)
+        return "brief-unverified"
+    impact = _last_impact(body)
+    if impact is not None and impact[0] == IMPACT_NAMES["mixed"]:
+        logger.info("%s: BUY on a mixed ticker brief — skipped", record.run_id)
+        return "mixed-brief"
     return None
 
 
@@ -1338,9 +1342,9 @@ class _SubmitRun:
         if zone_reason:
             self.skip(record, zone_reason, cid)
             return
-        rr_reason = reward_risk_reason(plan)
-        if rr_reason:
-            self.skip(record, rr_reason, cid)
+        brief_reason = brief_impact_reason(record, self.config)
+        if brief_reason:
+            self.skip(record, brief_reason, cid)
             return
         if position is not None:
             addon_reason = self._addon_pre_reason(plan, position)

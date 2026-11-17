@@ -86,6 +86,7 @@ def write_decision(
     ticker_v="pass",
     session="us",
     date_iso=DATE_ISO,
+    ticker_brief=None,
 ):
     """Append one contract-shaped decisions.jsonl row."""
     action = None if plan is None else plan["action"]
@@ -101,7 +102,7 @@ def write_decision(
         "catalyst_score": None,
         "macro_eval_verdict": macro,
         "ticker_eval_verdict": ticker_v,
-        "inputs": {"macro_brief": None, "ticker_brief": None, "pool": None, "config_digest": "d"},
+        "inputs": {"macro_brief": None, "ticker_brief": ticker_brief, "pool": None, "config_digest": "d"},
         "decided_at": "2026-08-07T13:00:00Z",
         "decision": decision or (action or "HOLD"),
         "plan": plan,
@@ -2401,47 +2402,82 @@ def test_s8a_applies_to_the_manual_path_and_reaches_the_funnel(tmp_path):
     assert funnel_rows(config2) == [("NVDA", "excluded", "below-entry-zone")]
 
 
+
+
+def brief_ref(config, impact, ticker="NVDA"):
+    """A ticker brief on disk ending on ``impact`` and its InputRef."""
+    from pipeline.common import sha256_file
+
+    path = config.ticker_brief_dir / ticker / f"{DATE_ISO}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"---\nticker: {ticker}\n---\n\n## Risks\n\n- x\n\n**Impact**: {impact} — why.\n", encoding="utf-8")
+    return {"path": f"{ticker}/{DATE_ISO}.md", "generated_at": "2026-08-07T12:00:00Z", "sha256": sha256_file(path)}
+
+
 @pytest.mark.unit
-@pytest.mark.parametrize(("targets", "submitted"), [
-    ([110.0, 120.0], True),    # exactly 1 R from the limit: passes
-    ([109.0, 125.0], False),   # 0.9 R on the first target, whatever the second
-    ([115.0], True),
-])
-def test_s8b_a_first_target_under_one_r_is_skipped(tmp_path, targets, submitted):
+@pytest.mark.parametrize(("impact", "submitted"), [("mixed", False), ("bullish", True), ("neutral", True),
+                                                   ("bearish", True)])
+def test_s8c_a_buy_on_a_mixed_brief_is_skipped(tmp_path, impact, submitted):
     config = make_config(tmp_path)
-    write_decision(config, plan={**BUY_PLAN, "targets": targets})
+    write_decision(config, ticker_brief=brief_ref(config, impact))
     broker = FakeBroker()
     submit_slot(config, broker, settings=live_settings())
     assert bool(broker.submitted) is submitted
     if not submitted:
-        assert [(r["kind"], r["reason"]) for r in read_orders(config)] == [("skip", "low-reward-risk")]
-        assert funnel_rows(config) == [("NVDA", "excluded", "low-reward-risk")]
+        assert [(r["kind"], r["reason"]) for r in read_orders(config)] == [("skip", "mixed-brief")]
+        assert funnel_rows(config) == [("NVDA", "excluded", "mixed-brief")]
 
 
 @pytest.mark.unit
-def test_s8b_the_msft_plan_of_11_06_would_have_been_skipped():
-    plan = ea.TradePlan.model_validate({**BUY_PLAN, "entry_zone": [516.13, 531.07], "stop": 500.0,
-                                        "targets": [551.61, 559.15]})
-    assert round(ea.reward_risk(plan), 2) == 0.66 and ea.reward_risk_reason(plan) == "low-reward-risk"
+def test_s8c_no_brief_read_is_not_judged_and_an_unverifiable_one_fails_closed(tmp_path):
+    config = make_config(tmp_path)
+    write_decision(config)  # no ticker brief read (none, or withheld after an eval fail)
+    broker = FakeBroker()
+    submit_slot(config, broker, settings=live_settings())
+    assert broker.submitted
+
+    config2 = make_config(tmp_path / "changed")
+    ref = brief_ref(config2, "bullish")
+    (config2.ticker_brief_dir / ref["path"]).write_text("rewritten after the run\n**Impact**: bullish — x.\n")
+    write_decision(config2, ticker_brief=ref)
+    broker2 = FakeBroker()
+    submit_slot(config2, broker2, settings=live_settings())
+    assert broker2.submitted == [] and read_orders(config2)[-1]["reason"] == "brief-unverified"
+
+    config3 = make_config(tmp_path / "gone")
+    ref3 = brief_ref(config3, "bullish")
+    (config3.ticker_brief_dir / ref3["path"]).unlink()
+    write_decision(config3, ticker_brief=ref3)
+    broker3 = FakeBroker()
+    submit_slot(config3, broker3, settings=live_settings())
+    assert broker3.submitted == [] and read_orders(config3)[-1]["reason"] == "brief-unverified"
 
 
 @pytest.mark.unit
-def test_s8b_guards_add_ons_and_the_manual_path_and_keeps_maintain(tmp_path):
-    low = {**BUY_PLAN, "targets": [105.0, 130.0]}
+def test_s8c_a_low_reward_risk_plan_is_no_longer_skipped(tmp_path):
+    config = make_config(tmp_path)  # S8b retired: the 11-06 MSFT shape (0.66 R) goes through
+    write_decision(config, plan={**BUY_PLAN, "targets": [105.0, 130.0]})
+    broker = FakeBroker()
+    submit_slot(config, broker, settings=live_settings())
+    assert broker.submitted
+
+
+@pytest.mark.unit
+def test_s8c_guards_add_ons_and_the_manual_path_and_keeps_maintain(tmp_path):
     config = make_config(tmp_path)
     broker = addon_scenario(config)
-    write_decision(config, plan={**ADDON_PLAN, "targets": [105.0, 130.0]}, n=10)  # latest attempt: an add-on
+    write_decision(config, plan=ADDON_PLAN, n=10, ticker_brief=brief_ref(config, "mixed"))  # latest attempt: an add-on
     submit_slot(config, broker, settings=live_settings())
-    assert broker.submitted == [] and read_orders(config)[-1]["reason"] == "low-reward-risk"
+    assert broker.submitted == [] and read_orders(config)[-1]["reason"] == "mixed-brief"
 
     config2 = make_config(tmp_path / "manual")
-    row = write_decision(config2, plan=low, n=1, trigger="manual")
+    row = write_decision(config2, n=1, trigger="manual", ticker_brief=brief_ref(config2, "mixed"))
     broker2 = FakeBroker()
     submit_slot(config2, broker2, settings=live_settings(), run_id=row["run_id"], execute=True)
-    assert broker2.submitted == [] and read_orders(config2)[-1]["reason"] == "low-reward-risk"
+    assert broker2.submitted == [] and read_orders(config2)[-1]["reason"] == "mixed-brief"
 
     config3 = make_config(tmp_path / "maintain")
     broker3 = addon_scenario(config3)
-    write_decision(config3, plan=low, n=10)  # held, no add_intent: a view refresh
+    write_decision(config3, plan=BUY_PLAN, n=10, ticker_brief=brief_ref(config3, "mixed"))  # held, no add_intent
     submit_slot(config3, broker3, settings=live_settings())
     assert broker3.submitted == [] and read_orders(config3)[-1]["reason"] == "maintain"
