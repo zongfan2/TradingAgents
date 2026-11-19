@@ -615,12 +615,14 @@ def test_closes_hold_only_the_days_names_and_benchmarks(tmp_path, archive):
     {**review(), "summary": "长" * (dr.MAX_FIELD_CHARS + 1)},
     {**review(), "watch": ["x"] * (dr.MAX_ITEMS["watch"] + 1)},
 ])
-def test_an_oversized_review_falls_back_to_the_facts(tmp_path, archive, monkeypatch, big):
+def test_an_oversized_review_is_cut_not_dropped(tmp_path, archive, monkeypatch, big):
     cfg = config(tmp_path)
     slot(cfg)
     monkeypatch.setattr(dr, "closes", lambda tickers, fetch=None, **k: prices_for("NVDA", "FN"))
     text = dr.review_day(cfg, DAY, send=None, runner=lambda prompt: big)
-    assert "复盘模型不可用" in text and len(text) <= dr.MAX_MESSAGE_CHARS
+    assert "复盘模型不可用" not in text and "策略：继续观察" in text and len(text) <= dr.MAX_MESSAGE_CHARS
+    checked = dr.checked_review(big)
+    assert len(checked["summary"]) <= dr.MAX_FIELD_CHARS and len(checked["watch"]) <= dr.MAX_ITEMS["watch"]
 
 
 @pytest.mark.unit
@@ -1016,3 +1018,64 @@ def test_a_running_next_session_does_not_make_the_day_a_holiday():
     reasons = {}
     dr.fill_day_close("^HSI", series, DAY, datetime(2026, 11, 5, 10, 0, tzinfo=timezone.utc), None, reasons)
     assert reasons == {"^HSI": "no-session"}  # 18:00 Hong Kong: 11-05 finished, 11-04 still unlisted
+
+
+@pytest.mark.unit
+def test_an_unsafe_review_still_falls_back_and_the_log_names_the_rule(tmp_path, archive, monkeypatch, caplog):
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="pipeline.daily_review")
+    cfg = config(tmp_path)
+    slot(cfg)
+    monkeypatch.setattr(dr, "closes", lambda tickers, fetch=None, **k: prices_for("NVDA", "FN"))
+    text = dr.review_day(cfg, DAY, send=None, runner=lambda prompt: {**review(), "summary": "详见 evil.com/x"})
+    assert "复盘模型不可用" in text
+    assert "model unavailable (a review field is not plain text)" in caplog.text and "evil" not in caplog.text
+
+
+@pytest.mark.unit
+def test_each_fill_names_the_order_it_came_from(tmp_path):
+    cfg = config(tmp_path)
+    slot(cfg)
+    orders = {"o-stop": {"id": "o-stop", "client_order_id": "x1", "side": "sell", "order_type": "stop",
+                         "order_class": "bracket", "symbol": "MSFT"},
+              "o-entry": {"id": "o-entry", "client_order_id": "2026-11-04-us-NVDA-entry", "side": "buy",
+                          "order_type": "limit", "order_class": "bracket", "symbol": "NVDA"}}
+
+    class Broker(FakeBroker):
+        def fills_since(self, start):
+            return [{"symbol": "MSFT", "side": "sell", "qty": "16", "price": "499.4", "order_id": "o-stop",
+                     "transaction_time": "2026-11-04T15:51:18Z"},
+                    {"symbol": "NVDA", "side": "buy", "qty": "2", "price": "100", "order_id": "o-entry",
+                     "transaction_time": "2026-11-04T14:50:00Z"},
+                    {"symbol": "AMD", "side": "sell", "qty": "1", "price": "50", "order_id": "o-gone",
+                     "transaction_time": "2026-11-04T16:00:00Z"}]
+
+        def order(self, order_id):
+            if order_id not in orders:
+                raise LookupError(order_id)
+            return orders[order_id]
+
+    facts = dr.build_facts(cfg, DAY, prices=prices_for("NVDA", "FN"), broker=Broker())
+    assert [(f["symbol"], f["order_kind"]) for f in facts["fills"]] == [
+        ("MSFT", "stop"), ("NVDA", "entry"), ("AMD", "unknown")]
+    assert "止损单成交" in dr.REVIEW_PROMPT
+
+
+@pytest.mark.unit
+def test_a_failed_model_call_never_writes_its_text_to_the_log(tmp_path, archive, monkeypatch, caplog):
+    import logging
+
+    from pipeline.claude_cli import EnvelopeError
+
+    caplog.set_level(logging.WARNING, logger="pipeline.daily_review")
+    cfg = config(tmp_path)
+    slot(cfg)
+    monkeypatch.setattr(dr, "closes", lambda tickers, fetch=None, **k: prices_for("NVDA", "FN"))
+
+    def failing(prompt):
+        raise EnvelopeError("claude -p returned error result: see evil.com secret")
+
+    text = dr.review_day(cfg, DAY, send=None, runner=failing)
+    assert "复盘模型不可用" in text
+    assert "model unavailable (EnvelopeError)" in caplog.text and "evil" not in caplog.text

@@ -78,7 +78,11 @@ prompt):
   as a single latest bar — / ^HSI);
 - names without a decision that moved ≥ 5 % that day (missed moves);
 - the macro brief's six Impact words and eval verdict;
-- account equity change, fills, open positions (us);
+- account equity change, fills, open positions (us); each fill names the
+  order it came from (`order_kind`: entry, close, stop, target, other, or
+  unknown when the order cannot be read — the trade notifications' own
+  classification), so a stop or target fill reads as planned (2026-11-17
+  called the MSFT stop-out unplanned);
 - analysis errors by kind, entry-zone skips, other execute skips;
 - every funnel entry of the session, a brief-less one too (a failed
   collection, a watch name), with its layer and collect code;
@@ -130,7 +134,9 @@ rejected: the review is the facts' alone. The output is checked before it
 reaches anyone: every field has its schema shape and no text carries a
 link or markup (any scheme, `www.`, a markdown link, an HTML/Lark tag, a
 domain-like host other than a numeric exchange symbol — a plain comparison
-such as `超额>2%` or `NVDA<SPY` is fine), and stays within its size bounds
+such as `超额>2%` or `NVDA<SPY` is fine), and stays within its size bounds — an over-long field or list is cut to
+its bound (with …), never a reason to drop the review (2026-11-18 lost one
+that way); the log names the rule a rejected review failed
 (300 characters a field, at most 8 issues, 5 proposals, 6 watch items, in the
 prompt and the check — not the schema, which codex sends in OpenAI strict form; a rendered message over 6000 characters is replaced by
 the facts); a failure falls back to the facts. Every step but the send is guarded (facts, model, archive), so the
