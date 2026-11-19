@@ -841,6 +841,88 @@ def _lagging_holds(config: PipelineConfig, candidates: dict[str, tuple[float, fl
     return out
 
 
+#: How far back (calendar days) a name's previous analysis is looked up
+#: for the continuity lines (user decision 2026-11-19).
+CONTINUITY_DAYS = 10
+DECISION_WORDS = {"BUY": "看多", "SELL": "看空", "HOLD": "不操作", "ERROR": "分析出错"}
+
+
+def previous_decisions(records: dict, session: str, slot_date: date) -> dict[str, Any]:
+    """ticker -> its latest scheduled brief-arm decision of ``session`` in the
+    CONTINUITY_DAYS before ``slot_date`` (manual reruns and the feeds arm are
+    not the pipeline's own view)."""
+    since = (slot_date - timedelta(days=CONTINUITY_DAYS)).isoformat()
+    latest: dict[str, Any] = {}
+    for record in records.values():
+        day = str(record.date)[:10]
+        if (record.session != session or record.arm != "brief" or record.trigger == "manual"
+                or not since <= day < slot_date.isoformat()):
+            continue
+        current = latest.get(record.ticker)
+        if current is None or (day, _attempt_of(record.run_id)) > (str(current.date)[:10],
+                                                                    _attempt_of(current.run_id)):
+            latest[record.ticker] = record
+    return latest
+
+
+def continuity_line(previous: Any | None, code: str | None) -> str | None:
+    """``  上次 MM-DD：X，本次不变/本次改为 Y``; None for a name with no
+    analysis in the CONTINUITY_DAYS before (nothing to compare)."""
+    if previous is None:
+        return None
+    before = DECISION_WORDS.get(previous.decision, str(previous.decision))
+    now = DECISION_WORDS.get(code or "", str(code))
+    change = "本次不变" if previous.decision == code else f"本次改为{now}"
+    return f"  上次 {str(previous.date)[5:10]}：{before}，{change}"
+
+
+def previous_slot(config: PipelineConfig, session: str, slot_date: date) -> date | None:
+    """The latest earlier date (within CONTINUITY_DAYS) the session has a
+    funnel snapshot for — the slot before this one."""
+    from pipeline.funnel import snapshot_path
+
+    for back in range(1, CONTINUITY_DAYS + 1):
+        day = slot_date - timedelta(days=back)
+        if snapshot_path(config.state_dir, session, day).exists():
+            return day
+    return None
+
+
+def stopped_lines(previous: dict[str, Any], tickers: list, analysed: list, held: set[str] | None,
+                  threshold: str, last_slot: date | None = None) -> list[str]:
+    """Names analysed in the slot before (``last_slot``), not analysed now, with
+    why (held names have their own alerts; a core name skipped as unchanged
+    is still followed). Shown once, on the first slot they drop out."""
+    if not previous or last_slot is None:
+        return []
+    # Only names analysed in the slot just before: a drop is shown once, on
+    # the first slot after it, even if that slot analysed nothing else.
+    last_day = last_slot.isoformat()
+    now = {t.ticker.upper() for t in analysed}
+    held_u = {h.upper() for h in (held or set())}
+    by_ticker = {t.ticker.upper(): t for t in tickers}
+    labels = dict((*SKIP_REASONS, *UNANALYSED_REASONS))
+    out = []
+    for ticker, record in sorted(previous.items()):
+        upper = ticker.upper()
+        if str(record.date)[:10] != last_day or upper in now or upper in held_u:
+            continue
+        t = by_ticker.get(upper)
+        if t is not None and t.trigger in ("core-unchanged", "core-session-off"):
+            continue  # a core name is still followed: it reruns once its brief or price changes
+        if t is None:
+            why = "今日不在股票池（无简报）"
+        elif t.trigger == "below-threshold":
+            bar = f"低于 {threshold}" if threshold != "触发线" else "未达触发线"
+            why = f"催化剂 {t.score:g} 分，{bar}" if t.score is not None else f"催化剂分{bar}"
+        elif t.trigger == "eval-fail":
+            why = "简报评估 fail"
+        else:
+            why = labels.get(t.trigger or "", "今日未分析").format(threshold=threshold, market="")
+        out.append(f"• {ticker}：上次 {last_day[5:]} {DECISION_WORDS.get(record.decision, record.decision)}；{why}")
+    return out
+
+
 def _attempt_of(run_id: str) -> int:
     from pipeline.execution_adapter import _attempt_number  # the adapter's own rule, never a copy
 
@@ -1093,10 +1175,13 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
     lines = [" ｜ ".join(head), *alerts, macro]
     if macro_summary:
         lines.append(f"  要点：{macro_summary}")
+    previous = previous_decisions(records, session, slot_date)
     if analysed:
         lines += ["", f"已分析（{len(analysed)}）"]
         for t in analysed:
             lines.append(f"{t.head()} → {actions[t.ticker]}")
+            if (line := continuity_line(previous.get(t.ticker), (t.decide or {}).get("code"))) is not None:
+                lines.append(line)
             if notes.get(t.ticker):
                 lines.append(f"  {notes[t.ticker]}")
     if blocked:
@@ -1105,6 +1190,15 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
             lines.append(f"{t.head()} → 简报评估 fail，未分析")
             if notes.get(t.ticker):
                 lines.append(f"  {notes[t.ticker]}")
+    try:
+        last_slot = previous_slot(config, session, slot_date)
+    except Exception:
+        last_slot = None
+    stopped = stopped_lines(previous, tickers, analysed, held,
+                            f"{threshold:g}" if threshold is not None else "触发线", last_slot)
+    if stopped:
+        lines += ["", f"停止跟踪（{len(stopped)}）"] + stopped
+
     def grouped(group: list[_Ticker], reasons: tuple, fallback: str | None) -> list[str]:
         out = []
         known = {code for code, _label in reasons}

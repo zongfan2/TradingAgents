@@ -1504,3 +1504,58 @@ def test_an_empty_spy_read_is_logged_as_spy(tmp_path, live, monkeypatch, caplog)
     monkeypatch.setattr(rd, "_daily_closes", lambda t, start: [] if t == "SPY" else [(date(2026, 11, 3), 519.66)])
     assert alert_lines(cfg) == []
     assert "closes for SPY unavailable (no usable series)" in caplog.text and "closes for MSFT" not in caplog.text
+
+
+@pytest.mark.unit
+def test_an_analysed_name_says_what_it_was_last_time(tmp_path, live):
+    cfg = config(tmp_path)
+    write_decision(cfg, ticker="NVDA", plan=BUY_PLAN, date_iso="2026-11-03", decision="HOLD")
+    write_decision(cfg, ticker="AMD", plan=BUY_PLAN, date_iso="2026-11-03", decision="HOLD")
+    write_slot(cfg, briefs={"NVDA": ticker_brief("NVDA", 7.0, "bullish — x."), "AMD": ticker_brief("AMD", 7.0, "mixed — y.")},
+               tickers=[entry("NVDA", evaluate="warn", trigger="core", decide=decided(cfg, "NVDA", "BUY", "Overweight")),
+                        entry("AMD", evaluate="warn", trigger="core", decide=decided(cfg, "AMD", "HOLD", "Hold"))])
+    book(cfg)
+    lines = rd.build_digest(cfg, "us", DAY, now=SLOT_END).splitlines()
+    nvda = next(i for i, line in enumerate(lines) if line.startswith("• NVDA"))
+    amd = next(i for i, line in enumerate(lines) if line.startswith("• AMD"))
+    assert lines[nvda + 1] == "  上次 11-03：不操作，本次改为看多"
+    assert lines[amd + 1] == "  上次 11-03：不操作，本次不变"
+
+
+@pytest.mark.unit
+def test_names_dropping_out_are_listed_once_with_why(tmp_path, live):
+    cfg = config(tmp_path)
+    for t in ("PANW", "GONE", "MSFT", "NVDA", "AMD"):
+        write_decision(cfg, ticker=t, plan=BUY_PLAN, date_iso="2026-11-03", decision="HOLD")
+    write_decision(cfg, ticker="OLD", plan=BUY_PLAN, date_iso="2026-10-30", decision="HOLD")  # dropped earlier
+    write_slot(cfg, briefs={"PANW": ticker_brief("PANW", 6.0, "neutral — z."), "NVDA": ticker_brief("NVDA", 7.0, "bullish — x."),
+                            "AMD": ticker_brief("AMD", 3.0, "mixed — m.")},
+               tickers=[entry("PANW", evaluate="skipped-below-threshold", trigger="below-threshold"),
+                        entry("AMD", trigger="core-unchanged"),  # still followed: not listed
+                        entry("NVDA", evaluate="warn", trigger="core", decide=decided(cfg, "NVDA", "HOLD", "Hold"))])
+    book(cfg, held=["MSFT"])  # held: its own alert, not this list
+    (cfg.state_dir / "funnel" / "us" / "2026-11-03.json").write_text(json.dumps({"tickers": []}))  # the slot before
+    lines = rd.build_digest(cfg, "us", DAY, now=SLOT_END).splitlines()
+    i = lines.index("停止跟踪（2）")
+    assert lines[i + 1:i + 3] == ["• GONE：上次 11-03 不操作；今日不在股票池（无简报）",
+                                  "• PANW：上次 11-03 不操作；催化剂 6 分，未达触发线"]
+    assert not any("OLD" in line for line in lines)
+
+
+@pytest.mark.unit
+def test_a_drop_is_listed_only_on_the_slot_right_after_it(tmp_path, live):
+    import json as _json
+
+    cfg = config(tmp_path)
+    write_decision(cfg, ticker="GONE", plan=BUY_PLAN, date_iso="2026-11-03", decision="HOLD")
+    funnel = cfg.state_dir / "funnel" / "us"
+    funnel.mkdir(parents=True, exist_ok=True)
+    (funnel / "2026-11-03.json").write_text(_json.dumps({"tickers": []}))  # the slot GONE was analysed in
+    write_slot(cfg, briefs={}, tickers=[])  # 11-04: nothing analysed at all
+    book(cfg)
+    assert "停止跟踪（1）" in rd.build_digest(cfg, "us", DAY, now=SLOT_END).splitlines()
+    from datetime import date as _date, timedelta as _td
+    later = _date(2026, 11, 5)
+    (funnel / f"{later.isoformat()}.json").write_text(_json.dumps({"tickers": []}))
+    lines = rd.build_digest(cfg, "us", later, now=SLOT_END + _td(days=1)).splitlines()
+    assert not any(line.startswith("停止跟踪") for line in lines)  # the slot before (11-04) analysed nothing
