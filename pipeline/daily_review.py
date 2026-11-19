@@ -474,6 +474,25 @@ def _fills(broker, day: date) -> list[dict] | None:
         return None
 
 
+def _fill_kinds(broker, fills: list) -> dict[str, str]:
+    """order id -> the order a fill came from: ``entry`` / ``close`` (pipeline
+    orders), ``stop`` / ``target`` (bracket legs), ``other`` (e.g. a manual
+    order) — the trade notifications' own classification; an order that
+    cannot be read stays out (its fills read ``unknown``)."""
+    from pipeline.trade_notify import order_view
+
+    kinds: dict[str, str] = {}
+    for fill in fills:
+        order_id = str((fill if isinstance(fill, dict) else {}).get("order_id") or "")
+        if not order_id or order_id in kinds:
+            continue
+        try:
+            kinds[order_id] = order_view(broker.order(order_id)).kind
+        except Exception as exc:
+            logger.warning("daily review: order for a fill unavailable (%s)", type(exc).__name__)
+    return kinds
+
+
 # ---------------------------------------------------------------------------
 # R2 — facts and review
 # ---------------------------------------------------------------------------
@@ -672,7 +691,9 @@ def build_facts(config: PipelineConfig, day: date, *, prices: dict | None = None
                 for p in broker.positions()]
         fills = _fills(broker, day)
         if fills is not None:
-            facts["fills"] = [{k: f.get(k) for k in ("symbol", "side", "qty", "price", "transaction_time")}
+            kinds = _fill_kinds(broker, fills)
+            facts["fills"] = [{**{k: f.get(k) for k in ("symbol", "side", "qty", "price", "transaction_time")},
+                               "order_kind": kinds.get(str(f.get("order_id") or ""), "unknown")}
                               for f in fills if isinstance(f, dict)]
     facts["scoreboard"] = _scoreboard(config, day, prices)
     return facts
@@ -710,6 +731,8 @@ REVIEW_PROMPT = """你是一个交易研究流水线的复盘员。下面是 {da
 当天涨跌（move_pct）和相对基准的超额（excess_pct；为 null 表示没有读到行情，不是零——
 price_reads 记录行情读取被跳过（skipped，时间预算用完）和失败（failed）的股票数，大于 0 时相关统计不完整，要在总结里说明；
 quote_filled 是 Yahoo 日线尚未更新、用收盘后实时报价补上当天收盘的股票数，属正常情况；
+fills 每笔带 order_kind：entry 为入场，stop 为止损单成交，target 为止盈单成交，close 为分析给出的卖出，
+other 为其他来源（如人工），unknown 为查不到；止损和止盈是计划内的成交，不是异常；
 failed_tickers / unfilled 列出读取失败和未能补价的股票及原因，提到行情缺失时引用它们；
 A股/港股的基准（510300.SS、^HSI）的 unfilled 原因是 no-session，或 quote-trade-date 且日期早于当天的，
 多半是该市场当天休市，同市场个股的同类原因随之视为休市；基准正常时个股的这类原因多半是停牌或缺数据；
@@ -783,25 +806,27 @@ def _run_review(prompt: str) -> dict:
 
 def checked_review(review: object) -> dict:
     """The review if every field has its schema shape and no text carries a
-    link or markup; raises otherwise (the caller falls back to the facts)."""
+    link or markup; raises otherwise (the caller falls back to the facts).
+    An over-long field or list is cut to its bound, never a reason to drop
+    the review (2026-11-18 lost one that way)."""
     from pipeline.research_digest import _DOMAIN, _SYMBOL
 
     def text(value: object) -> str:
         if not isinstance(value, str) or _UNSAFE_TEXT.search(value):
             raise ValueError("a review field is not plain text")
-        if len(value.strip()) > MAX_FIELD_CHARS:
-            raise ValueError("a review field is too long")
         if any(not _SYMBOL.fullmatch(token) for token in _DOMAIN.findall(value)):
             raise ValueError("a review field carries a host")
-        return value.strip()
+        value = value.strip()
+        # Over-long is a size problem, not a safety one: cut it, keep the review.
+        return value if len(value) <= MAX_FIELD_CHARS else value[:MAX_FIELD_CHARS - 1] + "…"
 
     if not isinstance(review, dict) or review.get("verdict") not in VERDICTS:
         raise ValueError("verdict outside the schema")
     issues, proposals, watch = review.get("issues"), review.get("proposals"), review.get("watch")
     if not all(isinstance(v, list) for v in (issues, proposals, watch)):
         raise ValueError("a review list is not a list")
-    if any(len(review[k]) > n for k, n in MAX_ITEMS.items()):
-        raise ValueError("a review list is too long")
+    issues, proposals, watch = (issues[:MAX_ITEMS["issues"]], proposals[:MAX_ITEMS["proposals"]],
+                                watch[:MAX_ITEMS["watch"]])  # over-long lists are cut, not rejected
     for issue in issues:
         if not isinstance(issue, dict) or issue.get("severity") not in SEVERITIES:
             raise ValueError("an issue is malformed")
@@ -904,7 +929,9 @@ def review_day(config: PipelineConfig, day: date, *, broker=None, send=None, run
                     max_watch=MAX_ITEMS["watch"],
                     facts=json.dumps(facts, ensure_ascii=False, default=str))))
             except Exception as exc:
-                logger.warning("daily review: model unavailable (%s) — facts only", type(exc).__name__)
+                # A check's own message names the failed rule (never the model's text).
+                reason = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
+                logger.warning("daily review: model unavailable (%s) — facts only", reason)
         text = render(day, facts, review)
         if len(text) > MAX_MESSAGE_CHARS:  # a backstop: the facts, never a body the webhook may refuse
             logger.warning("daily review: message too long (%d chars) — facts only", len(text))
