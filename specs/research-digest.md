@@ -83,8 +83,9 @@ line) was hard to read: the user asked why a name with no position was
   or `…，本次改为 Y` — its latest scheduled brief-arm decision of the
   session in the 10 calendar days before (manual reruns and the feeds arm
   excluded; no line when there is none). A `停止跟踪（N）` section lists the
-  names analysed on the last day anything was and not analysed now, once,
-  with why: `催化剂 X 分，低于 T` (or `未达触发线`), `简报评估 fail`, `今日不
+  names analysed in the slot just before (the latest earlier date with a
+  funnel snapshot) and not analysed now — so once, on the first slot after
+  the drop — with why: `催化剂 X 分，低于 T` (or `未达触发线`), `简报评估 fail`, `今日不
   在股票池（无简报）`, or the not-analysed group's own label. Held names
   (their own alerts) and core names skipped as unchanged or session-off
   (still followed: they rerun once the brief or price changes) are not

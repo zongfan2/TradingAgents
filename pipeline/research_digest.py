@@ -876,14 +876,28 @@ def continuity_line(previous: Any | None, code: str | None) -> str | None:
     return f"  上次 {str(previous.date)[5:10]}：{before}，{change}"
 
 
+def previous_slot(config: PipelineConfig, session: str, slot_date: date) -> date | None:
+    """The latest earlier date (within CONTINUITY_DAYS) the session has a
+    funnel snapshot for — the slot before this one."""
+    from pipeline.funnel import snapshot_path
+
+    for back in range(1, CONTINUITY_DAYS + 1):
+        day = slot_date - timedelta(days=back)
+        if snapshot_path(config.state_dir, session, day).exists():
+            return day
+    return None
+
+
 def stopped_lines(previous: dict[str, Any], tickers: list, analysed: list, held: set[str] | None,
-                  threshold: str) -> list[str]:
-    """Names analysed on the last day anything was, not analysed now, with
+                  threshold: str, last_slot: date | None = None) -> list[str]:
+    """Names analysed in the slot before (``last_slot``), not analysed now, with
     why (held names have their own alerts; a core name skipped as unchanged
     is still followed). Shown once, on the first slot they drop out."""
-    if not previous:
+    if not previous or last_slot is None:
         return []
-    last_day = max(str(r.date)[:10] for r in previous.values())
+    # Only names analysed in the slot just before: a drop is shown once, on
+    # the first slot after it, even if that slot analysed nothing else.
+    last_day = last_slot.isoformat()
     now = {t.ticker.upper() for t in analysed}
     held_u = {h.upper() for h in (held or set())}
     by_ticker = {t.ticker.upper(): t for t in tickers}
@@ -1176,8 +1190,12 @@ def build_digest(config: PipelineConfig, session: str, slot_date: date, now: dat
             lines.append(f"{t.head()} → 简报评估 fail，未分析")
             if notes.get(t.ticker):
                 lines.append(f"  {notes[t.ticker]}")
+    try:
+        last_slot = previous_slot(config, session, slot_date)
+    except Exception:
+        last_slot = None
     stopped = stopped_lines(previous, tickers, analysed, held,
-                            f"{threshold:g}" if threshold is not None else "触发线")
+                            f"{threshold:g}" if threshold is not None else "触发线", last_slot)
     if stopped:
         lines += ["", f"停止跟踪（{len(stopped)}）"] + stopped
 
