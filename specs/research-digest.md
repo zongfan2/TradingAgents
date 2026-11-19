@@ -78,6 +78,17 @@ line) was hard to read: the user asked why a name with no position was
   SPY 只检查了 5 只持仓，未检查：…`) — SPY read once, the whole check within
   30 s; any failed read costs only those lines (logged). Unknown holdings or the cn
   session give none.
+- **Continuity** (user decision 2026-11-19: names looked unfollowed from
+  one digest to the next): under each analysed name, `上次 MM-DD：X，本次不变`
+  or `…，本次改为 Y` — its latest scheduled brief-arm decision of the
+  session in the 10 calendar days before (manual reruns and the feeds arm
+  excluded; no line when there is none). A `停止跟踪（N）` section lists the
+  names analysed on the last day anything was and not analysed now, once,
+  with why: `催化剂 X 分，低于 T` (or `未达触发线`), `简报评估 fail`, `今日不
+  在股票池（无简报）`, or the not-analysed group's own label. Held names
+  (their own alerts) and core names skipped as unchanged or session-off
+  (still followed: they rerun once the brief or price changes) are not
+  listed.
 - **Macro**: the revision-bound eval verdict and each of sections 1–6's
   Impact direction (one phrase when all six agree), found by the contract's
   heading rule.
@@ -270,3 +281,6 @@ periodic job finishes it, with an age bound so it cannot retry forever.
 9. A Hold-rated held name trailing SPY by more than 3 % since its entry (the
    account's own fills) gets one `PM 评级 Hold，入场以来跑输 SPY` line; a
    failed or missing read costs only that line, logged.
+10. An analysed name shows its previous decision and whether it changed; a
+    name that stops being analysed is listed once with why (not held, not a
+    core name skipped as unchanged).
