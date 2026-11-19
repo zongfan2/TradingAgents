@@ -804,6 +804,11 @@ def _run_review(prompt: str) -> dict:
     return output
 
 
+class ReviewRejected(ValueError):
+    """A review that failed checked_review; its message is the rule's own
+    fixed text, never the model's, so it is safe to log."""
+
+
 def checked_review(review: object) -> dict:
     """The review if every field has its schema shape and no text carries a
     link or markup; raises otherwise (the caller falls back to the facts).
@@ -813,23 +818,23 @@ def checked_review(review: object) -> dict:
 
     def text(value: object) -> str:
         if not isinstance(value, str) or _UNSAFE_TEXT.search(value):
-            raise ValueError("a review field is not plain text")
+            raise ReviewRejected("a review field is not plain text")
         if any(not _SYMBOL.fullmatch(token) for token in _DOMAIN.findall(value)):
-            raise ValueError("a review field carries a host")
+            raise ReviewRejected("a review field carries a host")
         value = value.strip()
         # Over-long is a size problem, not a safety one: cut it, keep the review.
         return value if len(value) <= MAX_FIELD_CHARS else value[:MAX_FIELD_CHARS - 1] + "…"
 
     if not isinstance(review, dict) or review.get("verdict") not in VERDICTS:
-        raise ValueError("verdict outside the schema")
+        raise ReviewRejected("verdict outside the schema")
     issues, proposals, watch = review.get("issues"), review.get("proposals"), review.get("watch")
     if not all(isinstance(v, list) for v in (issues, proposals, watch)):
-        raise ValueError("a review list is not a list")
+        raise ReviewRejected("a review list is not a list")
     issues, proposals, watch = (issues[:MAX_ITEMS["issues"]], proposals[:MAX_ITEMS["proposals"]],
                                 watch[:MAX_ITEMS["watch"]])  # over-long lists are cut, not rejected
     for issue in issues:
         if not isinstance(issue, dict) or issue.get("severity") not in SEVERITIES:
-            raise ValueError("an issue is malformed")
+            raise ReviewRejected("an issue is malformed")
     return {
         "summary": text(review.get("summary")), "verdict": review["verdict"],
         "issues": [{"title": text(i.get("title")), "evidence": text(i.get("evidence")), "severity": i["severity"]}
@@ -929,8 +934,9 @@ def review_day(config: PipelineConfig, day: date, *, broker=None, send=None, run
                     max_watch=MAX_ITEMS["watch"],
                     facts=json.dumps(facts, ensure_ascii=False, default=str))))
             except Exception as exc:
-                # A check's own message names the failed rule (never the model's text).
-                reason = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
+                # Only a check's own message is logged (it names the failed rule);
+                # any other error — an envelope's text included — logs its class.
+                reason = str(exc) if isinstance(exc, ReviewRejected) else type(exc).__name__
                 logger.warning("daily review: model unavailable (%s) — facts only", reason)
         text = render(day, facts, review)
         if len(text) > MAX_MESSAGE_CHARS:  # a backstop: the facts, never a body the webhook may refuse

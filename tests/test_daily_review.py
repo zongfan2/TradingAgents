@@ -1060,3 +1060,22 @@ def test_each_fill_names_the_order_it_came_from(tmp_path):
     assert [(f["symbol"], f["order_kind"]) for f in facts["fills"]] == [
         ("MSFT", "stop"), ("NVDA", "entry"), ("AMD", "unknown")]
     assert "止损单成交" in dr.REVIEW_PROMPT
+
+
+@pytest.mark.unit
+def test_a_failed_model_call_never_writes_its_text_to_the_log(tmp_path, archive, monkeypatch, caplog):
+    import logging
+
+    from pipeline.claude_cli import EnvelopeError
+
+    caplog.set_level(logging.WARNING, logger="pipeline.daily_review")
+    cfg = config(tmp_path)
+    slot(cfg)
+    monkeypatch.setattr(dr, "closes", lambda tickers, fetch=None, **k: prices_for("NVDA", "FN"))
+
+    def failing(prompt):
+        raise EnvelopeError("claude -p returned error result: see evil.com secret")
+
+    text = dr.review_day(cfg, DAY, send=None, runner=failing)
+    assert "复盘模型不可用" in text
+    assert "model unavailable (EnvelopeError)" in caplog.text and "evil" not in caplog.text
