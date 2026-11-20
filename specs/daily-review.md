@@ -101,7 +101,11 @@ prompt):
   close, is `later-bar` instead); `previous-close-missing` — the day is
   listed but the session before it has an unusable close; `later-bar`,
   `before-close`, `no-prior-close`, `quote-error`, `quote-trade-date`,
-  `quote-before-close`, `quote-unusable`, `missed-session`. Rendering: only
+  `quote-before-close`, `quote-unusable`, `missed-session` (a series that missed the session before the day too —
+  ^HSI lagged two sessions at review time on 5 of 6 days to 2026-11-19 — is
+  filled for both when another series of its market dates exactly one
+  missed session and the quote's previous close is within 15 % of the last
+  listed close; anything else stays unfilled). Rendering: only
   `no-session`, or a `quote-trade-date` earlier than the day, of a cn/hk
   name whose market's benchmark (510300.SS, ^HSI) shows the same gap goes
   under the ℹ️ 可能休市 note; every other reason — a US name, a single name
@@ -119,6 +123,12 @@ prompt):
   prompt has the model judge patterns on 3d/5d — 1d is one session's tape
   (2026-11-09: a sector rally made Underweight look inverted on 1d while its
   3d/5d agreed) — and never propose a change from 1d against 3d/5d.
+
+The prompt also lists the trading rules in force (`RULES_IN_EFFECT`: each with
+the code the pipeline emits, which a test checks still exists; plus the
+rules without a code) and asks the model not to propose a live rule as new
+(user decision 2026-11-20: reviews kept proposing the mixed-brief gate
+after it went live).
 
 One model call (the evaluator's model, `claude_command(..., role="eval")`,
 schema-bound JSON, 300 s timeout, usage component `daily_review`) writes, in

@@ -1079,3 +1079,54 @@ def test_a_failed_model_call_never_writes_its_text_to_the_log(tmp_path, archive,
     text = dr.review_day(cfg, DAY, send=None, runner=failing)
     assert "复盘模型不可用" in text
     assert "model unavailable (EnvelopeError)" in caplog.text and "evil" not in caplog.text
+
+
+@pytest.mark.unit
+def test_a_benchmark_two_sessions_behind_is_filled_from_its_markets_calendar():
+    d2, d3 = date(2026, 11, 2), date(2026, 11, 3)
+    bars = {"^HSI": [(d2, 24000.0)],  # Yahoo lags: no 11-03, no 11-04 yet
+            "0700.HK": [(d2, 500.0), (d3, 505.0), (DAY, 510.0)]}
+    stats = {}
+    out = dr.closes({"^HSI", "0700.HK"}, fetch=lambda t: bars[t], day=DAY, now=AFTER_ALL_CLOSES, stats=stats,
+                    quote=lambda t: (24100.0, CLOSE_TRADE["^HSI"], 24050.0))
+    assert out["^HSI"] == [(d2, 24000.0), (d3, 24050.0), (DAY, 24100.0)]
+    assert dr.day_change(out["^HSI"], DAY) == pytest.approx((24100 / 24050 - 1) * 100)
+    assert stats["quote_filled_tickers"] == ["^HSI"] and "^HSI" not in stats["unfilled"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("hsi", "other", "previous"), [
+    ([(date(2026, 10, 29), 24000.0)],  # two sessions missing (10-30 and 11-03): never guessed
+     [(date(2026, 10, 29), 500.0), (date(2026, 10, 30), 501.0), (date(2026, 11, 3), 505.0), (DAY, 510.0)], 24050.0),
+    ([(date(2026, 11, 2), 24000.0)],  # the quote's previous close is implausibly far from the last listed one
+     [(date(2026, 11, 2), 500.0), (date(2026, 11, 3), 505.0), (DAY, 510.0)], 30000.0),
+    ([(date(2026, 11, 2), 24000.0)],  # no other series of the market: no calendar
+     None, 24050.0),
+])
+def test_a_missed_session_is_never_guessed(hsi, other, previous):
+    bars = {"^HSI": hsi, **({"0700.HK": other} if other else {})}
+    stats = {}
+    out = dr.closes(set(bars), fetch=lambda t: bars[t], day=DAY, now=AFTER_ALL_CLOSES, stats=stats,
+                    quote=lambda t: (24100.0, CLOSE_TRADE["^HSI"], previous))
+    assert out["^HSI"] == hsi and stats["unfilled"]["^HSI"] == "missed-session"
+
+
+@pytest.mark.unit
+def test_every_rule_in_the_prompt_still_exists_in_the_pipeline():
+    from pathlib import Path as _Path
+
+    source = "".join((_Path(__file__).parents[1] / "pipeline" / name).read_text(encoding="utf-8")
+                     for name in ("execution_adapter.py", "analysis_runner.py"))
+    for code, _text in dr.RULES_IN_EFFECT:
+        assert f'"{code}"' in source, code
+    assert '"low-reward-risk"' not in source  # retired 2026-11-17: only RULES_WITHOUT_CODE may name it
+
+
+@pytest.mark.unit
+def test_the_review_prompt_lists_the_rules_in_force(tmp_path, archive, monkeypatch):
+    cfg = config(tmp_path)
+    slot(cfg)
+    monkeypatch.setattr(dr, "closes", lambda tickers, fetch=None, **k: prices_for("NVDA", "FN"))
+    prompts = []
+    dr.review_day(cfg, DAY, send=None, runner=lambda prompt: prompts.append(prompt) or review())
+    assert "当前已生效的交易规则" in prompts[0] and "简报方向为「分歧」时不开新仓" in prompts[0]
