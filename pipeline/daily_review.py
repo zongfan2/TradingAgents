@@ -163,8 +163,13 @@ def _yahoo_quote(ticker: str) -> tuple[float, datetime, float]:
             float(meta["previousClose"]))
 
 
+#: A missed previous session is filled from the quote's previous close only
+#: when it lies within this fraction of the series' last listed close.
+MISSED_SESSION_MAX_MOVE = 0.15
+
+
 def fill_day_close(ticker: str, series: list, day: date, now: datetime, quote=None,
-                   reasons: dict | None = None) -> tuple[list, bool]:
+                   reasons: dict | None = None, calendar: list | None = None) -> tuple[list, bool]:
     """Yahoo often lists the latest session late (a NaN close, or no row at
     all — 510300.SS and ^HSI on 2026-11-10). After that market's close, the
     quote's regular-market price is the day's close when its own trade time
@@ -173,7 +178,15 @@ def fill_day_close(ticker: str, series: list, day: date, now: datetime, quote=No
     previous close equals the series' last close before the day (the series
     misses no session). Never with a later bar; a listed close is never
     replaced. Returns the series and whether it was filled; ``reasons``
-    receives why a missing day close was not filled (the ticker's key)."""
+    receives why a missing day close was not filled (the ticker's key).
+
+    ``calendar`` (the session dates another series of the same market
+    lists) also fills ONE missed session before the day — ^HSI lagged two
+    sessions at review time on 5 of 6 days to 2026-11-19: when the calendar's
+    session right before the day is missing from the series, the session
+    before that is the series' last listed one, and the quote's previous
+    close is within MISSED_SESSION_MAX_MOVE of it, that close is the missed
+    session's."""
     def unfilled(why: str) -> tuple[list, bool]:
         if reasons is not None:
             reasons[ticker] = why
@@ -211,6 +224,15 @@ def fill_day_close(ticker: str, series: list, day: date, now: datetime, quote=No
     if not all(math.isfinite(v) and v > 0 for v in (last, previous)):
         return unfilled("quote-unusable")
     if abs(previous / prior[-1] - 1) > QUOTE_PREV_TOLERANCE:
+        sessions = sorted({d for d in (calendar or ()) if d < day})
+        listed = [d for d, c in series if d < day and c is not None]
+        missed = sessions[-1] if sessions else None
+        if (missed is not None and len(sessions) >= 2 and listed and sessions[-2] == listed[-1]
+                and not any(d == missed for d, _c in series)
+                and abs(previous / prior[-1] - 1) <= MISSED_SESSION_MAX_MOVE):
+            # Exactly one session missing, dated by the market's own calendar.
+            rows = [(d, c) for d, c in series if d not in (day, missed)] + [(missed, previous), (day, last)]
+            return sorted(rows, key=lambda bar: bar[0]), True
         return unfilled("missed-session")  # the series lacks the session before the day
     # Sorted by date only: a duplicate date with an unusable close (None)
     # must never be compared by its close.
@@ -265,6 +287,18 @@ def closes(tickers: set[str], fetch=None, budget_s: float = PRICE_BUDGET_S, *, f
         else:
             failed += 1
             failed_names[ticker] = "no-usable-close"
+    # Second pass: a series that missed the session before the day is dated by
+    # the other series of its market (one more quote read each, rare).
+    for ticker in [t for t, why in unfilled.items() if why == "missed-session" and t in out]:
+        market = _market(ticker)
+        calendar = sorted({d for other, series in out.items() if other != ticker and _market(other) == market
+                           for d, c in series if c is not None})
+        reasons: dict[str, str] = {}
+        series, was_filled = fill_day_close(ticker, out[ticker], day, now, quote, reasons, calendar)
+        if was_filled:
+            out[ticker] = series
+            filled.append(ticker)
+            del unfilled[ticker]
     if stats is not None:
         stats.update(skipped=skipped, failed=failed, quote_filled=len(filled), quote_filled_tickers=sorted(filled),
                      failed_tickers=dict(sorted(failed_names.items())), unfilled=dict(sorted(unfilled.items())))
@@ -725,6 +759,30 @@ REVIEW_SCHEMA = {
     "additionalProperties": False,
 }
 
+#: The trading rules in force, for the review prompt (user decision
+#: 2026-11-20: reviews kept proposing rules already live). Each entry is
+#: (the code the pipeline emits, the rule in words); a test checks every code
+#: still exists in the pipeline, so a retired rule cannot linger here.
+RULES_IN_EFFECT = (
+    ("mixed-brief", "简报方向为「分歧」时不开新仓、不加仓（只拦买入，分析照常；2026-11-18 起）"),
+    ("below-entry-zone", "报价低于计划入场区间下沿 1% 以上时不买（跳空跌穿的计划作废）"),
+    ("maintain", "已持仓且没有加仓意图时，BUY 只是更新看法，不下单"),
+    ("stale-quote", "报价过期、不可交易、非交易日等行情守卫不通过时不下单"),
+    ("below-threshold", "机会层股票催化剂分数低于 7 不分析"),
+    ("core-unchanged", "核心股简报无变化、上次 HOLD、价格未大动时跳过；单日 ≥5% 或累计 ≥8% 的价格异动强制重新分析"),
+    ("core-session-off", "A股/港股核心股按配置不分析，A股/港股只研究不下单"),
+)
+RULES_WITHOUT_CODE = (
+    "每笔买入都是带止损和第一目标止盈的括号单，仓位按交易计划给出的账户风险比例（0.1%–2%）计算；",
+    "持仓股自动并入核心层，每个时段都分析；简报偏空、分析出错、未分析或 PM 评级 Hold 且入场以来跑输 SPY 超过 3% 时，研究摘要发持仓提醒，是否卖出由人决定；",
+    "盈亏比规则（第一目标不足 1R 不买）已于 2026-11-17 取消。",
+)
+
+
+def rules_text() -> str:
+    return "\n".join([f"- {text}" for _code, text in RULES_IN_EFFECT] + [f"- {text}" for text in RULES_WITHOUT_CODE])
+
+
 REVIEW_PROMPT = """你是一个交易研究流水线的复盘员。下面是 {date} 这一天的结构化事实（JSON），
 包括：美股（us）与 A股/港股（cn）每只股票的简报方向（impact: 偏多/偏空/中性/分歧）、催化剂分数、
 评估结论、触发代码、分析结论（decision: BUY/SELL/HOLD/ERROR）与 PM 评级、执行结果、
@@ -758,6 +816,10 @@ brief_used 不为空表示分析用的是那一天的旧简报（当天简报缺
 不要写网址、域名或任何 HTML/标记标签（比较可以写"大于/小于"或 >、<）；
 每段文字不超过 {max_chars} 字，问题最多 {max_issues} 条、建议最多 {max_proposals} 条、观察最多 {max_watch} 条。
 你只提建议，任何改动都由人决定。
+
+当前已生效的交易规则如下。不要把已经生效的规则当作新建议提出；
+如果数据显示某条规则该调整，请明确指出是哪一条以及依据：
+{rules}
 
 {facts}"""
 
@@ -931,7 +993,7 @@ def review_day(config: PipelineConfig, day: date, *, broker=None, send=None, run
                 review = checked_review((runner or _run_review)(REVIEW_PROMPT.format(
                     date=day.isoformat(), sessions=facts["scoreboard"]["sessions"], max_chars=MAX_FIELD_CHARS,
                     max_issues=MAX_ITEMS["issues"], max_proposals=MAX_ITEMS["proposals"],
-                    max_watch=MAX_ITEMS["watch"],
+                    max_watch=MAX_ITEMS["watch"], rules=rules_text(),
                     facts=json.dumps(facts, ensure_ascii=False, default=str))))
             except Exception as exc:
                 # Only a check's own message is logged (it names the failed rule);
