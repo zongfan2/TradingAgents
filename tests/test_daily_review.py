@@ -694,7 +694,7 @@ def test_the_scoreboard_counts_multi_session_excess_once_closed(tmp_path):
 @pytest.mark.unit
 def test_the_cn_benchmark_is_the_csi300_etf():
     assert dr.BENCHMARKS["cn"] == "510300.SS"
-    assert dr._benchmark("600183.SS", "cn") == "510300.SS" and dr._benchmark("0700.HK", "cn") == "^HSI"
+    assert dr._benchmark("600183.SS", "cn") == "510300.SS" and dr._benchmark("0700.HK", "cn") == "2800.HK"
 
 
 @pytest.mark.unit
@@ -953,11 +953,11 @@ def test_the_message_names_failed_reads_and_unfilled_closes():
 
 @pytest.mark.unit
 def test_a_likely_holiday_is_a_note_and_long_lists_are_counted():
-    unfilled = {"^HSI": "quote-trade-date:2026-11-03", "510300.SS": "missed-session",
+    unfilled = {"2800.HK": "quote-trade-date:2026-11-03", "510300.SS": "missed-session",
                 **{f"T{i}": "quote-unusable" for i in range(6)}}
     facts = {"date": DAY.isoformat(), "us": {}, "cn": {}, "price_reads": {"skipped": 0, "failed": 0, "unfilled": unfilled}}
     text = dr.render(DAY, facts, None)
-    assert "ℹ️ 可能休市（报价停在前一交易日）：^HSI（quote-trade-date:2026-11-03）" in text
+    assert "ℹ️ 可能休市（报价停在前一交易日）：2800.HK（quote-trade-date:2026-11-03）" in text
     assert "⚠️ 当天收盘或涨跌缺失：510300.SS（missed-session）" in text and "等 7 只" in text
 
 
@@ -965,11 +965,11 @@ def test_a_likely_holiday_is_a_note_and_long_lists_are_counted():
 def test_a_day_skipped_between_two_listed_sessions_reads_as_no_session():
     stats = {}
     after_next = datetime(2026, 11, 5, 10, 0, tzinfo=timezone.utc)  # 18:00 Hong Kong: 11-05 finished
-    dr.closes({"^HSI"}, fetch=lambda t: [(date(2026, 11, 3), 24000.0), (date(2026, 11, 5), 24100.0)],
+    dr.closes({"2800.HK"}, fetch=lambda t: [(date(2026, 11, 3), 24000.0), (date(2026, 11, 5), 24100.0)],
               day=DAY, now=after_next, stats=stats, quote=lambda t: (_ for _ in ()).throw(AssertionError()))
-    assert stats["unfilled"] == {"^HSI": "no-session"}
+    assert stats["unfilled"] == {"2800.HK": "no-session"}
     facts = {"date": DAY.isoformat(), "us": {}, "cn": {}, "price_reads": {"skipped": 0, "failed": 0, **stats}}
-    assert "ℹ️ 可能休市（报价停在前一交易日）：^HSI（no-session）" in dr.render(DAY, facts, None)
+    assert "ℹ️ 可能休市（报价停在前一交易日）：2800.HK（no-session）" in dr.render(DAY, facts, None)
 
 
 @pytest.mark.unit
@@ -982,11 +982,11 @@ def test_a_listed_day_with_an_unusable_close_is_a_fault_not_a_holiday():
 
 @pytest.mark.unit
 def test_a_us_names_gap_stays_a_fault():
-    unfilled = {"SPY": "no-session", "NVDA": "quote-trade-date:2026-11-03", "^HSI": "no-session"}
+    unfilled = {"SPY": "no-session", "NVDA": "quote-trade-date:2026-11-03", "2800.HK": "no-session"}
     facts = {"date": DAY.isoformat(), "us": {}, "cn": {}, "price_reads": {"skipped": 0, "failed": 0, "unfilled": unfilled}}
     text = dr.render(DAY, facts, None)
     assert "⚠️ 当天收盘或涨跌缺失：SPY（no-session）、NVDA（quote-trade-date:2026-11-03）" in text
-    assert "ℹ️ 可能休市（报价停在前一交易日）：^HSI（no-session）" in text
+    assert "ℹ️ 可能休市（报价停在前一交易日）：2800.HK（no-session）" in text
 
 
 @pytest.mark.unit
@@ -999,13 +999,13 @@ def test_a_missing_previous_close_is_named():
 
 @pytest.mark.unit
 def test_a_suspended_name_in_a_market_that_traded_is_a_fault():
-    unfilled = {"0700.HK": "quote-trade-date:2026-11-03"}  # ^HSI traded normally
+    unfilled = {"0700.HK": "quote-trade-date:2026-11-03"}  # 2800.HK traded normally
     facts = {"date": DAY.isoformat(), "us": {}, "cn": {}, "price_reads": {"skipped": 0, "failed": 0, "unfilled": unfilled}}
     text = dr.render(DAY, facts, None)
     assert "⚠️ 当天收盘或涨跌缺失：0700.HK（quote-trade-date:2026-11-03）" in text and "可能休市" not in text
-    both = {**unfilled, "^HSI": "no-session"}  # the market itself did not trade: both are the holiday note
+    both = {**unfilled, "2800.HK": "no-session"}  # the market itself did not trade: both are the holiday note
     text = dr.render(DAY, {**facts, "price_reads": {"skipped": 0, "failed": 0, "unfilled": both}}, None)
-    assert "ℹ️ 可能休市（报价停在前一交易日）：0700.HK（quote-trade-date:2026-11-03）、^HSI（no-session）" in text
+    assert "ℹ️ 可能休市（报价停在前一交易日）：0700.HK（quote-trade-date:2026-11-03）、2800.HK（no-session）" in text
 
 
 @pytest.mark.unit
@@ -1082,19 +1082,6 @@ def test_a_failed_model_call_never_writes_its_text_to_the_log(tmp_path, archive,
 
 
 @pytest.mark.unit
-def test_a_benchmark_two_sessions_behind_is_filled_from_its_markets_calendar():
-    d2, d3 = date(2026, 11, 2), date(2026, 11, 3)
-    bars = {"^HSI": [(d2, 24000.0)],  # Yahoo lags: no 11-03, no 11-04 yet
-            "0700.HK": [(d2, 500.0), (d3, 505.0), (DAY, 510.0)]}
-    stats = {}
-    out = dr.closes({"^HSI", "0700.HK"}, fetch=lambda t: bars[t], day=DAY, now=AFTER_ALL_CLOSES, stats=stats,
-                    quote=lambda t: (24100.0, CLOSE_TRADE["^HSI"], 24050.0))
-    assert out["^HSI"] == [(d2, 24000.0), (d3, 24050.0), (DAY, 24100.0)]
-    assert dr.day_change(out["^HSI"], DAY) == pytest.approx((24100 / 24050 - 1) * 100)
-    assert stats["quote_filled_tickers"] == ["^HSI"] and "^HSI" not in stats["unfilled"]
-
-
-@pytest.mark.unit
 @pytest.mark.parametrize(("hsi", "other", "previous"), [
     ([(date(2026, 10, 29), 24000.0)],  # two sessions missing (10-30 and 11-03): never guessed
      [(date(2026, 10, 29), 500.0), (date(2026, 10, 30), 501.0), (date(2026, 11, 3), 505.0), (DAY, 510.0)], 24050.0),
@@ -1130,3 +1117,31 @@ def test_the_review_prompt_lists_the_rules_in_force(tmp_path, archive, monkeypat
     prompts = []
     dr.review_day(cfg, DAY, send=None, runner=lambda prompt: prompts.append(prompt) or review())
     assert "当前已生效的交易规则" in prompts[0] and "简报方向为「分歧」时不开新仓" in prompts[0]
+
+
+@pytest.mark.unit
+def test_the_hk_benchmark_is_the_tracker_fund_and_a_missed_session_is_never_guessed():
+    assert dr.BENCHMARKS["hk"] == "2800.HK"
+    series = [(date(2026, 11, 2), 24000.0)]  # lacks 11-03 and 11-04
+    reasons = {}
+    out, filled = dr.fill_day_close("2800.HK", series, DAY, AFTER_ALL_CLOSES,
+                                    lambda t: (24100.0, CLOSE_TRADE["^HSI"], 24050.0), reasons)
+    assert (out, filled, reasons) == (series, False, {"2800.HK": "missed-session"})
+
+
+@pytest.mark.unit
+def test_the_review_reads_split_adjusted_history():
+    import pandas as pd
+
+    from pipeline import price_tape
+
+    frame = pd.DataFrame({"Close": [100.0, 100.5], "Stock Splits": [0.0, 8.0]},  # Yahoo adjusts Close
+                         index=pd.to_datetime(["2026-11-19", "2026-11-20"]))
+    with pytest.raises(ValueError):
+        price_tape.closes_from_history("SNDK", frame)  # the analysis tape stays strict
+    assert [c for _d, c in price_tape.closes_from_history("SNDK", frame, allow_splits=True)] == [100.0, 100.5]
+
+
+@pytest.mark.unit
+def test_the_rules_say_when_a_price_move_triggers():
+    assert "到下一个时段才触发" in dr.rules_text()

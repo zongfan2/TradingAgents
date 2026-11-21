@@ -46,7 +46,11 @@ MISSED_MOVE_PCT = 5.0
 REVIEW_TIMEOUT_S = 300.0
 #: cn: the CSI 300 ETF — Yahoo serves the CSI 300 index (000300.SS) as a
 #: single latest bar, so the index never had a day change (2026-11-09).
-BENCHMARKS = {"us": "SPY", "cn": "510300.SS", "hk": "^HSI"}
+#: hk: the Tracker Fund (2800.HK, the HSI ETF) — Yahoo lists ^HSI two
+#: sessions late at review time and its quote's previousClose lags a session
+#: (2026-11-20: 11-18's close on the 11-20 quote), so a missing ^HSI close
+#: could never be filled safely; the ETF's quote is right, like 510300.SS's.
+BENCHMARKS = {"us": "SPY", "cn": "510300.SS", "hk": "2800.HK"}
 #: Scoreboard horizons in sessions, from the close before the decision day.
 HORIZONS = (1, 3, 5)
 VERDICTS = ("需要优化", "继续观察", "暂不调整")
@@ -163,13 +167,8 @@ def _yahoo_quote(ticker: str) -> tuple[float, datetime, float]:
             float(meta["previousClose"]))
 
 
-#: A missed previous session is filled from the quote's previous close only
-#: when it lies within this fraction of the series' last listed close.
-MISSED_SESSION_MAX_MOVE = 0.15
-
-
 def fill_day_close(ticker: str, series: list, day: date, now: datetime, quote=None,
-                   reasons: dict | None = None, calendar: list | None = None) -> tuple[list, bool]:
+                   reasons: dict | None = None) -> tuple[list, bool]:
     """Yahoo often lists the latest session late (a NaN close, or no row at
     all — 510300.SS and ^HSI on 2026-11-10). After that market's close, the
     quote's regular-market price is the day's close when its own trade time
@@ -178,15 +177,7 @@ def fill_day_close(ticker: str, series: list, day: date, now: datetime, quote=No
     previous close equals the series' last close before the day (the series
     misses no session). Never with a later bar; a listed close is never
     replaced. Returns the series and whether it was filled; ``reasons``
-    receives why a missing day close was not filled (the ticker's key).
-
-    ``calendar`` (the session dates another series of the same market
-    lists) also fills ONE missed session before the day — ^HSI lagged two
-    sessions at review time on 5 of 6 days to 2026-11-19: when the calendar's
-    session right before the day is missing from the series, the session
-    before that is the series' last listed one, and the quote's previous
-    close is within MISSED_SESSION_MAX_MOVE of it, that close is the missed
-    session's."""
+    receives why a missing day close was not filled (the ticker's key)."""
     def unfilled(why: str) -> tuple[list, bool]:
         if reasons is not None:
             reasons[ticker] = why
@@ -224,16 +215,10 @@ def fill_day_close(ticker: str, series: list, day: date, now: datetime, quote=No
     if not all(math.isfinite(v) and v > 0 for v in (last, previous)):
         return unfilled("quote-unusable")
     if abs(previous / prior[-1] - 1) > QUOTE_PREV_TOLERANCE:
-        sessions = sorted({d for d in (calendar or ()) if d < day})
-        listed = [d for d, c in series if d < day and c is not None]
-        missed = sessions[-1] if sessions else None
-        if (missed is not None and len(sessions) >= 2 and listed and sessions[-2] == listed[-1]
-                and not any(d == missed for d, _c in series)
-                and abs(previous / prior[-1] - 1) <= MISSED_SESSION_MAX_MOVE):
-            # Exactly one session missing, dated by the market's own calendar.
-            rows = [(d, c) for d, c in series if d not in (day, missed)] + [(missed, previous), (day, last)]
-            return sorted(rows, key=lambda bar: bar[0]), True
-        return unfilled("missed-session")  # the series lacks the session before the day
+        # The series lacks the session before the day (or the quote's previous
+        # close is stale): never guessed — a quote's previousClose is not
+        # trusted to date a missing session (^HSI's lagged one, 2026-11-20).
+        return unfilled("missed-session")
     # Sorted by date only: a duplicate date with an unusable close (None)
     # must never be compared by its close.
     return sorted([(d, c) for d, c in series if d != day] + [(day, last)], key=lambda bar: bar[0]), True
@@ -266,7 +251,9 @@ def closes(tickers: set[str], fetch=None, budget_s: float = PRICE_BUDGET_S, *, f
             logger.warning("daily review: price budget spent — %d tickers skipped", skipped)
             break
         try:
-            bars = (fetch or price_tape.fetch_daily_closes)(ticker)
+            # Split-adjusted closes are right for returns: a split (SNDK 8:1,
+            # 2026-11-20) must not cost the review two months of a name.
+            bars = (fetch or (lambda t: price_tape.fetch_daily_closes(t, allow_splits=True)))(ticker)
         except Exception as exc:
             logger.warning("daily review: closes for %s unavailable (%s)", ticker, type(exc).__name__)
             failed += 1
@@ -287,18 +274,6 @@ def closes(tickers: set[str], fetch=None, budget_s: float = PRICE_BUDGET_S, *, f
         else:
             failed += 1
             failed_names[ticker] = "no-usable-close"
-    # Second pass: a series that missed the session before the day is dated by
-    # the other series of its market (one more quote read each, rare).
-    for ticker in [t for t, why in unfilled.items() if why == "missed-session" and t in out]:
-        market = _market(ticker)
-        calendar = sorted({d for other, series in out.items() if other != ticker and _market(other) == market
-                           for d, c in series if c is not None})
-        reasons: dict[str, str] = {}
-        series, was_filled = fill_day_close(ticker, out[ticker], day, now, quote, reasons, calendar)
-        if was_filled:
-            out[ticker] = series
-            filled.append(ticker)
-            del unfilled[ticker]
     if stats is not None:
         stats.update(skipped=skipped, failed=failed, quote_filled=len(filled), quote_filled_tickers=sorted(filled),
                      failed_tickers=dict(sorted(failed_names.items())), unfilled=dict(sorted(unfilled.items())))
@@ -769,7 +744,8 @@ RULES_IN_EFFECT = (
     ("maintain", "已持仓且没有加仓意图时，BUY 只是更新看法，不下单"),
     ("stale-quote", "报价过期、不可交易、非交易日等行情守卫不通过时不下单"),
     ("below-threshold", "机会层股票催化剂分数低于 7 不分析"),
-    ("core-unchanged", "核心股简报无变化、上次 HOLD、价格未大动时跳过；单日 ≥5% 或累计 ≥8% 的价格异动强制重新分析"),
+    ("core-unchanged", "核心股简报无变化、上次 HOLD、价格未大动时跳过；单日 ≥5% 或累计 ≥8% 的价格异动强制重新分析 ——"
+                       "异动按上一交易日收盘判断，分析在开盘前完成，所以当天盘中的大涨大跌要到下一个时段才触发，这是预期行为"),
     ("core-session-off", "A股/港股核心股按配置不分析，A股/港股只研究不下单"),
 )
 RULES_WITHOUT_CODE = (
@@ -792,7 +768,7 @@ quote_filled 是 Yahoo 日线尚未更新、用收盘后实时报价补上当天
 fills 每笔带 order_kind：entry 为入场，stop 为止损单成交，target 为止盈单成交，close 为分析给出的卖出，
 other 为其他来源（如人工），unknown 为查不到；止损和止盈是计划内的成交，不是异常；
 failed_tickers / unfilled 列出读取失败和未能补价的股票及原因，提到行情缺失时引用它们；
-A股/港股的基准（510300.SS、^HSI）的 unfilled 原因是 no-session，或 quote-trade-date 且日期早于当天的，
+A股/港股的基准（510300.SS、2800.HK）的 unfilled 原因是 no-session，或 quote-trade-date 且日期早于当天的，
 多半是该市场当天休市，同市场个股的同类原因随之视为休市；基准正常时个股的这类原因多半是停牌或缺数据；
 美股（复盘只在美股交易日运行）出现这类原因则是数据故障；previous-close-missing 表示当天收盘有但前一日收盘缺失，涨跌算不出）；
 core_analysed 为 false 的市场按配置只做催化剂触发的研究，核心股不采集、不分析
