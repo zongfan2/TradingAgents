@@ -51,7 +51,7 @@ UNAVAILABLE = (
 )
 
 
-def fetch_daily_closes(ticker: str) -> list[Bar]:
+def fetch_daily_closes(ticker: str, allow_splits: bool = False) -> list[Bar]:
     """Daily closes for the last ~2 months via yfinance (the pool builder's
     source). ``auto_adjust=False`` leaves dividends out, but yfinance still
     split-adjusts every Close before a split: a split on or after a tape
@@ -61,13 +61,16 @@ def fetch_daily_closes(ticker: str) -> list[Bar]:
     the window costs one tape, a rare and safe miss)."""
     import yfinance as yf  # deferred: pipeline components stay import-light
 
-    return closes_from_history(ticker, yf.Ticker(ticker).history(period="2mo", interval="1d", auto_adjust=False))
+    return closes_from_history(ticker, yf.Ticker(ticker).history(period="2mo", interval="1d", auto_adjust=False),
+                               allow_splits=allow_splits)
 
 
-def closes_from_history(ticker: str, frame) -> list[Bar]:
+def closes_from_history(ticker: str, frame, allow_splits: bool = False) -> list[Bar]:
     """``(date, close)`` bars from a yfinance history frame; raises on any
-    split in it (see :func:`fetch_daily_closes`)."""
-    if "Stock Splits" in frame and (frame["Stock Splits"].fillna(0) != 0).any():
+    split in it (see :func:`fetch_daily_closes`) unless ``allow_splits`` —
+    for a reader that only needs returns, which split-adjusted closes keep
+    right (the daily review)."""
+    if not allow_splits and "Stock Splits" in frame and (frame["Stock Splits"].fillna(0) != 0).any():
         raise ValueError(f"{ticker}: stock split in the fetched history (split-adjusted closes)")
     bars: list[Bar] = []
     for index, row in frame.iterrows():

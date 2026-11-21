@@ -75,7 +75,12 @@ prompt):
 - per us/cn name of the day: brief impact word, catalyst score, eval verdict,
   trigger code, decision and PM rating, execute outcome, the day's close
   change and excess vs the benchmark (SPY / 510300.SS — the CSI 300 ETF: Yahoo serves the 000300.SS index
-  as a single latest bar — / ^HSI);
+  as a single latest bar — / 2800.HK — the Tracker Fund, the HSI ETF: Yahoo
+  lists ^HSI two sessions late at review time and its quote's previous close
+  lags a session, so a missing ^HSI close could never be filled safely);
+  the review reads split-adjusted history (returns stay right across a
+  split — SNDK split 8:1 on 2026-11-20 — where the analysis price tape still
+  refuses one);
 - names without a decision that moved ≥ 5 % that day (missed moves);
 - the macro brief's six Impact words and eval verdict;
 - account equity change, fills, open positions (us); each fill names the
@@ -101,13 +106,12 @@ prompt):
   close, is `later-bar` instead); `previous-close-missing` — the day is
   listed but the session before it has an unusable close; `later-bar`,
   `before-close`, `no-prior-close`, `quote-error`, `quote-trade-date`,
-  `quote-before-close`, `quote-unusable`, `missed-session` (a series that missed the session before the day too —
-  ^HSI lagged two sessions at review time on 5 of 6 days to 2026-11-19 — is
-  filled for both when another series of its market dates exactly one
-  missed session and the quote's previous close is within 15 % of the last
-  listed close; anything else stays unfilled). Rendering: only
+  `quote-before-close`, `quote-unusable`, `missed-session` (the series
+  also lacks the session before the day, or the quote's previous close is
+  stale — never guessed: a two-session fill tried 2026-11-20 was withdrawn
+  because ^HSI's quote carried a previous close one session old). Rendering: only
   `no-session`, or a `quote-trade-date` earlier than the day, of a cn/hk
-  name whose market's benchmark (510300.SS, ^HSI) shows the same gap goes
+  name whose market's benchmark (510300.SS, 2800.HK) shows the same gap goes
   under the ℹ️ 可能休市 note; every other reason — a US name, a single name
   of a market that traded (a suspension), `previous-close-missing` — is
   under ⚠️ 当天收盘或涨跌缺失.
